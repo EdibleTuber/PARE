@@ -16,3 +16,9 @@ def test_hello_command_registered():
     from pare.agent import PareAgent
     from pare.commands.hello import Hello
     assert Hello in PareAgent.commands
+
+
+def test_static_analyze_registered():
+    from pare.agent import PareAgent
+    from pare.tools import StaticAnalyze
+    assert StaticAnalyze in PareAgent.tools

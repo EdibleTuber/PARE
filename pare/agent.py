@@ -14,21 +14,25 @@ from __future__ import annotations
 from agent_core.agent import Agent, HandlerContext
 
 from pare.commands.hello import Hello
+from pare.tools import StaticAnalyze
+from pare.tools._http import ApkReAgentsClient
 
 
 class PareAgent(Agent):
     name = "pare"
     env_prefix = "PARE_"
 
-    tools = []          # add Tool subclasses here
+    tools = [StaticAnalyze]  # add Tool subclasses here
     commands = [Hello]  # framework builtins serve /help, /clear, etc.
 
     def setup(self) -> None:
-        """Construct domain-specific resources here. Framework managers
-        (profile, wisdom, channels, inference, retrieval, websearch,
-        allowlist, approval_registry, learning, fetcher, config) are
-        already populated on self at this point."""
-        pass
+        """Construct the apk_re_agents client (long-lived; reused per call).
+
+        Framework managers (profile, wisdom, channels, inference, retrieval,
+        websearch, allowlist, approval_registry, learning, fetcher, config)
+        are already populated on self at this point.
+        """
+        self.apk_re_agents_client = ApkReAgentsClient(self.config.apk_re_agents_url)
 
     def system_prompt(self, ctx: HandlerContext) -> str:
         from pathlib import Path
