@@ -551,56 +551,90 @@ Out of scope for v1 testing:
 
 ## 11. Phased Delivery
 
-The v1 spec is significant. Phases are scoped so each ends with something demonstrable.
+The v1 spec is significant. Phases are scoped so each ends with something demonstrable. Original 8-phase plan was resequenced 2026-05-16 to (a) insert MCP execution-layer work and apk_re_agents hybrid integration before Android (apk_re_agents is the easier first MCP consumer), and (b) split iOS into four phases mirroring Android's structure rather than collapsing it into one.
 
-**Phase 0 — `agent_core` extraction PR (foundational)**
+**Phase 0 — `agent_core` extraction PR (foundational)** ✅ *Done — `agent_core@v1.2.0`*
 - Add `register_tools(self) -> list[Tool]` lifecycle hook to `Agent` for dynamic registration after MCP discovery (PAL's declarative `tools = [...]` still supported).
-- Add worker contract module: `WorkerRegistry`, `RiskGate` (declared-tier + override-up only), `HITLProposer`, audit log schema with `session_guid` field.
+- Add worker contract data layer: `WorkerRegistry`, `RiskGate` (declared-tier + override-up only), audit log schema with `session_guid` field. (HITL primitive already in agent_core's `approval_registry`.)
 - Extract PAL's GUID boundary wrapping (`pal/boundary.py`) into `agent_core` as a shared primitive — both PAL and PARE consume it.
 - Add conformance pytest suite for the worker contract.
 - Verify reasoning-content handling is unchanged from PAL's usage (smoke test against the local manager with a Gemma-4 model).
-- Bump `agent_core` to v1.2.0; PAL pin update is a no-op (declarative tools still work, reasoning API unchanged, boundary wrapping moves to a shared import).
-- Phase exit: agent_core tests pass; PAL still works against the new release; conformance suite green against a stub MCP worker.
+- Phase exit: agent_core tests pass; PAL still works against the new release; conformance suite green against `MockWorkerContract`.
 
-**Phase 1 — PARE scaffold + apk-re-agents wrapper**
+**Phase 1 — PARE scaffold + apk-re-agents wrapper** ✅ *Done — PARE main*
 - Scaffold PARE from `agent_template` (init script: name=`pare`, prefix=`PARE`).
 - Configure PARE to read PAL's vault via `agent_core` retrieval, pointing at `~/pal-vault-prod`.
 - Implement `static_analyze` tool wrapping apk-re-agents `/jobs`.
-- Systemd unit; `/health` endpoint on the socket.
+- Systemd unit; `/health` slash command.
 - Phase exit: `pare` CLI starts a session; LLM can call `static_analyze` on a fixture APK and receive a findings ref.
 
-**Phase 2 — Android worker scaffold + container hardening**
+**Phase 2 — `agent_core` MCP execution layer**
+- Streamable HTTP MCP client (`agent_core/workers/client.py`): wraps `initialize`, `list_tools`, `tools/call`, `notifications/progress`, `notifications/cancelled`.
+- Worker discovery driver: loop over `WorkerRegistry.all()`, connect each, exchange `worker_contract_version`, list tools, return as `Tool` subclasses for `register_tools()` to consume.
+- Conformance suite extended with a Streamable HTTP fixture worker (not just the in-process `MockWorkerContract`).
+- Bump `agent_core` to v1.3.0; PAL pin update is a no-op (PAL doesn't use MCP workers in v1).
+- Phase exit: agent_core tests pass against a FastMCP-backed stub worker; `register_tools()` consumes workers.yaml and returns live MCP-discovered tools.
+
+**Phase 3 — apk_re_agents Streamable HTTP migration + PARE MCP-direct workers**
+- apk_re_agents: migrate each of the 8 agent containers from MCP-over-SSE to Streamable HTTP. Update docker-compose. Tag a new apk_re_agents release.
+- PARE: add `workers.yaml` entries for each apk_re_agents agent (manifest_analyzer, string_extractor, network_mapper, code_analyzer, api_extractor, report_synthesizer, unpacker, mobsf_analyzer). PARE's `register_tools()` discovers and registers them as `apk_<agent>_<tool>` style names.
+- The existing `static_analyze` tool (Phase 1, coordinator path) stays as the deterministic batch option. Both paths now available.
+- Phase exit: PARE's LLM can call `apk_manifest_extract` (or whatever the name-prefixed form ends up as) directly via MCP, get findings, without going through the coordinator. The /jobs path still works.
+
+**Phase 4 — Android worker scaffold + container hardening + lifecycle/discovery tools**
 - New `pare-workers/android/` subtree.
-- Container with adb, frida-tools, mitmproxy, FastMCP server, Streamable HTTP transport.
+- Container with adb, frida-tools, mitmproxy, FastMCP-Streamable-HTTP server.
 - Hardening profile per Section 9.
-- Discovery tools only: `spawn`, `resume`, `attach`, `detach`, `list_processes`, `list_apps`, `list_modules`, `list_classes`, `list_methods`, `logcat`, `pull_file`, `screencap`.
-- Conformance suite passes against real FastMCP.
+- Lifecycle/discovery tools only: `spawn`, `resume`, `attach`, `detach`, `list_processes`, `list_apps`, `list_modules`, `list_classes`, `list_methods`, `logcat`, `pull_file`, `screencap`, `record_screen`.
+- Worker contract conformance against real FastMCP-Streamable-HTTP.
 - Phase exit: real device pairing works; PARE lists processes on a connected device through the conversational flow.
 
-**Phase 3 — Android Frida tool surface**
-- `java_hook`, `native_hook`, `unhook`.
+**Phase 5 — Android Frida tool surface**
+- `java_hook` (with overload), `native_hook`, `unhook`.
 - `load_script`, `unload_script`, `send_to_script`, `script_messages`.
 - Script workspace at `/work/scripts/{session_id}/`.
 - Phase exit: end-to-end "hook X, capture Y" works on a fixture APK.
 
-**Phase 4 — Android traffic interception**
-- `setup_proxy`, `bypass_pinning`, `intercept_start/stop/traffic`.
-- mitmproxy CA per-container, key isolation.
-- Phase exit: HTTPS traffic captured from a fixture APK with cert pinning.
+**Phase 6 — Android traffic interception**
+- `setup_proxy(strategy=auto|magisk|nsc_patch|network_only)`.
+- `bypass_pinning(strategy=auto|okhttp|trustkit|flutter_boringssl|frida_universal)`.
+- `intercept_start/stop`, `intercept_traffic` (medium tier).
+- mitmproxy CA ephemeral per-container, key in tmpfs.
+- Phase exit: HTTPS traffic captured from a fixture APK with cert pinning bypassed.
 
-**Phase 5 — Android memory tools + HITL**
+**Phase 7 — Android memory tools + HITL**
 - `read_memory`, `dump_memory` (HIGH tier, HITL-gated).
-- HITL flow integrated end-to-end: PARE pauses, surfaces the proposal (worker / tool / args / LLM-provided reason), waits for operator approve/deny.
-- Phase exit: a memory dump triggers HITL; operator approve and deny paths both work; findings reference resolves correctly.
+- HITL flow integrated end-to-end: PARE pauses, surfaces the proposal (worker/tool/args/LLM-provided reason), waits for operator approve/deny.
+- Phase exit: a memory dump triggers HITL; approve and deny paths both work; findings reference resolves correctly.
 
-**Phase 6 — iOS worker**
-- `pare-workers/ios/` with its own tool taxonomy (Section 5.3).
-- Reuses agent_core contract + the script-workspace pattern + HITL infrastructure.
-- Phase exit: a fixture jailbroken iOS device can be attached, ObjC hooked, traffic intercepted.
+**Phase 8 — iOS worker scaffold + container hardening + lifecycle/discovery tools**
+- New `pare-workers/ios/` subtree.
+- Container with libimobiledevice, usbmuxd, frida-tools, iproxy, ldid, frida-ios-dump, mitmproxy, FastMCP-Streamable-HTTP server.
+- Hardening profile (USB device scoping for `/dev/bus/usb/...`, `usbmuxd` socket bind-mount).
+- Lifecycle/discovery tools: `spawn(bundle_id)`, `resume`, `attach`, `detach`, `list_processes`, `list_apps`, `list_modules`, `list_classes`, `list_methods`, `system_log`, `pull_file`.
+- Phase exit: jailbroken iOS device pairs via usbmuxd; PARE lists processes through the conversational flow.
 
-**Phase 7 — Polish + integration tests**
-- External MCP wiring (Ghidra MCP, Hopper MCP) as `external_mcp` workers in the registry.
-- Hardware integration test suite.
+**Phase 9 — iOS hooks + scripts + iOS-specific tools**
+- `objc_hook`, `native_hook`, `unhook`.
+- `load_script`, `unload_script`, `send_to_script`, `script_messages` (same shape as Android).
+- iOS-specific tools: `class_dump`, `decrypt_binary` (frida-ios-dump-style), `pull_app_data`.
+- Phase exit: end-to-end ObjC method hook + script-driven data capture on a fixture jailbroken device.
+
+**Phase 10 — iOS traffic interception**
+- `setup_proxy(strategy=auto|trust_profile|frida_pinning_bypass)`.
+- `bypass_pinning(strategy=auto|trustkit|nsurlsession|flutter_boringssl|frida_universal)`.
+- `intercept_start/stop`, `intercept_traffic` (medium tier).
+- mitmproxy CA installed via iOS profile path or Frida-injected trust override.
+- Phase exit: HTTPS traffic captured from a fixture iOS app with cert pinning bypassed.
+
+**Phase 11 — iOS memory + HITL + Keychain**
+- `read_memory`, `dump_memory` (HIGH tier, HITL-gated).
+- `keychain_dump` (HIGH tier, HITL-gated — iOS-specific).
+- Phase exit: keychain dump triggers HITL; memory dump triggers HITL; both approve/deny paths verified.
+
+**Phase 12 — Polish + integration tests + external MCP wiring**
+- External MCP wiring (Ghidra MCP, Hopper MCP) as `external_mcp` workers in workers.yaml.
+- Hardware integration test suite gathered across Android + iOS phases.
 - Operability: orphaned-job reaper, findings disk quota and rotation, correlation-ID propagation verified in worker logs.
 - Documentation pass.
 - Phase exit: v1 tag.
