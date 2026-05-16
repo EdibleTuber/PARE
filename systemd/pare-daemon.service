@@ -1,0 +1,14 @@
+[Unit]
+Description=Personal Agentic Reverse Engineer — conversational mobile RE operator. (daemon)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/pare
+EnvironmentFile=/path/to/pare/.env
+ExecStart=/path/to/pare/.venv/bin/python -m pare
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

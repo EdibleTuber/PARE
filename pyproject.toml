@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "{{AGENT_NAME}}"
+name = "pare"
 version = "0.1.0"
-description = "{{AGENT_DESCRIPTION}}"
+description = "Personal Agentic Reverse Engineer — conversational mobile RE operator."
 requires-python = ">=3.12"
 dependencies = [
     "agent_core @ git+https://github.com/EdibleTuber/agent_core.git@v0.7.0",
 ]
 
 [project.scripts]
-{{AGENT_NAME}}-daemon = "{{agent_pkg}}.__main__:main"
+pare-daemon = "pare.__main__:main"
 
 [project.optional-dependencies]
 dev = [

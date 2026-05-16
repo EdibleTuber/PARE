@@ -1,9 +1,9 @@
-"""Custom tools for {{AGENT_CLASS}}.
+"""Custom tools for PareAgent.
 
-Add Tool subclasses here and register them on {{AGENT_CLASS}}.tools.
+Add Tool subclasses here and register them on PareAgent.tools.
 The framework's BUILTIN_TOOLS (cat, head, tail, ls, grep, find, read_lines,
 fetch_url, search_vault, search_web, update_scratch, add_learning) are
-available by default -- opt out via {{AGENT_CLASS}}.disabled_builtins.
+available by default -- opt out via PareAgent.disabled_builtins.
 
 Example (commented out below):
 
