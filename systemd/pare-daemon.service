@@ -1,3 +1,9 @@
+# pare-daemon.service — PARE daemon systemd unit (user service).
+#
+# Operator edits before `systemctl --user enable --now pare-daemon`:
+#   - WorkingDirectory: path to the PARE checkout
+#   - EnvironmentFile: path to the PARE env file (e.g., /path/to/pare/.env)
+
 [Unit]
 Description=Personal Agentic Reverse Engineer — conversational mobile RE operator. (daemon)
 After=network.target
