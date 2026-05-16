@@ -14,6 +14,7 @@ from __future__ import annotations
 from agent_core.agent import Agent, HandlerContext
 
 from pare.commands.hello import Hello
+from pare.commands.health import Health
 from pare.tools import StaticAnalyze
 from pare.tools._http import ApkReAgentsClient
 
@@ -23,7 +24,7 @@ class PareAgent(Agent):
     env_prefix = "PARE_"
 
     tools = [StaticAnalyze]  # add Tool subclasses here
-    commands = [Hello]  # framework builtins serve /help, /clear, etc.
+    commands = [Hello, Health]  # framework builtins serve /help, /clear, etc.
 
     def setup(self) -> None:
         """Construct the apk_re_agents client (long-lived; reused per call).
