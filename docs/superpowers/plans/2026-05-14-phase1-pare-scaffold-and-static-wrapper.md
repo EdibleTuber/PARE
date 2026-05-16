@@ -4,7 +4,7 @@
 
 **Goal:** Stand up the PARE daemon as a working `agent_core@v1.2.0` consumer with one production tool (`static_analyze`) that wraps the existing `apk_re_agents` `/jobs` HTTP API, ready to serve a conversational session and run end-to-end against a fixture APK.
 
-**Architecture:** Scaffold the PARE Python package from `~/Projects/agent_template/` using its `init-agent.sh` script (which renames `{{agent_pkg}}` → `pare`, derives `PareAgent` and `PARE_` env prefix). Bump the agent_core pin to `v1.2.0`. Wire the framework's `RetrievalClient` to read PAL's vault (`~/pal-vault-prod`). Add a single new tool — `static_analyze` — as an async HTTP wrapper around `apk_re_agents` with submit-then-poll semantics. Carry the agent_template's existing systemd unit forward (already renamed by init); add a `/health` socket command.
+**Architecture:** Scaffold the PARE Python package from `~/Projects/agent_template/` using its `init-agent.sh` script (which renames `pare` → `pare`, derives `PareAgent` and `PARE_` env prefix). Bump the agent_core pin to `v1.2.0`. Wire the framework's `RetrievalClient` to read PAL's vault (`~/pal-vault-prod`). Add a single new tool — `static_analyze` — as an async HTTP wrapper around `apk_re_agents` with submit-then-poll semantics. Carry the agent_template's existing systemd unit forward (already renamed by init); add a `/health` socket command.
 
 **Tech Stack:** Python 3.12, `agent_core@v1.2.0`, `httpx` (already a transitive dep), Pydantic v2 (now an explicit agent_core dep), pytest + pytest-asyncio. Bash for the init scaffold step.
 
@@ -31,7 +31,7 @@
       static_analyze.py    # the apk_re_agents wrapper Tool
       _http.py             # internal HTTP client for /jobs (kept private; one place to mock)
   systemd/
-    pare-daemon.service    # renamed by init from {{AGENT_NAME}}-daemon.service
+    pare-daemon.service    # renamed by init from pare-daemon.service
   scripts/                 # init-agent.sh removed by init; folder may still exist or get cleaned
   tests/
     test_smoke.py          # from template — import + instantiation + commands
@@ -63,9 +63,9 @@ Expected: `working tree clean`, on branch `main`. If there are uncommitted chang
 
 Run:
 ```bash
-ls /home/edible/Projects/agent_template/{{agent_pkg}}/agent.py
+ls /home/edible/Projects/agent_template/pare/agent.py
 ls /home/edible/Projects/agent_template/scripts/init-agent.sh
-grep -F '{{AGENT_NAME}}' /home/edible/Projects/agent_template/pyproject.toml >/dev/null && echo "template placeholders intact" || echo "template already initialised"
+grep -F 'pare' /home/edible/Projects/agent_template/pyproject.toml >/dev/null && echo "template placeholders intact" || echo "template already initialised"
 ```
 Expected: agent.py + init-agent.sh exist; placeholders intact. If "template already initialised", STOP and report — we need the un-init'd template.
 
@@ -111,33 +111,33 @@ cd /home/edible/Projects/PARE
 rsync -av --exclude='.git' --exclude='__pycache__' --exclude='*.egg-info' --exclude='.venv' \
   /home/edible/Projects/agent_template/ ./
 ```
-Expected: files appear under `{{agent_pkg}}/`, `scripts/`, `systemd/`, `tests/`, plus `pyproject.toml` and `README.md`. The existing `docs/` directory is preserved (rsync overlays, doesn't delete).
+Expected: files appear under `pare/`, `scripts/`, `systemd/`, `tests/`, plus `pyproject.toml` and `README.md`. The existing `docs/` directory is preserved (rsync overlays, doesn't delete).
 
 - [ ] **Step 2: Confirm placeholders are intact in the copied files**
 
 Run:
 ```bash
-grep -lF '{{AGENT_NAME}}' .
+grep -lF 'pare' .
 ```
-Expected: at least `pyproject.toml`, `systemd/{{AGENT_NAME}}-daemon.service`, `README.md`. If none, the rsync didn't pull placeholders — investigate.
+Expected: at least `pyproject.toml`, `systemd/pare-daemon.service`, `README.md`. If none, the rsync didn't pull placeholders — investigate.
 
 - [ ] **Step 3: Stage and commit the raw template**
 
 ```bash
 cd /home/edible/Projects/PARE
-git add {{agent_pkg}} scripts systemd tests pyproject.toml README.md
+git add pare scripts systemd tests pyproject.toml README.md
 # .env.example may exist in template; add if so:
 [ -f .env.example ] && git add .env.example
 git commit -m "chore: import agent_template scaffold (pre-init)
 
 Raw template copied into PARE; placeholders still intact. Next commit
-runs init-agent.sh to substitute {{AGENT_NAME}}, {{agent_pkg}},
-{{AGENT_CLASS}}, {{AGENT_PREFIX}}, and {{AGENT_DESCRIPTION}}."
+runs init-agent.sh to substitute pare, pare,
+PareAgent, PARE, and Personal Agentic Reverse Engineer — conversational mobile RE operator.."
 ```
 
 ### Task 2: Run init-agent.sh
 
-**Files:** rename `{{agent_pkg}}/` → `pare/`; rename systemd unit file; substitute placeholders.
+**Files:** rename `pare/` → `pare/`; rename systemd unit file; substitute placeholders.
 
 - [ ] **Step 1: Run the init script with name "pare"**
 
@@ -159,7 +159,7 @@ Run:
 ```bash
 ls pare/agent.py
 ls systemd/pare-daemon.service
-grep -F '{{AGENT_NAME}}' pyproject.toml && echo "PLACEHOLDERS REMAIN — investigate" || echo "all placeholders substituted"
+grep -F 'pare' pyproject.toml && echo "PLACEHOLDERS REMAIN — investigate" || echo "all placeholders substituted"
 grep "^name = " pyproject.toml
 grep "class PareAgent" pare/agent.py
 ```
@@ -169,15 +169,15 @@ Expected: `pare/agent.py` exists; `systemd/pare-daemon.service` exists; "all pla
 
 ```bash
 cd /home/edible/Projects/PARE
-git add -u  # rename of {{agent_pkg}}/ → pare/ and the deleted scripts/init-agent.sh
+git add -u  # rename of pare/ → pare/ and the deleted scripts/init-agent.sh
 git add pare systemd pyproject.toml README.md
 git status  # confirm only the rename + substitutions; no untracked stray files (check .env.example etc.)
 git commit -m "chore: run agent_template init for 'pare'
 
-Substituted {{agent_pkg}} → pare, {{AGENT_NAME}} → pare,
-{{AGENT_CLASS}} → PareAgent, {{AGENT_PREFIX}} → PARE_,
-{{AGENT_DESCRIPTION}} → Personal Agentic Reverse Engineer …
-Renamed systemd/{{AGENT_NAME}}-daemon.service → systemd/pare-daemon.service.
+Substituted pare → pare, pare → pare,
+PareAgent → PareAgent, PARE → PARE_,
+Personal Agentic Reverse Engineer — conversational mobile RE operator. → Personal Agentic Reverse Engineer …
+Renamed systemd/pare-daemon.service → systemd/pare-daemon.service.
 Removed scripts/init-agent.sh (one-shot)."
 ```
 
@@ -1218,7 +1218,7 @@ The template's README had a "Before Init" block that the init script stripped, a
 head -50 /home/edible/Projects/PARE/README.md
 ```
 Confirm:
-- Title is "PARE" (not "{{AGENT_CLASS}}" or "Agent Template").
+- Title is "PARE" (not "PareAgent" or "Agent Template").
 - Install instructions reference `pare-daemon`.
 - No stray placeholders.
 

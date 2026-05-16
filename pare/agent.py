@@ -1,7 +1,7 @@
-"""{{AGENT_CLASS}} — minimal Agent subclass.
+"""PareAgent — minimal Agent subclass.
 
 Extension points:
-    name (ClassVar)                — short slug, e.g. "{{AGENT_NAME}}"
+    name (ClassVar)                — short slug, e.g. "pare"
     env_prefix (ClassVar)          — env-var prefix, derived from name if None
     tools (ClassVar list[type])    — Tool subclasses to register
     commands (ClassVar list[type]) — Command subclasses to register
@@ -13,12 +13,12 @@ from __future__ import annotations
 
 from agent_core.agent import Agent, HandlerContext
 
-from {{agent_pkg}}.commands.hello import Hello
+from pare.commands.hello import Hello
 
 
-class {{AGENT_CLASS}}(Agent):
-    name = "{{AGENT_NAME}}"
-    env_prefix = "{{AGENT_PREFIX}}_"
+class PareAgent(Agent):
+    name = "pare"
+    env_prefix = "PARE_"
 
     tools = []          # add Tool subclasses here
     commands = [Hello]  # framework builtins serve /help, /clear, etc.
@@ -34,7 +34,7 @@ class {{AGENT_CLASS}}(Agent):
         from pathlib import Path
         # Read the base prompt from prompts/system.md.
         prompt_path = Path(__file__).parent / "prompts" / "system.md"
-        base = prompt_path.read_text() if prompt_path.exists() else "You are {{AGENT_CLASS}}."
+        base = prompt_path.read_text() if prompt_path.exists() else "You are PareAgent."
         pb = self.prompt_builder
         return "\n\n".join(filter(None, [
             base,
