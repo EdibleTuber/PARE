@@ -11,7 +11,11 @@ Extension points:
 """
 from __future__ import annotations
 
+import asyncio
+
 from agent_core.agent import Agent, HandlerContext
+from agent_core.workers import MCPClientPool, discover_and_register
+from agent_core.workers.registry import WorkerRegistry
 
 from pare.commands.hello import Hello
 from pare.commands.health import Health
@@ -27,13 +31,27 @@ class PareAgent(Agent):
     commands = [Hello, Health]  # framework builtins serve /help, /clear, etc.
 
     def setup(self) -> None:
-        """Construct the apk_re_agents client (long-lived; reused per call).
+        """Construct domain resources: apk_re_agents HTTP client (Phase 1) and
+        the MCP pool for MCP-direct workers from workers.yaml (Phase 3).
 
         Framework managers (profile, wisdom, channels, inference, retrieval,
         websearch, allowlist, approval_registry, learning, fetcher, config)
         are already populated on self at this point.
         """
         self.apk_re_agents_client = ApkReAgentsClient(self.config.apk_re_agents_url)
+        registry = WorkerRegistry.load(self.config.workers_yaml_path)
+        self.mcp_pool = MCPClientPool(registry.all())
+
+    def register_tools(self):
+        """Discover MCP-direct workers and return their tools.
+
+        Called by agent_core's runtime after setup(). The returned list is
+        unioned with the class-level `tools` ClassVar (StaticAnalyze).
+        Bridges async discovery to sync caller via asyncio.run — the hook
+        signature is sync per agent_core's contract.
+        """
+        specs = list(self.mcp_pool._specs.values())
+        return asyncio.run(discover_and_register(specs, self.mcp_pool))
 
     def system_prompt(self, ctx: HandlerContext) -> str:
         from pathlib import Path
