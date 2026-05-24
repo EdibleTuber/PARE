@@ -1,0 +1,47 @@
+# PARE worker registry. Each entry maps to an agent_core WorkerSpec.
+# Format: workers.<name>.{endpoint, transport, risk_default, capability_tags?, kind?}
+#
+# Phase 3 lists the 8 apk_re_agents agents as MCP-direct workers. The
+# coordinator (/jobs HTTP API) is still consumed via the legacy
+# static_analyze Tool (Phase 1) — that path is unchanged.
+workers:
+  unpacker:
+    endpoint: http://127.0.0.1:9000/mcp
+    transport: streamable_http
+    risk_default: low
+    capability_tags: [static, apk, decompile]
+  manifest_analyzer:
+    endpoint: http://127.0.0.1:9001/mcp
+    transport: streamable_http
+    risk_default: low
+    capability_tags: [static, apk, manifest]
+  string_extractor:
+    endpoint: http://127.0.0.1:9002/mcp
+    transport: streamable_http
+    risk_default: low
+    capability_tags: [static, apk, strings]
+  network_mapper:
+    endpoint: http://127.0.0.1:9003/mcp
+    transport: streamable_http
+    risk_default: low
+    capability_tags: [static, apk, network]
+  code_analyzer:
+    endpoint: http://127.0.0.1:9004/mcp
+    transport: streamable_http
+    risk_default: medium
+    capability_tags: [static, apk, code]
+  api_extractor:
+    endpoint: http://127.0.0.1:9005/mcp
+    transport: streamable_http
+    risk_default: low
+    capability_tags: [static, apk, api]
+  report_synthesizer:
+    endpoint: http://127.0.0.1:9006/mcp
+    transport: streamable_http
+    risk_default: low
+    capability_tags: [static, apk, report]
+  mobsf_analyzer:
+    endpoint: http://127.0.0.1:9007/mcp
+    transport: streamable_http
+    risk_default: low
+    capability_tags: [static, apk, mobsf]
