@@ -21,6 +21,7 @@ class PAREConfig(BaseConfig):
     """
 
     apk_re_agents_url: str = "http://127.0.0.1:8000"
+    workers_yaml_path: str = "workers.yaml"
 
 
 def load_config() -> PAREConfig:
