@@ -9,6 +9,8 @@ Personal Agentic Reverse Engineer — conversational mobile RE operator.
 - Design spec: [`docs/superpowers/specs/2026-05-12-pare-v1-design.md`](docs/superpowers/specs/2026-05-12-pare-v1-design.md)
 - Phase 0 (agent_core extraction): [`docs/superpowers/plans/2026-05-13-phase0-agent-core-extraction.md`](docs/superpowers/plans/2026-05-13-phase0-agent-core-extraction.md) — landed in `agent_core@v1.2.0`
 - Phase 1 (this scaffold + apk_re_agents wrapper): [`docs/superpowers/plans/2026-05-14-phase1-pare-scaffold-and-static-wrapper.md`](docs/superpowers/plans/2026-05-14-phase1-pare-scaffold-and-static-wrapper.md)
+- Phase 2 (agent_core MCP execution layer): [`docs/superpowers/plans/2026-05-16-phase2-agent-core-mcp-client.md`](docs/superpowers/plans/2026-05-16-phase2-agent-core-mcp-client.md) — landed in `agent_core@v1.3.0`
+- Phase 3 (apk_re_agents Streamable HTTP migration + PARE MCP-direct workers): [`docs/superpowers/plans/2026-05-17-phase3-apk-re-agents-streamable-http-and-pare-wiring.md`](docs/superpowers/plans/2026-05-17-phase3-apk-re-agents-streamable-http-and-pare-wiring.md) — landed apk_re_agents v0.2.0 + PARE workers.yaml
 
 ## Install
 
