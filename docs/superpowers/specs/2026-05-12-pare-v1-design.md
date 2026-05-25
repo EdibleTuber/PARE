@@ -551,7 +551,7 @@ Out of scope for v1 testing:
 
 ## 11. Phased Delivery
 
-The v1 spec is significant. Phases are scoped so each ends with something demonstrable. Original 8-phase plan was resequenced 2026-05-16 to (a) insert MCP execution-layer work and apk_re_agents hybrid integration before Android (apk_re_agents is the easier first MCP consumer), and (b) split iOS into four phases mirroring Android's structure rather than collapsing it into one.
+The v1 spec is significant. Phases are scoped so each ends with something demonstrable. Original 8-phase plan was resequenced 2026-05-16 to (a) insert MCP execution-layer work and apk_re_agents hybrid integration before Android (apk_re_agents is the easier first MCP consumer), and (b) split iOS into four phases mirroring Android's structure rather than collapsing it into one. **2026-05-24 pivot:** after Phases 0-3 landed, it became clear that PARE-as-MCP-client (worker chassis + `workers.yaml` + `discover_and_register`) is the whole product. Building containerized Android/iOS workers internal to PARE was over-engineering — community MCP servers exist for Frida and adjacent tooling, and thin host-side bridges cover the rest. Phases 4-11 (Android × 4 + iOS × 4) collapsed into a single open-ended **Phase 4 — MCP server adoption**. Phase 12 became Phase 5.
 
 **Phase 0 — `agent_core` extraction PR (foundational)** ✅ *Done — `agent_core@v1.2.0`*
 - Add `register_tools(self) -> list[Tool]` lifecycle hook to `Agent` for dynamic registration after MCP discovery (PAL's declarative `tools = [...]` still supported).
@@ -581,65 +581,36 @@ The v1 spec is significant. Phases are scoped so each ends with something demons
 - The existing `static_analyze` tool (Phase 1, coordinator path) stays as the deterministic batch option. Both paths now available.
 - Phase exit: PARE's LLM can call `apk_manifest_extract` (or whatever the name-prefixed form ends up as) directly via MCP, get findings, without going through the coordinator. The /jobs path still works.
 
-**Phase 4 — Android worker scaffold + container hardening + lifecycle/discovery tools**
-- New `pare-workers/android/` subtree.
-- Container with adb, frida-tools, mitmproxy, FastMCP-Streamable-HTTP server.
-- Hardening profile per Section 9.
-- Lifecycle/discovery tools only: `spawn`, `resume`, `attach`, `detach`, `list_processes`, `list_apps`, `list_modules`, `list_classes`, `list_methods`, `logcat`, `pull_file`, `screencap`, `record_screen`.
-- Worker contract conformance against real FastMCP-Streamable-HTTP.
-- Phase exit: real device pairing works; PARE lists processes on a connected device through the conversational flow.
+**Phase 4 — MCP server adoption (open-ended)**
 
-**Phase 5 — Android Frida tool surface**
-- `java_hook` (with overload), `native_hook`, `unhook`.
-- `load_script`, `unload_script`, `send_to_script`, `script_messages`.
-- Script workspace at `/work/scripts/{session_id}/`.
-- Phase exit: end-to-end "hook X, capture Y" works on a fixture APK.
+The chassis from Phases 0-3 means each new capability is "add a worker to `workers.yaml`" rather than "build a container." Phase 4 is the ongoing adoption work — one integration at a time, in the order conversational needs surface them. Each integration is its own small plan if it needs one; trivial ones (just edit `workers.yaml`) don't.
 
-**Phase 6 — Android traffic interception**
-- `setup_proxy(strategy=auto|magisk|nsc_patch|network_only)`.
-- `bypass_pinning(strategy=auto|okhttp|trustkit|flutter_boringssl|frida_universal)`.
-- `intercept_start/stop`, `intercept_traffic` (medium tier).
-- mitmproxy CA ephemeral per-container, key in tmpfs.
-- Phase exit: HTTPS traffic captured from a fixture APK with cert pinning bypassed.
+Adoption candidates, roughly in priority:
 
-**Phase 7 — Android memory tools + HITL**
-- `read_memory`, `dump_memory` (HIGH tier, HITL-gated).
-- HITL flow integrated end-to-end: PARE pauses, surfaces the proposal (worker/tool/args/LLM-provided reason), waits for operator approve/deny.
-- Phase exit: a memory dump triggers HITL; approve and deny paths both work; findings reference resolves correctly.
+- **Frida MCP** — Android + iOS dynamic analysis (hooks, scripts, memory). Either a community MCP server if one fits the workflow, or a thin in-house bridge wrapping `frida-tools`. This is the highest-value first integration because it replaces what would have been Phases 4-11 wholesale.
+- **mitmdump / traffic interception** — community wrapper if available, else a thin bridge. Pairs with Frida MCP for HTTPS pinning bypass.
+- **Platform tools** — a thin host-side MCP shim around `adb` and `libimobiledevice` (process/app listing, file pull, logcat, system_log) for the bits Frida doesn't cover. Tiny.
+- **Cardputer hardware bridge** — when the device arrives. An MCP server on the host that talks USB to the cardputer; exposes whatever interfaces the cardputer is wired for (BadUSB, UART, JTAG, SPI, etc.). Replaces the originally-speculative "Pi hardware-RE worker."
+- **Ghidra MCP, Hopper MCP** — binary analysis (Hopper MCP exists per Shane's contact; Ghidra MCP is community). Marked `kind: external_mcp` in `workers.yaml` so PARE applies stricter risk defaults — these are third-party processes.
 
-**Phase 8 — iOS worker scaffold + container hardening + lifecycle/discovery tools**
-- New `pare-workers/ios/` subtree.
-- Container with libimobiledevice, usbmuxd, frida-tools, iproxy, ldid, frida-ios-dump, mitmproxy, FastMCP-Streamable-HTTP server.
-- Hardening profile (USB device scoping for `/dev/bus/usb/...`, `usbmuxd` socket bind-mount).
-- Lifecycle/discovery tools: `spawn(bundle_id)`, `resume`, `attach`, `detach`, `list_processes`, `list_apps`, `list_modules`, `list_classes`, `list_methods`, `system_log`, `pull_file`.
-- Phase exit: jailbroken iOS device pairs via usbmuxd; PARE lists processes through the conversational flow.
+For each adoption: add the worker to `workers.yaml`, restart the PARE daemon, exercise the new tools conversationally, write up notable findings about the integration. No fixed phase exit — Phase 4 closes when the operator declares the adoption surface complete enough for the engagement work they care about. The §5.2 / §5.3 / §5.4 tool surfaces in this spec become **reference material** describing what an ideal adoption looks like, not build targets.
 
-**Phase 9 — iOS hooks + scripts + iOS-specific tools**
-- `objc_hook`, `native_hook`, `unhook`.
-- `load_script`, `unload_script`, `send_to_script`, `script_messages` (same shape as Android).
-- iOS-specific tools: `class_dump`, `decrypt_binary` (frida-ios-dump-style), `pull_app_data`.
-- Phase exit: end-to-end ObjC method hook + script-driven data capture on a fixture jailbroken device.
+Items that *were* part of the original Android/iOS phases and may still need bespoke work (because no community MCP server covers them cleanly):
 
-**Phase 10 — iOS traffic interception**
-- `setup_proxy(strategy=auto|trust_profile|frida_pinning_bypass)`.
-- `bypass_pinning(strategy=auto|trustkit|nsurlsession|flutter_boringssl|frida_universal)`.
-- `intercept_start/stop`, `intercept_traffic` (medium tier).
-- mitmproxy CA installed via iOS profile path or Frida-injected trust override.
-- Phase exit: HTTPS traffic captured from a fixture iOS app with cert pinning bypassed.
+- Cert pinning bypass strategies (`bypass_pinning(strategy=...)`) — likely a small per-platform bridge if Frida MCP doesn't expose this directly.
+- iOS-specific tools (`keychain_dump`, `class_dump`, `decrypt_binary`) — likely a small in-house MCP server, since these are iOS-specific and not common in community Frida wrappers.
+- HITL gating on memory dumps and keychain access — already in `agent_core`'s data layer; the trigger lives in PARE's `RiskGate` configuration in `workers.yaml` (declared/effective tier per tool).
 
-**Phase 11 — iOS memory + HITL + Keychain**
-- `read_memory`, `dump_memory` (HIGH tier, HITL-gated).
-- `keychain_dump` (HIGH tier, HITL-gated — iOS-specific).
-- Phase exit: keychain dump triggers HITL; memory dump triggers HITL; both approve/deny paths verified.
+**Phase 5 — Polish + operability + v1 tag**
 
-**Phase 12 — Polish + integration tests + external MCP wiring**
-- External MCP wiring (Ghidra MCP, Hopper MCP) as `external_mcp` workers in workers.yaml.
-- Hardware integration test suite gathered across Android + iOS phases.
+Lands the v1 release.
+
 - Operability: orphaned-job reaper, findings disk quota and rotation, correlation-ID propagation verified in worker logs.
-- Documentation pass.
-- Phase exit: v1 tag.
+- Hardware integration tests (env-gated) across whichever workers landed in Phase 4.
+- Documentation pass — README, ops runbook, "what's adopted vs. not" matrix.
+- Phase exit: v1 tag on PARE.
 
-Each phase is its own implementation plan written via the writing-plans workflow.
+Each phase is its own implementation plan written via the writing-plans workflow when (and if) it needs one. Phase 4 adoptions often don't — adding a worker to `workers.yaml` is a trivial commit.
 
 ## 12. Out of Scope (v1)
 
