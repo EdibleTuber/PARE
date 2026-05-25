@@ -568,14 +568,14 @@ The v1 spec is significant. Phases are scoped so each ends with something demons
 - Systemd unit; `/health` slash command.
 - Phase exit: `pare` CLI starts a session; LLM can call `static_analyze` on a fixture APK and receive a findings ref.
 
-**Phase 2 — `agent_core` MCP execution layer**
+**Phase 2 — `agent_core` MCP execution layer** ✅ *Done — `agent_core@v1.3.0`*
 - Streamable HTTP MCP client (`agent_core/workers/client.py`): wraps `initialize`, `list_tools`, `tools/call`, `notifications/progress`, `notifications/cancelled`.
 - Worker discovery driver: loop over `WorkerRegistry.all()`, connect each, exchange `worker_contract_version`, list tools, return as `Tool` subclasses for `register_tools()` to consume.
 - Conformance suite extended with a Streamable HTTP fixture worker (not just the in-process `MockWorkerContract`).
 - Bump `agent_core` to v1.3.0; PAL pin update is a no-op (PAL doesn't use MCP workers in v1).
 - Phase exit: agent_core tests pass against a FastMCP-backed stub worker; `register_tools()` consumes workers.yaml and returns live MCP-discovered tools.
 
-**Phase 3 — apk_re_agents Streamable HTTP migration + PARE MCP-direct workers**
+**Phase 3 — apk_re_agents Streamable HTTP migration + PARE MCP-direct workers** ✅ *Done — apk_re_agents v0.2.0 + PARE workers.yaml*
 - apk_re_agents: migrate each of the 8 agent containers from MCP-over-SSE to Streamable HTTP. Update docker-compose. Tag a new apk_re_agents release.
 - PARE: add `workers.yaml` entries for each apk_re_agents agent (manifest_analyzer, string_extractor, network_mapper, code_analyzer, api_extractor, report_synthesizer, unpacker, mobsf_analyzer). PARE's `register_tools()` discovers and registers them as `apk_<agent>_<tool>` style names.
 - The existing `static_analyze` tool (Phase 1, coordinator path) stays as the deterministic batch option. Both paths now available.
