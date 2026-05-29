@@ -5,7 +5,8 @@ Defaults assume a local lab setup.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from agent_core.config import BaseConfig
 from agent_core.config import load_config as _load_base_config
@@ -22,6 +23,9 @@ class PAREConfig(BaseConfig):
 
     apk_re_agents_url: str = "http://127.0.0.1:8000"
     workers_yaml_path: str = "workers.yaml"
+    audit_dir: Path = field(
+        default_factory=lambda: Path.home() / ".local" / "share" / "pare" / "audit"
+    )
 
 
 def load_config() -> PAREConfig:
