@@ -16,6 +16,9 @@ import asyncio
 from agent_core.agent import Agent, HandlerContext
 from agent_core.workers import MCPClientPool, discover_and_register
 from agent_core.workers.registry import WorkerRegistry
+from agent_core.workers.risk import RiskGate
+from agent_core.workers.risk_pool import RiskAwareToolPool
+from agent_core.workers.audit import AuditLog
 
 from pare.commands.hello import Hello
 from pare.commands.health import Health
@@ -31,27 +34,36 @@ class PareAgent(Agent):
     commands = [Hello, Health]  # framework builtins serve /help, /clear, etc.
 
     def setup(self) -> None:
-        """Construct domain resources: apk_re_agents HTTP client (Phase 1) and
-        the MCP pool for MCP-direct workers from workers.yaml (Phase 3).
+        """Construct domain resources: apk_re_agents HTTP client (Phase 1), the
+        MCP connection pool, and a RiskAwareToolPool that gates high/critical
+        tool calls on operator approval and audits every dispatch.
 
-        Framework managers (profile, wisdom, channels, inference, retrieval,
-        websearch, allowlist, approval_registry, learning, fetcher, config)
-        are already populated on self at this point.
+        Framework managers (including tool_approval_registry) are already
+        populated on self at this point by agent_core's runtime.
         """
         self.apk_re_agents_client = ApkReAgentsClient(self.config.apk_re_agents_url)
         registry = WorkerRegistry.load(self.config.workers_yaml_path)
-        self.mcp_pool = MCPClientPool(registry.all())
+        specs = registry.all()
+        self._worker_specs = specs
+        self.mcp_pool = MCPClientPool(specs)
+        self.tool_pool = RiskAwareToolPool(
+            inner=self.mcp_pool,
+            specs={s.name: s for s in specs},
+            risk_gate=RiskGate(overrides=[]),
+            approval_registry=self.tool_approval_registry,
+            audit_log=AuditLog(self.config.audit_dir),
+            send_message=None,  # approval requests delivered via per-request ctx.emit
+        )
 
     def register_tools(self):
-        """Discover MCP-direct workers and return their tools.
+        """Discover MCP-direct workers and return their tools, wired to dispatch
+        through the RiskAwareToolPool (so calls are risk-gated + audited).
 
         Called by agent_core's runtime after setup(). The returned list is
-        unioned with the class-level `tools` ClassVar (StaticAnalyze).
-        Bridges async discovery to sync caller via asyncio.run — the hook
-        signature is sync per agent_core's contract.
+        unioned with the class-level `tools` ClassVar (StaticAnalyze). Bridges
+        async discovery to the sync hook via asyncio.run.
         """
-        specs = list(self.mcp_pool._specs.values())
-        return asyncio.run(discover_and_register(specs, self.mcp_pool))
+        return asyncio.run(discover_and_register(self._worker_specs, self.tool_pool))
 
     def system_prompt(self, ctx: HandlerContext) -> str:
         from pathlib import Path

@@ -32,14 +32,15 @@ def test_register_tools_runs_discover_and_register(tmp_path):
 
     cfg = PAREConfig()
     cfg.workers_yaml_path = str(wy)
+    cfg.audit_dir = tmp_path
 
     agent = PareAgent()
     agent.config = cfg
 
     # Stub framework managers normally populated by run_daemon.
     for attr in ("profile", "wisdom", "channels", "learning", "allowlist",
-                 "approval_registry", "inference", "retrieval", "websearch",
-                 "fetcher"):
+                 "approval_registry", "tool_approval_registry", "inference",
+                 "retrieval", "websearch", "fetcher"):
         setattr(agent, attr, MagicMock())
 
     # Patch discover_and_register to return a stub list without hitting
@@ -53,6 +54,7 @@ def test_register_tools_runs_discover_and_register(tmp_path):
         assert isinstance(tool_classes, list)
         mock_disc.assert_awaited_once()
 
-    # Confirm setup() built a pool.
+    # Confirm setup() built a pool and a risk-aware wrapper.
     assert hasattr(agent, "mcp_pool")
     assert agent.mcp_pool is not None
+    assert hasattr(agent, "tool_pool")
