@@ -11,6 +11,8 @@ Personal Agentic Reverse Engineer — conversational mobile RE operator.
 - Phase 1 (this scaffold + apk_re_agents wrapper): [`docs/superpowers/plans/2026-05-14-phase1-pare-scaffold-and-static-wrapper.md`](docs/superpowers/plans/2026-05-14-phase1-pare-scaffold-and-static-wrapper.md)
 - Phase 2 (agent_core MCP execution layer): [`docs/superpowers/plans/2026-05-16-phase2-agent-core-mcp-client.md`](docs/superpowers/plans/2026-05-16-phase2-agent-core-mcp-client.md) — landed in `agent_core@v1.3.0`
 - Phase 3 (apk_re_agents Streamable HTTP migration + PARE MCP-direct workers): [`docs/superpowers/plans/2026-05-17-phase3-apk-re-agents-streamable-http-and-pare-wiring.md`](docs/superpowers/plans/2026-05-17-phase3-apk-re-agents-streamable-http-and-pare-wiring.md) — landed apk_re_agents v0.2.0 + PARE workers.yaml
+- Risk enforcement (`agent_core@v1.5.0`/`v1.5.1`): [`docs/superpowers/plans/2026-05-27-risk-enforcement-mcp-dispatch.md`](docs/superpowers/plans/2026-05-27-risk-enforcement-mcp-dispatch.md) — `RiskAwareToolPool`: dispatch-time risk gating + HITL approval prompt + audit log
+- Phase 4 (in progress): adopt MCP workers via `workers.yaml` — first up, an in-house Python Frida MCP server
 
 ## Install
 
@@ -32,10 +34,11 @@ $EDITOR .env
 ```
 
 Key variables:
-- `PARE_INFERENCE_URL` — Ollama base URL (default: `http://localhost:11434`)
+- `PARE_INFERENCE_URL` — inference server base URL, OpenAI-compatible (default: `http://192.168.1.14:11434`)
 - `PARE_MODEL` — model name to use
 - `PARE_VAULT_PATH` — path to your vault directory
 - `PARE_COLLECTION_ID` — vector collection name for retrieval
+- `PARE_AUDIT_DIR` — where the risk-gating audit log is written (default: `~/.local/share/pare/audit`, outside the vault)
 
 See `.env.example` for the full list.
 
@@ -65,7 +68,50 @@ Connect via the CLI adapter (separate terminal):
 .venv/bin/pytest tests/ -v
 ```
 
-Expected: 3 tests pass (import, instantiation, command registration).
+Expected: `17 passed, 3 skipped`. The 3 skips are env-gated phase 1 / phase 3 smokes that need a running worker stack (set `PARE_PHASE1_SMOKE` / `PARE_PHASE3_SMOKE` to enable them).
+
+## Workers & risk gating
+
+PARE reaches analysis tools through MCP workers declared in `workers.yaml`. Each entry maps to an `agent_core` `WorkerSpec`:
+
+- **Transport** — `streamable_http` (a worker reached over HTTP, e.g. the apk_re_agents agents) or `stdio` (a worker PARE launches as a subprocess and talks to over stdin/stdout, e.g. the forthcoming in-house Frida MCP server).
+- **`risk_default`** — the tier applied to every tool the worker exposes. `low`/`medium` auto-execute (still audited); `high` requires operator approval before dispatch; `critical` requires approval **and** a justification.
+
+At dispatch, calls flow through a `RiskAwareToolPool`. For `high`/`critical` tools you get an inline prompt in the CLI:
+
+```
+--- approval required ---
+  frida.execute_in_session  (declared=high effective=high)
+  args: javascript_code=Interceptor.attach(...
+  approve? [y/n/j/a]:
+```
+
+`y` approves once, `n` denies, `j` approves with a justification (forced for `critical`), `a` approves every call to that tool for the rest of the session. Every dispatch — approved, denied, or auto — is appended to a JSONL audit log under `PARE_AUDIT_DIR` (default `~/.local/share/pare/audit`), which lives outside your vault.
+
+### Adding a worker
+
+Edit `workers.yaml` and restart the daemon. Streamable HTTP worker:
+
+```yaml
+workers:
+  my_http_worker:
+    endpoint: http://127.0.0.1:9100/mcp
+    transport: streamable_http
+    risk_default: low
+    capability_tags: [static, apk]
+```
+
+stdio worker (PARE launches the process):
+
+```yaml
+workers:
+  frida:
+    command: /path/to/.venv/bin/python
+    args: [-m, your_frida_mcp_module]
+    transport: stdio
+    risk_default: high
+    capability_tags: [dynamic, frida]
+```
 
 ## Discord (optional)
 
@@ -102,8 +148,11 @@ pare/
     commands/
         hello.py     example Command; copy to add your own
     tools/
-        __init__.py  placeholder; add Tool subclasses and register on the class
+        __init__.py  StaticAnalyze (apk_re_agents /jobs wrapper) + Tool exports
+workers.yaml         MCP worker registry — streamable_http + stdio (see "Workers & risk gating")
 ```
+
+MCP-discovered tools are registered at startup by `PareAgent.register_tools()` and dispatched through a `RiskAwareToolPool`, so every worker tool call is risk-evaluated and audited.
 
 ### Extension points
 

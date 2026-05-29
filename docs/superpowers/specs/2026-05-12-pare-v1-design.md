@@ -585,9 +585,11 @@ The v1 spec is significant. Phases are scoped so each ends with something demons
 
 The chassis from Phases 0-3 means each new capability is "add a worker to `workers.yaml`" rather than "build a container." Phase 4 is the ongoing adoption work — one integration at a time, in the order conversational needs surface them. Each integration is its own small plan if it needs one; trivial ones (just edit `workers.yaml`) don't.
 
+**Infrastructure that landed during Phase 4:** the risk-enforcement layer shipped in `agent_core@v1.5.0`/`v1.5.1`. `RiskAwareToolPool` wraps the MCP client pool and enforces each worker's `risk_default` at dispatch — `low`/`medium` auto-execute (audited), `high`/`critical` block on an inline operator approval prompt delivered over the per-request connection — and every call is written to a JSONL audit log outside the vault. `risk_default` in `workers.yaml` is now live policy. Still outstanding as follow-ups: `risk_overrides:` name-pattern escalation and `kind: external_mcp` auto-bump.
+
 Adoption candidates, roughly in priority:
 
-- **Frida MCP** — Android + iOS dynamic analysis (hooks, scripts, memory). Either a community MCP server if one fits the workflow, or a thin in-house bridge wrapping `frida-tools`. This is the highest-value first integration because it replaces what would have been Phases 4-11 wholesale.
+- **Frida MCP** — Android + iOS dynamic analysis (hooks, scripts, memory). **Decided 2026-05-28: an in-house Python MCP server**, not a community one — Python for ecosystem fit and full source control, so PARE can shape the tool surface and author its own Frida scripts from vault-curated knowledge rather than lean on canned high-level helpers. This is the highest-value first integration because it replaces what would have been Phases 4-11 wholesale.
 - **mitmdump / traffic interception** — community wrapper if available, else a thin bridge. Pairs with Frida MCP for HTTPS pinning bypass.
 - **Platform tools** — a thin host-side MCP shim around `adb` and `libimobiledevice` (process/app listing, file pull, logcat, system_log) for the bits Frida doesn't cover. Tiny.
 - **Cardputer hardware bridge** — when the device arrives. An MCP server on the host that talks USB to the cardputer; exposes whatever interfaces the cardputer is wired for (BadUSB, UART, JTAG, SPI, etc.). Replaces the originally-speculative "Pi hardware-RE worker."
@@ -599,7 +601,7 @@ Items that *were* part of the original Android/iOS phases and may still need bes
 
 - Cert pinning bypass strategies (`bypass_pinning(strategy=...)`) — likely a small per-platform bridge if Frida MCP doesn't expose this directly.
 - iOS-specific tools (`keychain_dump`, `class_dump`, `decrypt_binary`) — likely a small in-house MCP server, since these are iOS-specific and not common in community Frida wrappers.
-- HITL gating on memory dumps and keychain access — already in `agent_core`'s data layer; the trigger lives in PARE's `RiskGate` configuration in `workers.yaml` (declared/effective tier per tool).
+- HITL gating on memory dumps and keychain access — **implemented and enforced at dispatch** via `RiskAwareToolPool` (`agent_core@v1.5.x`). Set the worker's `risk_default` (or, once the follow-up lands, a per-tool `risk_overrides:` pattern) to `high`/`critical` in `workers.yaml` and matching calls prompt the operator.
 
 **Phase 5 — Polish + operability + v1 tag**
 

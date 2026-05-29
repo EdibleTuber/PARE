@@ -1,9 +1,16 @@
 # PARE worker registry. Each entry maps to an agent_core WorkerSpec.
-# Format: workers.<name>.{endpoint, transport, risk_default, capability_tags?, kind?}
+# Format: workers.<name>.{endpoint | command+args, transport, risk_default, capability_tags?, kind?}
 #
-# Phase 3 lists the 8 apk_re_agents agents as MCP-direct workers. The
-# coordinator (/jobs HTTP API) is still consumed via the legacy
+# The entries below are the 8 apk_re_agents agents, reached over Streamable
+# HTTP. The coordinator (/jobs HTTP API) is still consumed via the legacy
 # static_analyze Tool (Phase 1) — that path is unchanged.
+#
+# stdio workers (a process PARE launches and talks to over stdin/stdout) are
+# declared with `command` + `args` instead of `endpoint` — e.g. the
+# forthcoming in-house Python Frida MCP server. risk_default sets the HITL
+# tier: low/medium auto-execute (audited); high needs operator approval;
+# critical needs approval + justification. See the README "Workers & risk
+# gating" section.
 workers:
   unpacker:
     endpoint: http://127.0.0.1:9000/mcp
