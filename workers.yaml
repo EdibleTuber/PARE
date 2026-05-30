@@ -1,62 +1,66 @@
 # PARE worker registry. Each entry maps to an agent_core WorkerSpec.
 # Format: workers.<name>.{endpoint | command+args, transport, risk_default, capability_tags?, kind?}
 #
-# The entries below are the 8 apk_re_agents agents, reached over Streamable
-# HTTP. The coordinator (/jobs HTTP API) is still consumed via the legacy
-# static_analyze Tool (Phase 1) — that path is unchanged.
-#
 # stdio workers (a process PARE launches and talks to over stdin/stdout) are
-# declared with `command` + `args` instead of `endpoint` — e.g. the
-# forthcoming in-house Python Frida MCP server. risk_default sets the HITL
-# tier: low/medium auto-execute (audited); high needs operator approval;
-# critical needs approval + justification. See the README "Workers & risk
-# gating" section.
+# declared with `command` + `args` instead of `endpoint` — e.g. the in-house
+# Python Frida MCP server. risk_default sets the HITL tier: low/medium
+# auto-execute (audited); high needs operator approval; critical needs approval
+# + justification. See the README "Workers & risk gating" section.
+#
+# NOTE (2026-05-30): the 8 apk_re_agents Streamable-HTTP workers are temporarily
+# commented out below. Their backing services (:9000–9007) aren't running, and
+# agent_core's discover_and_register currently lets an unreachable HTTP worker's
+# botched cancellation cascade and cancel sibling workers' discovery (including
+# frida). Re-enable them once (a) those services are up AND (b) the agent_core
+# discovery-robustness fix lands. See docs/superpowers/plans for the follow-up.
 workers:
-  unpacker:
-    endpoint: http://127.0.0.1:9000/mcp
-    transport: streamable_http
-    risk_default: low
-    capability_tags: [static, apk, decompile]
-  manifest_analyzer:
-    endpoint: http://127.0.0.1:9001/mcp
-    transport: streamable_http
-    risk_default: low
-    capability_tags: [static, apk, manifest]
-  string_extractor:
-    endpoint: http://127.0.0.1:9002/mcp
-    transport: streamable_http
-    risk_default: low
-    capability_tags: [static, apk, strings]
-  network_mapper:
-    endpoint: http://127.0.0.1:9003/mcp
-    transport: streamable_http
-    risk_default: low
-    capability_tags: [static, apk, network]
-  code_analyzer:
-    endpoint: http://127.0.0.1:9004/mcp
-    transport: streamable_http
-    risk_default: medium
-    capability_tags: [static, apk, code]
-  api_extractor:
-    endpoint: http://127.0.0.1:9005/mcp
-    transport: streamable_http
-    risk_default: low
-    capability_tags: [static, apk, api]
-  report_synthesizer:
-    endpoint: http://127.0.0.1:9006/mcp
-    transport: streamable_http
-    risk_default: low
-    capability_tags: [static, apk, report]
-  mobsf_analyzer:
-    endpoint: http://127.0.0.1:9007/mcp
-    transport: streamable_http
-    risk_default: low
-    capability_tags: [static, apk, mobsf]
   frida:
     command: pare-frida-mcp
     transport: stdio
     risk_default: high          # FLOOR during rollout — lower to medium only after the e2e gate is green
     capability_tags: [mobile, dynamic, android, frida]
+
+  # --- apk_re_agents (Streamable HTTP) — disabled until services run + discovery hardened ---
+  # unpacker:
+  #   endpoint: http://127.0.0.1:9000/mcp
+  #   transport: streamable_http
+  #   risk_default: low
+  #   capability_tags: [static, apk, decompile]
+  # manifest_analyzer:
+  #   endpoint: http://127.0.0.1:9001/mcp
+  #   transport: streamable_http
+  #   risk_default: low
+  #   capability_tags: [static, apk, manifest]
+  # string_extractor:
+  #   endpoint: http://127.0.0.1:9002/mcp
+  #   transport: streamable_http
+  #   risk_default: low
+  #   capability_tags: [static, apk, strings]
+  # network_mapper:
+  #   endpoint: http://127.0.0.1:9003/mcp
+  #   transport: streamable_http
+  #   risk_default: low
+  #   capability_tags: [static, apk, network]
+  # code_analyzer:
+  #   endpoint: http://127.0.0.1:9004/mcp
+  #   transport: streamable_http
+  #   risk_default: medium
+  #   capability_tags: [static, apk, code]
+  # api_extractor:
+  #   endpoint: http://127.0.0.1:9005/mcp
+  #   transport: streamable_http
+  #   risk_default: low
+  #   capability_tags: [static, apk, api]
+  # report_synthesizer:
+  #   endpoint: http://127.0.0.1:9006/mcp
+  #   transport: streamable_http
+  #   risk_default: low
+  #   capability_tags: [static, apk, report]
+  # mobsf_analyzer:
+  #   endpoint: http://127.0.0.1:9007/mcp
+  #   transport: streamable_http
+  #   risk_default: low
+  #   capability_tags: [static, apk, mobsf]
 
 # Operator policy: authoritative ceiling above whatever the worker self-declares
 # over the wire. These pins survive a buggy/compromised worker that under-reports

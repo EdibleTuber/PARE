@@ -56,11 +56,15 @@ Or use the installed script:
 .venv/bin/pare-daemon
 ```
 
-Connect via the CLI adapter (separate terminal):
+Connect via the CLI (separate terminal):
 
 ```bash
-.venv/bin/python -m agent_core.adapters.cli
+.venv/bin/pare-cli
 ```
+
+(`pare-cli` wires `agent_core`'s generic REPL to PARE's config/socket. The bare
+`python -m agent_core.adapters.cli` does **not** work — that module is a library
+with no `__main__`.)
 
 ## Smoke Test
 
@@ -132,8 +136,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now pare-daemon
 ```
 
-For a CLI service that stays running, use `agent_core.adapters.cli` as the
-ExecStart target (no template provided; the CLI is typically run interactively).
+The CLI (`pare-cli`) is typically run interactively in a terminal, not as a
+service.
 
 ---
 
