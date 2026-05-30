@@ -19,9 +19,13 @@ from pare.config import load_config
 
 
 class _PareRenderer:
-    """Minimal renderer: delegate all formatting to the REPL's built-in
-    default by returning None for every message. Can be enriched later to
-    pretty-print PARE-specific message types."""
+    """Minimal renderer implementing the agent_core REPL `Renderer` protocol
+    (splash + format_message). format_message returns None for every message,
+    delegating to the REPL's built-in default formatting. Can be enriched later
+    to pretty-print PARE-specific message types."""
+
+    def splash(self) -> str:
+        return "PARE — Personal Agentic Reverse Engineer. Type a message, or /help."
 
     def format_message(self, msg) -> str | None:
         return None
