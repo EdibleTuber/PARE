@@ -52,3 +52,15 @@ workers:
     transport: streamable_http
     risk_default: low
     capability_tags: [static, apk, mobsf]
+  frida:
+    command: pare-frida-mcp
+    transport: stdio
+    risk_default: high          # FLOOR during rollout — lower to medium only after the e2e gate is green
+    capability_tags: [mobile, dynamic, android, frida]
+
+# Operator policy: authoritative ceiling above whatever the worker self-declares
+# over the wire. These pins survive a buggy/compromised worker that under-reports
+# its tiers — fed into RiskGate(overrides=...) (override-up only).
+risk_overrides:
+  - ["frida_execute_script", "critical"]
+  - ["frida_write_memory", "high"]
