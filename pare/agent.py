@@ -49,7 +49,7 @@ class PareAgent(Agent):
         self.tool_pool = RiskAwareToolPool(
             inner=self.mcp_pool,
             specs={s.name: s for s in specs},
-            risk_gate=RiskGate(overrides=[]),
+            risk_gate=RiskGate(overrides=registry.risk_overrides()),
             approval_registry=self.tool_approval_registry,
             audit_log=AuditLog(self.config.audit_dir),
             send_message=None,  # approval requests delivered via per-request ctx.emit
