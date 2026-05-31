@@ -62,3 +62,8 @@ def test_read_vault_doc_metadata():
     assert ReadVaultDoc.requires == ("retrieval",)
     assert "path" in ReadVaultDoc.parameters["properties"]
     assert "path" in ReadVaultDoc.parameters.get("required", [])
+
+
+def test_read_vault_doc_registered_on_agent():
+    from pare.agent import PareAgent
+    assert ReadVaultDoc in PareAgent.tools

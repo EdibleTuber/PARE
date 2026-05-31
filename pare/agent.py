@@ -22,7 +22,7 @@ from agent_core.workers.audit import AuditLog
 
 from pare.commands.hello import Hello
 from pare.commands.health import Health
-from pare.tools import StaticAnalyze
+from pare.tools import ReadVaultDoc, StaticAnalyze
 from pare.tools._http import ApkReAgentsClient
 
 
@@ -30,7 +30,7 @@ class PareAgent(Agent):
     name = "pare"
     env_prefix = "PARE_"
 
-    tools = [StaticAnalyze]  # add Tool subclasses here
+    tools = [StaticAnalyze, ReadVaultDoc]  # add Tool subclasses here
     commands = [Hello, Health]  # framework builtins serve /help, /clear, etc.
 
     def setup(self) -> None:
