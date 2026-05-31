@@ -21,6 +21,10 @@ class PAREConfig(BaseConfig):
     assumes localhost on port 8000 in the local lab).
     """
 
+    # Override BaseConfig's Qwen default: gemma-4-26b handles tool-calling
+    # far more reliably for PARE's agentic loop. Env-overridable via PARE_MODEL.
+    model: str = "gemma-4-26b-a4b-it-q4_k_m"
+
     apk_re_agents_url: str = "http://127.0.0.1:8000"
     workers_yaml_path: str = "workers.yaml"
     audit_dir: Path = field(
