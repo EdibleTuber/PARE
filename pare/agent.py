@@ -33,6 +33,14 @@ class PareAgent(Agent):
     tools = [StaticAnalyze, ReadVaultDoc]  # add Tool subclasses here
     commands = [Hello, Health]  # framework builtins serve /help, /clear, etc.
 
+    # vault_path is PARE's private state dir (RAG-only reads of PAL's vault),
+    # so the framework shell builtins — scoped to vault_path — would only let
+    # the model grep PARE's own state. Disable them; PAL research goes through
+    # search_vault + read_vault_doc. Workspace-scoped reads return in PR2.
+    disabled_builtins = frozenset({
+        "cat", "head", "tail", "ls", "grep", "find", "read_lines",
+    })
+
     def setup(self) -> None:
         """Construct domain resources: apk_re_agents HTTP client (Phase 1), the
         MCP connection pool, and a RiskAwareToolPool that gates high/critical
