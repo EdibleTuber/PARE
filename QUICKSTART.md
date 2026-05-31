@@ -106,6 +106,10 @@ before dispatching:
 approved, denied, or auto — is appended to the JSONL audit log under
 `PARE_AUDIT_DIR` (default `~/.local/share/pare/audit/`).
 
+For the full Frida dynamic-analysis workflow (device + `frida-server` setup,
+attaching, Java hooks, scripts, the capture store), see
+[`docs/frida-quickstart.md`](docs/frida-quickstart.md).
+
 ## 6. Verify the install (no live stack needed)
 
 ```bash
