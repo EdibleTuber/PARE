@@ -9,6 +9,7 @@ class Health(Command):
     """Report PARE daemon status: agent name, model, configured endpoints."""
 
     name = "health"
+    args = ""  # takes no arguments; required by Command base + CommandRegistry.metadata()
     description = "Show PARE daemon status and configured endpoints."
 
     async def run(self, raw_args: str, ctx) -> AsyncIterator:
