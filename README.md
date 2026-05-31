@@ -88,7 +88,11 @@ The full suite passes (currently 44 passed, 3 skipped). The 3 skips are env-gate
 
 PARE reaches analysis tools through MCP workers declared in `workers.yaml`. Each entry maps to an `agent_core` `WorkerSpec`:
 
-- **Transport** — `streamable_http` (a worker reached over HTTP, e.g. the apk_re_agents agents) or `stdio` (a worker PARE launches as a subprocess and talks to over stdin/stdout, e.g. the forthcoming in-house Frida MCP server).
+- **Transport** — `streamable_http` (a worker reached over HTTP, e.g. the apk_re_agents agents) or `stdio` (a worker PARE launches as a subprocess and talks to over stdin/stdout, e.g. the in-house `pare-frida-mcp` Frida server).
+
+> For the end-to-end Frida dynamic-analysis workflow (device + `frida-server`
+> setup, attach, Java hooks, scripts, capture store), see
+> [`docs/frida-quickstart.md`](docs/frida-quickstart.md).
 - **`risk_default`** — the tier applied to every tool the worker exposes. `low`/`medium` auto-execute (still audited); `high` requires operator approval before dispatch; `critical` requires approval **and** a justification.
 
 At dispatch, calls flow through a `RiskAwareToolPool`. For `high`/`critical` tools you get an inline prompt in the CLI:
