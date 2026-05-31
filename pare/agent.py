@@ -108,3 +108,82 @@ class PareAgent(Agent):
         and the builtins /help, /clear, /context)."""
         async for out in self.command_registry.dispatch(msg.name, msg.args, ctx):
             yield out
+
+    async def handle_chat(
+        self, msg: ChatMessage, ctx: HandlerContext,
+    ) -> AsyncIterator[object]:
+        """Stream a reply, running tools when the model calls them.
+
+        Pure-yield: the daemon emits every yielded message. Risk gating and
+        operator approval happen transparently inside tool_executor.run ->
+        tool_pool.call_tool (the daemon's read loop resolves the approval
+        future while we're parked on the await). Ported from pal/agent.py.
+        """
+        from agent_core.inference import StreamEnd
+
+        conv = ctx.conversation
+        conv.add_user(msg.text)
+        mode = self.decide_mode(conv)            # "on" | "off" (never "auto")
+        messages = conv.get_messages_for_api(system_prompt=self.system_prompt(ctx))
+        schemas = self.tool_executor.schemas()
+        MAX_TOOL_ROUNDS = 50
+        MAX_TOKENS = 4096                        # runaway-loop stopgap (matches PAL)
+
+        try:
+            tool_calls = None
+            if mode == "on":
+                completion = await self.inference.complete(
+                    messages, tools=schemas, reasoning=mode, max_tokens=MAX_TOKENS)
+                self.record_usage(ctx.channel_id, completion.usage)
+                if completion.type == "text":
+                    conv.add_assistant(completion.content or "")
+                    yield ResponseMessage(text=completion.content or "",
+                                          reasoning=completion.reasoning or "")
+                    return
+                tool_calls = completion.tool_calls
+            else:
+                full: list[str] = []
+                async for item in self.inference.stream(
+                    messages, tools=schemas, reasoning=mode, max_tokens=MAX_TOKENS):
+                    if isinstance(item, list):
+                        tool_calls = item
+                        break  # NOTE: usage for this streamed segment is not recorded
+                               # (stream() omits StreamEnd on the tool-call path) — the
+                               # follow-up complete() repopulates last_usage. Matches PAL.
+                    if isinstance(item, StreamEnd):
+                        self.record_usage(ctx.channel_id, item.usage)
+                        break
+                    yield StreamChunkMessage(token=item)
+                    full.append(item)
+                if tool_calls is None:
+                    conv.add_assistant("".join(full))
+                    yield ResponseMessage(text="".join(full))
+                    return
+
+            for _round in range(MAX_TOOL_ROUNDS):
+                conv.add_assistant_tool_calls([
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
+                    for tc in tool_calls
+                ])
+                for tc in tool_calls:
+                    yield ToolProgressMessage(tool=tc.name, arguments=tc.arguments)
+                    result = await self.tool_executor.run(tc.name, tc.arguments, ctx)
+                    conv.add_tool_result(tc.id, result)
+                messages = conv.get_messages_for_api(system_prompt=self.system_prompt(ctx))
+                completion = await self.inference.complete(
+                    messages, tools=schemas, reasoning=mode, max_tokens=MAX_TOKENS)
+                self.record_usage(ctx.channel_id, completion.usage)
+                if completion.type == "text":
+                    conv.add_assistant(completion.content or "")
+                    yield ResponseMessage(text=completion.content or "",
+                                          reasoning=completion.reasoning or "")
+                    return
+                tool_calls = completion.tool_calls
+
+            cap = "Reached the tool-call limit for this turn. Here's what I have so far."
+            conv.add_assistant(cap)
+            yield ResponseMessage(text=cap)
+        except Exception as exc:
+            logger.exception("Chat error: %s", exc)
+            yield ErrorMessage(error=f"Chat error: {exc}")
