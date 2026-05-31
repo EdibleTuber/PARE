@@ -183,9 +183,12 @@ files. (Workspace-scoped read tools return in PR 2.)
 
 ### 4. New tool: `read_vault_doc` (`pare/tools/`)
 
-- Signature: `read_vault_doc(doc_id: str) -> str`. Calls
-  `ctx.agent.retrieval.get_document(doc_id)` (`agent_core/retrieval.py:49`) and returns the
-  document's `content` (with `name`/`summary` header). `requires = ("retrieval",)`.
+- Signature: `read_vault_doc(path: str) -> str`. Takes the `path` field a
+  `search_vault` hit returns (`"{id}.md"`), strips the trailing `.md` to recover the
+  `doc_id`, calls `ctx.agent.retrieval.get_document(doc_id)` (`agent_core/retrieval.py:49`),
+  and returns the document's `content` (with `name`/`summary` header).
+  `requires = ("retrieval",)`. (Using `path` keeps it consistent with what `search_vault`
+  actually emits — see `agent_core/tools/_framework.py:SearchVault`.)
 - `get_document` already rejects path-traversal `doc_id`s and raises `FileNotFoundError`
   for unknown ids; the tool catches both and returns an error string (never raises).
 - Registered in `PareAgent.tools`.
