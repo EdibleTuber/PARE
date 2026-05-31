@@ -12,6 +12,18 @@ Extension points:
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+from typing import AsyncIterator
+
+from agent_core.protocol import (
+    ChatMessage,
+    CommandMessage,
+    ErrorMessage,
+    ResponseMessage,
+    StreamChunkMessage,
+    ToolProgressMessage,
+)
 
 from agent_core.agent import Agent, HandlerContext
 from agent_core.workers import MCPClientPool, discover_and_register
@@ -24,6 +36,8 @@ from pare.commands.hello import Hello
 from pare.commands.health import Health
 from pare.tools import ReadVaultDoc, StaticAnalyze
 from pare.tools._http import ApkReAgentsClient
+
+logger = logging.getLogger(__name__)
 
 
 class PareAgent(Agent):
@@ -86,3 +100,11 @@ class PareAgent(Agent):
             pb.render_scratchpad(ctx.channel_id),
             pb.render_commands_catalog(),
         ]))
+
+    async def handle_command(
+        self, msg: CommandMessage, ctx: HandlerContext,
+    ) -> AsyncIterator[object]:
+        """Delegate to the framework command registry (serves /hello, /health,
+        and the builtins /help, /clear, /context)."""
+        async for out in self.command_registry.dispatch(msg.name, msg.args, ctx):
+            yield out
