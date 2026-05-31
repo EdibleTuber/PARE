@@ -84,8 +84,21 @@ class PareAgent(Agent):
         Called by agent_core's runtime after setup(). The returned list is
         unioned with the class-level `tools` ClassVar (StaticAnalyze). Bridges
         async discovery to the sync hook via asyncio.run.
+
+        Discovery lazy-connects each worker in THIS throwaway asyncio.run loop
+        (MCPClientPool caches the client on first list_tools). We close the pool
+        before returning so those connections don't leak into the daemon's
+        separate serving loop — a stdio worker's streams are bound to the loop
+        that opened them, so a reused-across-loops client dies on the first
+        dispatched call with ClosedResourceError. The serving loop reconnects
+        lazily on first call_tool, in its own loop.
         """
-        return asyncio.run(discover_and_register(self._worker_specs, self.tool_pool))
+        async def _discover():
+            classes = await discover_and_register(self._worker_specs, self.tool_pool)
+            await self.tool_pool.close_all()
+            return classes
+
+        return asyncio.run(_discover())
 
     def system_prompt(self, ctx: HandlerContext) -> str:
         from pathlib import Path
