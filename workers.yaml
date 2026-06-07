@@ -17,7 +17,7 @@ workers:
   frida:
     command: pare-frida-mcp
     transport: stdio
-    risk_default: high          # FLOOR during rollout — lower to medium only after the e2e gate is green
+    risk_default: low           # advertised per-tool tiers govern; reads auto-execute, dangerous tools gate (read_memory/java_hook/write_memory=high, execute_script=critical)
     capability_tags: [mobile, dynamic, android, frida]
 
   # --- apk_re_agents (Streamable HTTP) — disabled until services run + discovery hardened ---
