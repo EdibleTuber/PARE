@@ -34,6 +34,7 @@ from agent_core.workers.audit import AuditLog
 
 from pare.commands.hello import Hello
 from pare.commands.health import Health
+from pare.commands.snapshot import Snapshot
 from pare.tools import ReadVaultDoc, StaticAnalyze
 from pare.tools._http import ApkReAgentsClient
 
@@ -45,7 +46,7 @@ class PareAgent(Agent):
     env_prefix = "PARE_"
 
     tools = [StaticAnalyze, ReadVaultDoc]  # add Tool subclasses here
-    commands = [Hello, Health]  # framework builtins serve /help, /clear, etc.
+    commands = [Hello, Health, Snapshot]  # framework builtins serve /help, /clear, etc.
 
     # vault_path is PARE's private state dir (RAG-only reads of PAL's vault),
     # so the framework shell builtins — scoped to vault_path — would only let
