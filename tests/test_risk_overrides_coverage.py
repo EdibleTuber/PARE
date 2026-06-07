@@ -12,7 +12,7 @@ import fnmatch
 import pytest
 
 from agent_core.workers.registry import WorkerRegistry
-from agent_core.workers.risk import RiskGate
+from agent_core.workers.risk import RiskGate, resolve_declared_tier
 
 
 def _frida_tool_targets():
@@ -41,3 +41,33 @@ def test_dangerous_frida_tools_resolve_to_pinned_tiers():
                          declared_tier="low").effective_tier == "critical"
     assert gate.evaluate(worker="frida", tool="write_memory",
                          declared_tier="low").effective_tier == "high"
+
+
+def test_frida_floor_is_low():
+    reg = WorkerRegistry.load("workers.yaml")
+    assert reg.get("frida").risk_default == "low"
+
+
+def test_readonly_frida_tools_auto_execute_under_low_floor():
+    """With floor=low and honest advertised tiers, metadata/capture reads
+    resolve to a non-gated tier; live-memory / behavior-altering tools gate."""
+    reg = WorkerRegistry.load("workers.yaml")
+    spec = reg.get("frida")
+    import pare_frida_mcp.contract as contract
+    advertised = {s.name: s.risk_tier for s in contract.TOOL_SPECS}
+
+    def declared(tool):
+        return resolve_declared_tier(spec, advertised[tool])[0]
+
+    # Gate fires only on high/critical (risk_pool). These must NOT gate:
+    for tool in ("enumerate_processes", "enumerate_applications",
+                 "enumerate_modules", "enumerate_exports",
+                 "search_capture", "read_capture",
+                 "list_devices", "select_device",
+                 "java_hook_remove", "attach", "load_script"):
+        assert declared(tool) in ("low", "medium"), f"{tool} should auto-execute"
+
+    # These MUST gate:
+    for tool in ("read_memory", "java_hook", "write_memory"):
+        assert declared(tool) == "high", f"{tool} should be gated"
+    assert declared("execute_script") == "critical"
