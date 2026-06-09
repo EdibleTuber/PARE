@@ -15,7 +15,7 @@
 # discovery-robustness fix lands. See docs/superpowers/plans for the follow-up.
 workers:
   frida:
-    command: pare-frida-mcp
+    command: /home/edible/Projects/PARE/.venv/bin/pare-frida-mcp
     transport: stdio
     risk_default: low           # advertised per-tool tiers govern; reads auto-execute, dangerous tools gate (read_memory/java_hook/write_memory=high, execute_script=critical)
     capability_tags: [mobile, dynamic, android, frida]
