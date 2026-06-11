@@ -1,7 +1,7 @@
 # PARE operator fast path — direct slash-command tool invocation alongside the agent — Design
 
 **Date:** 2026-06-08
-**Status:** Approved (brainstorm), pending written-spec review
+**Status:** Implemented (2026-06-09) — see docs/superpowers/plans/2026-06-09-operator-fast-path.md
 **Branch context:** follows the merged PR #5 (`feat/per-tool-risk-tier-wire`) and the frida-worker launcher fix (`workers.yaml` `frida.command` pinned to the venv path)
 
 ## Problem
@@ -201,6 +201,17 @@ current `agent_core` before implementation**:
    perturb the target. (§3)
 4. Whether `/snapshot` (already a planned PARE command) should be unified with this
    dispatcher or remain separate.
+
+**Resolutions (2026-06-09):**
+1. No agent_core change needed for v1 — all fast-path commands map to low/medium
+   tiers, which auto-execute and are already audited. Skip-prompt + actor-tagging
+   deferred to operator high/critical (same feature).
+2. Shared MCP client is safe — both callers are async tasks in one daemon event
+   loop, serialized at `await call_tool`. No explicit queue added.
+3. Liveness probe: `frida.Session.is_detached` (cheap property, no RPC); a
+   missing/None session is reported as not-live.
+4. /snapshot stays a separate Command; fast-path commands are sibling Commands
+   sharing pare/commands/_frida.py. No monolithic dispatcher.
 
 ## Cross-repo dependency
 
