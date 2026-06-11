@@ -17,3 +17,15 @@ agent (PAL). Prefer it over answering from training data alone:
 - Use `read_vault_doc` with a hit's `path` to read that note's full body.
 - When a question touches prior research, search the vault first, then cite what you
   found. If the vault has nothing relevant, say so and proceed from general knowledge.
+
+## Working with live sessions
+
+Attach sessions (created by the operator's `/attach`, or by you) live in the
+worker process, not in this conversation. Their liveness is mutable — the
+operator may detach, swap targets, or a USB hiccup may kill a session between
+your turns.
+
+Before acting on a session (authoring/running scripts, hooking, reading memory),
+call `list_sessions` to confirm the session_id is still live. Never assume a
+session_id mentioned earlier in the conversation is still attached — query the
+worker, don't trust memory.
