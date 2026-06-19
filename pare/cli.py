@@ -13,6 +13,7 @@ own launcher so it can supply its config + renderer.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
 from agent_core.adapters.cli import run_repl
 from pare.config import load_config
@@ -31,9 +32,20 @@ class _PareRenderer:
         return None
 
 
+def _new_channel_id() -> str:
+    """Mint a fresh per-launch channel id (cli-<YYYYMMDD>-<HHMMSS>).
+
+    Each pare-cli invocation gets its own channel, so the conversation starts
+    clean and is persisted to its own transcript file under
+    <vault>/_channels/pare/<id>/history.jsonl — instead of every launch sharing
+    (and replaying) the daemon's cli-default channel, which leaked context
+    across unrelated sessions."""
+    return datetime.now().strftime("cli-%Y%m%d-%H%M%S")
+
+
 def main() -> None:
     config = load_config()
-    asyncio.run(run_repl(config.socket_path, _PareRenderer()))
+    asyncio.run(run_repl(config.socket_path, _PareRenderer(), channel_id=_new_channel_id()))
 
 
 if __name__ == "__main__":
