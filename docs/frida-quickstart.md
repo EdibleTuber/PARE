@@ -11,7 +11,7 @@ vault, daemon, CLI). Read that first; this guide adds the Frida worker.
 ## What the Frida worker provides
 
 PARE talks to Frida through the in-house [`pare-frida-mcp`](https://github.com/EdibleTuber/pare-frida-mcp)
-stdio worker (Android v1, Frida 17). It exposes 13 tools; PARE registers them as
+stdio worker (Android v1, Frida 17). It exposes 18 tools; PARE registers them as
 `frida_<tool>`:
 
 | Tool | Wire tier | What it does |
@@ -19,16 +19,21 @@ stdio worker (Android v1, Frida 17). It exposes 13 tools; PARE registers them as
 | `list_devices` | low | List Frida devices |
 | `select_device` | low | Select a device by id |
 | `attach` | medium | Attach to a process by pid or name |
-| `enumerate_modules` | low | List loaded modules |
-| `enumerate_exports` | low | List a module's exports |
+| `list_sessions` | low | List live sessions with a real liveness probe |
+| `detach` | medium | Detach a live session and tear down its capture state |
+| `enumerate_processes` | low | List device processes into the `@snapshots` store |
+| `enumerate_applications` | low | List installed apps into the `@snapshots` store |
+| `enumerate_modules` | low | List an attached process's modules into `@snapshots` |
+| `enumerate_exports` | low | List a module's exports into `@snapshots` |
 | `load_script` | medium | Load a bundled script export set |
 | `execute_script` | **critical** | Evaluate arbitrary JS in a session |
-| `java_hook` | medium | Install an observing Java method hook |
+| `java_hook` | **high** | Install an observing Java method hook |
 | `java_hook_remove` | low | Remove a Java method hook |
-| `read_memory` | medium | Read target memory (hex preview) |
+| `read_memory` | **high** | Read target memory (hex preview) |
 | `write_memory` | **high** | Write bytes to target memory |
-| `search_capture` | low | Search captured events |
+| `search_capture` | low | Search captured events / snapshots |
 | `read_capture` | low | Read a captured record slice |
+| `page_capture` | low | Read ALL rows of a snapshot for `/snapshot` (complete, not sampled) |
 
 > **iOS, SSL/root/JB bypasses, the script vault, and `scan_memory` are not in v1** —
 > they're tracked fast-follows in the worker's design spec.
