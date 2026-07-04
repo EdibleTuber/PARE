@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Personal Agentic Reverse Engineer — conversational mobile RE operator."
 requires-python = ">=3.12"
 dependencies = [
-    "agent_core @ git+https://github.com/EdibleTuber/agent_core.git@2ac590393266486c57ab5bae26b1bc686b347e85",
+    "agent_core @ git+https://github.com/EdibleTuber/agent_core.git@405d07f5eea11d00d3d984ec3c4ce3dce9c2efe1",
     "httpx>=0.27.0",
     "pyyaml>=6.0",
 ]
