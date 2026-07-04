@@ -6,6 +6,7 @@ cli-default channel, which leaked context across separate sessions.
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -48,3 +49,5 @@ def test_main_passes_a_per_launch_channel_id_to_repl(monkeypatch):
     assert captured["channel_id"] is not None
     assert captured["channel_id"].startswith("cli-")
     assert validate_channel_id(captured["channel_id"])
+    # cwd is stamped so the daemon can resolve a per-project capture store
+    assert captured["cwd"] == os.getcwd()
