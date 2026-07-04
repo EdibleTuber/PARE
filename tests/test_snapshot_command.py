@@ -48,3 +48,24 @@ async def test_snapshot_query_filters_rows():
 async def test_snapshot_empty_store_is_friendly():
     out = await _collect(Snapshot().run("", _Ctx(_Agent(CaptureStore.open_memory()))))
     assert "nothing captured" in out[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_renders_real_frida_envelope_as_rows():
+    """A wire-captured frida enumerate stores the FULL 2-key envelope
+    {"summary": ..., "processes": [...]} — not a bare list. /snapshot must
+    unwrap it to per-process rows, not one mangled cell. Regression for the
+    infer_rows annotated-list fix."""
+    s = CaptureStore.open_memory()
+    s.write(CaptureRecord(
+        worker="frida", tool="enumerate_processes", session_id=None, launch_ts=1.0,
+        summary="2 processes",
+        body=json.dumps({"summary": "2 processes",
+                         "processes": [{"pid": 1, "name": "init"}, {"pid": 9, "name": "zygote"}]}),
+        rows=2, addrs=[]))
+    out = await _collect(Snapshot().run("", _Ctx(_Agent(s))))
+    text = out[0].text
+    assert "· 2 rows" in text           # unwrapped to 2 rows, not "1 rows"
+    assert "init" in text and "zygote" in text
+    assert "pid" in text                 # process columns, not envelope keys
+    assert "summary" not in text.split("\n")[0]  # header is not the envelope
