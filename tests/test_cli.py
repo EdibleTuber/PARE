@@ -32,9 +32,10 @@ def test_main_passes_a_per_launch_channel_id_to_repl(monkeypatch):
     daemon routes to a per-launch channel instead of cli-default."""
     captured: dict = {}
 
-    async def fake_run_repl(socket_path, renderer, channel_id=None):
+    async def fake_run_repl(socket_path, renderer, channel_id=None, cwd=None):
         captured["socket_path"] = socket_path
         captured["channel_id"] = channel_id
+        captured["cwd"] = cwd
 
     class _FakeConfig:
         socket_path = Path("/ignored.sock")

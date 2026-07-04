@@ -30,6 +30,7 @@ class PAREConfig(BaseConfig):
     audit_dir: Path = field(
         default_factory=lambda: Path.home() / ".local" / "share" / "pare" / "audit"
     )
+    project_marker: str | None = ".pare"
 
 
 def load_config() -> PAREConfig:

@@ -44,8 +44,10 @@ def _new_channel_id() -> str:
 
 
 def main() -> None:
+    import os
     config = load_config()
-    asyncio.run(run_repl(config.socket_path, _PareRenderer(), channel_id=_new_channel_id()))
+    asyncio.run(run_repl(config.socket_path, _PareRenderer(),
+                         channel_id=_new_channel_id(), cwd=os.getcwd()))
 
 
 if __name__ == "__main__":
