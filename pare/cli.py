@@ -13,6 +13,7 @@ own launcher so it can supply its config + renderer.
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime
 
 from agent_core.adapters.cli import run_repl
@@ -45,7 +46,8 @@ def _new_channel_id() -> str:
 
 def main() -> None:
     config = load_config()
-    asyncio.run(run_repl(config.socket_path, _PareRenderer(), channel_id=_new_channel_id()))
+    asyncio.run(run_repl(config.socket_path, _PareRenderer(),
+                         channel_id=_new_channel_id(), cwd=os.getcwd()))
 
 
 if __name__ == "__main__":

@@ -3,8 +3,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pare.agent import PareAgent
+from agent_core.capture import CaptureStore
 from agent_core.protocol import ResponseMessage
+from pare.agent import PareAgent
 
 
 class _FakeRegistry:
@@ -21,6 +22,9 @@ class _FakeRegistry:
 @pytest.mark.asyncio
 async def test_handle_command_passes_through_registry_output():
     agent = PareAgent()
+    # Stub the capture store manager so _bind_store works without full setup().
+    agent._capture_stores = MagicMock()
+    agent._capture_stores.resolve.return_value = CaptureStore.open_memory()
     agent.command_registry = _FakeRegistry([ResponseMessage(text="pong")])
     ctx = MagicMock()
     msg = MagicMock(name="cmd", args="")

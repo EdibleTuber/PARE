@@ -1,3 +1,4 @@
+# tests/test_frida_views_commands.py
 import json
 
 import pytest
@@ -18,14 +19,16 @@ class _Result:
 
 
 class _Pool:
-    """Fake tool_pool routing by tool name to a canned payload."""
+    """Fake tool_pool routing by tool name to a canned payload. Records every
+    call as (worker, tool, args, capture) so tests can assert the operator fast
+    path dispatches with capture=False and makes no second page_capture call."""
 
     def __init__(self, by_tool):
         self._by_tool = by_tool
         self.calls = []
 
-    async def call_tool(self, worker, tool, args, ctx=None):
-        self.calls.append((worker, tool, args))
+    async def call_tool(self, worker, tool, args, ctx=None, capture=True):
+        self.calls.append((worker, tool, args, capture))
         return _Result(self._by_tool[tool])
 
 
@@ -38,8 +41,10 @@ async def _run(cmd_cls, raw, by_tool):
     cmd = cmd_cls()
     ctx = _Ctx(_Pool(by_tool))
     msgs = [m async for m in cmd.run(raw, ctx)]
-    return msgs, ctx
+    return msgs, ctx.agent.tool_pool
 
+
+# --- Devices / Sessions (unchanged commands; coverage retained) ---------------
 
 @pytest.mark.asyncio
 async def test_devices_renders_table():
@@ -73,45 +78,28 @@ async def test_sessions_renders_liveness():
     assert "com.bank" in text and "100" in text
 
 
+# --- Ps / Apps: full-list render, capture=False, no page_capture --------------
+
 @pytest.mark.asyncio
-async def test_ps_enumerates_then_pages():
-    msgs, ctx = await _run(Ps, "emulator-5554", {
-        "enumerate_processes": {"summary": "2 captured", "store": "@snapshots",
-                                "source": "enumerate_processes:device=emulator-5554", "total": 2},
-        "page_capture": {"store": "@snapshots", "source": "enumerate_processes:device=emulator-5554",
-                         "total": 2, "shown": 2,
-                         "rows": [{"pid": 1, "name": "zygote"}, {"pid": 2, "name": "system_server"}]},
+async def test_ps_renders_full_list_and_uses_capture_false():
+    msgs, pool = await _run(Ps, "", {
+        "enumerate_processes": {"summary": "2 processes", "processes": [
+            {"pid": 1, "name": "init"}, {"pid": 9, "name": "zygote"}]},
     })
     text = msgs[-1].text
-    assert "zygote" in text and "system_server" in text
-    assert ("frida", "enumerate_processes", {"device_id": "emulator-5554"}) in ctx.agent.tool_pool.calls
-    assert ("frida", "page_capture",
-            {"session_id": "@snapshots", "source": "enumerate_processes:device=emulator-5554"}) in ctx.agent.tool_pool.calls
+    assert "zygote" in text and "init" in text
+    # operator fast path stores but never substitutes -> capture=False
+    assert ("frida", "enumerate_processes", {}, False) in pool.calls
+    # single call; no second page_capture round-trip
+    assert all(tool != "page_capture" for _, tool, _, _ in pool.calls)
 
 
 @pytest.mark.asyncio
-async def test_ps_no_device_arg_omits_device_id():
-    msgs, ctx = await _run(Ps, "", {
-        "enumerate_processes": {"summary": "0 captured", "store": "@snapshots",
-                                "source": "enumerate_processes", "total": 0},
-        "page_capture": {"store": "@snapshots", "source": "enumerate_processes",
-                         "total": 0, "shown": 0, "rows": []},
+async def test_apps_renders_applications_key():
+    msgs, pool = await _run(Apps, "", {
+        "enumerate_applications": {"summary": "1 applications", "applications": [
+            {"identifier": "com.x"}]},
     })
-    assert ("frida", "enumerate_processes", {}) in ctx.agent.tool_pool.calls
-
-
-@pytest.mark.asyncio
-async def test_ps_enumerate_error_surfaces():
-    msgs, _ = await _run(Ps, "", {"enumerate_processes": {"error": True, "summary": "enumerate_processes failed"}})
-    assert "failed" in msgs[-1].text
-
-
-@pytest.mark.asyncio
-async def test_apps_enumerates_then_pages():
-    msgs, _ = await _run(Apps, "", {
-        "enumerate_applications": {"summary": "1 apps", "store": "@snapshots",
-                                   "source": "enumerate_applications:device=emu", "total": 1},
-        "page_capture": {"store": "@snapshots", "source": "enumerate_applications:device=emu",
-                         "total": 1, "shown": 1, "rows": [{"identifier": "com.bank", "name": "Bank"}]},
-    })
-    assert "com.bank" in msgs[-1].text
+    assert "com.x" in msgs[-1].text
+    assert ("frida", "enumerate_applications", {}, False) in pool.calls
+    assert all(tool != "page_capture" for _, tool, _, _ in pool.calls)

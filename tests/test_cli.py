@@ -6,6 +6,7 @@ cli-default channel, which leaked context across separate sessions.
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -32,9 +33,10 @@ def test_main_passes_a_per_launch_channel_id_to_repl(monkeypatch):
     daemon routes to a per-launch channel instead of cli-default."""
     captured: dict = {}
 
-    async def fake_run_repl(socket_path, renderer, channel_id=None):
+    async def fake_run_repl(socket_path, renderer, channel_id=None, cwd=None):
         captured["socket_path"] = socket_path
         captured["channel_id"] = channel_id
+        captured["cwd"] = cwd
 
     class _FakeConfig:
         socket_path = Path("/ignored.sock")
@@ -47,3 +49,5 @@ def test_main_passes_a_per_launch_channel_id_to_repl(monkeypatch):
     assert captured["channel_id"] is not None
     assert captured["channel_id"].startswith("cli-")
     assert validate_channel_id(captured["channel_id"])
+    # cwd is stamped so the daemon can resolve a per-project capture store
+    assert captured["cwd"] == os.getcwd()

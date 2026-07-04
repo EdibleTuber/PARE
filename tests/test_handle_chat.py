@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agent_core.capture import CaptureStore
 from agent_core.conversation import Conversation
 from agent_core.inference import CompletionResult, StreamEnd, ToolCall, Usage
 from agent_core.protocol import (
@@ -19,6 +20,9 @@ def _make_agent(mode="off"):
     agent.tool_executor = MagicMock()
     agent.tool_executor.schemas = MagicMock(return_value=[])
     agent.inference = MagicMock()
+    # Stub the capture store manager so _bind_store works without full setup().
+    agent._capture_stores = MagicMock()
+    agent._capture_stores.resolve.return_value = CaptureStore.open_memory()
     return agent
 
 
