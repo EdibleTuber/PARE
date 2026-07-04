@@ -1,86 +1,50 @@
+# tests/test_snapshot_command.py
 import json
 import pytest
+from agent_core.capture import CaptureStore, CaptureRecord
 from pare.commands.snapshot import Snapshot
 
 
-class _Block:
-    def __init__(self, text): self.type = "text"; self.text = text
-
-
-class _Result:
-    def __init__(self, payload): self.isError = False; self.content = [_Block(json.dumps(payload))]
-
-
-class _Pool:
-    """Fake tool_pool: routes page_capture calls by their arguments."""
-    def __init__(self, responses): self._responses = responses; self.calls = []
-    async def call_tool(self, worker, tool, args, ctx=None):
-        self.calls.append((worker, tool, args))
-        for matcher, payload in self._responses:
-            if matcher(args):
-                return _Result(payload)
-        raise AssertionError(f"no canned response for {args}")
+class _Agent:
+    def __init__(self, store): self.capture_store = store
 
 
 class _Ctx:
-    def __init__(self, pool):
-        self.agent = type("A", (), {"tool_pool": pool})()
-        self.channel_id = "cli-default"
+    def __init__(self, agent): self.agent = agent
 
 
-async def _collect(cmd, raw):
-    return [m async for m in cmd.run(raw, cmd._ctx)]
+def _store():
+    s = CaptureStore.open_memory()
+    s.write(CaptureRecord(worker="frida", tool="enumerate_processes", session_id=None,
+                          launch_ts=1.0, summary="2 processes",
+                          body=json.dumps([{"pid": 1, "name": "init"}, {"pid": 9, "name": "zygote"}]),
+                          rows=2, addrs=[]))
+    return s
 
 
-def _cmd(responses):
-    c = Snapshot()
-    c._ctx = _Ctx(_Pool(responses))
-    return c
-
-
-@pytest.mark.asyncio
-async def test_bare_snapshot_renders_latest():
-    c = _cmd([(lambda a: not a.get("list_sources") and not a.get("source"),
-               {"store": "@snapshots", "source": "apps:emu", "total": 1, "shown": 1,
-                "rows": [{"identifier": "com.bank", "name": "Bank"}]})])
-    msgs = await _collect(c, "")
-    text = msgs[-1].text
-    assert "com.bank" in text and "apps:emu" in text
+async def _collect(agen):
+    return [m async for m in agen]
 
 
 @pytest.mark.asyncio
-async def test_list_subcommand_shows_catalog():
-    c = _cmd([(lambda a: a.get("list_sources"),
-               {"sources": [{"source": "apps:emu", "count": 21}]})])
-    msgs = await _collect(c, "list")
-    assert "apps:emu" in msgs[-1].text and "21" in msgs[-1].text
+async def test_snapshot_list_shows_recent_captures():
+    out = await _collect(Snapshot().run("list", _Ctx(_Agent(_store()))))
+    assert "enumerate_processes" in out[0].text
 
 
 @pytest.mark.asyncio
-async def test_substring_key_resolves_then_reads():
-    c = _cmd([
-        (lambda a: a.get("list_sources"),
-         {"sources": [{"source": "enumerate_applications:device=emu", "count": 2}]}),
-        (lambda a: a.get("source") == "enumerate_applications:device=emu",
-         {"store": "@snapshots", "source": "enumerate_applications:device=emu",
-          "total": 2, "shown": 2, "rows": [{"identifier": "com.bank"}]}),
-    ])
-    msgs = await _collect(c, "applications")
-    assert "com.bank" in msgs[-1].text
+async def test_snapshot_default_renders_latest_rows():
+    out = await _collect(Snapshot().run("", _Ctx(_Agent(_store()))))
+    assert "zygote" in out[0].text and "init" in out[0].text
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_substring_lists_candidates():
-    c = _cmd([(lambda a: a.get("list_sources"),
-               {"sources": [{"source": "enumerate_exports:module=libart.so", "count": 9},
-                            {"source": "enumerate_exports:module=libartbase.so", "count": 3}]})])
-    msgs = await _collect(c, "libart")
-    text = msgs[-1].text
-    assert "libart.so" in text and "libartbase.so" in text
+async def test_snapshot_query_filters_rows():
+    out = await _collect(Snapshot().run(" zygote", _Ctx(_Agent(_store()))))  # leading space -> sub="", rest="zygote"
+    assert "zygote" in out[0].text and "init" not in out[0].text
 
 
 @pytest.mark.asyncio
-async def test_no_match_message():
-    c = _cmd([(lambda a: a.get("list_sources"), {"sources": []})])
-    msgs = await _collect(c, "nope")
-    assert "no snapshot matches" in msgs[-1].text.lower()
+async def test_snapshot_empty_store_is_friendly():
+    out = await _collect(Snapshot().run("", _Ctx(_Agent(CaptureStore.open_memory()))))
+    assert "nothing captured" in out[0].text.lower()
