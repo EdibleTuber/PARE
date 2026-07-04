@@ -60,9 +60,11 @@ def test_readonly_frida_tools_auto_execute_under_low_floor():
         return resolve_declared_tier(spec, advertised[tool])[0]
 
     # Gate fires only on high/critical (risk_pool). These must NOT gate:
+    # NOTE: search_capture/read_capture/page_capture were removed from the frida
+    # MCP in the capture-layer teardown (they moved up into PARE); the readonly
+    # set no longer includes them.
     for tool in ("enumerate_processes", "enumerate_applications",
                  "enumerate_modules", "enumerate_exports",
-                 "search_capture", "read_capture",
                  "list_devices", "select_device",
                  "java_hook_remove", "attach", "load_script"):
         assert declared(tool) in ("low", "medium"), f"{tool} should auto-execute"
