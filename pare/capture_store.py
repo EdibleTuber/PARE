@@ -12,6 +12,7 @@ from __future__ import annotations
 import fcntl
 import os
 from pathlib import Path
+from typing import IO
 
 from agent_core.capture import CaptureStore, resolve_capture_db
 
@@ -22,7 +23,7 @@ class CaptureStoreManager:
         self._home = Path(home)
         self._xdg_state = Path(xdg_state)
         self._cache: dict[Path, CaptureStore] = {}
-        self._locks: dict[Path, object] = {}
+        self._locks: dict[Path, IO[str]] = {}
         self.last_db_path: Path | None = None
 
     def resolve(self, cwd: str | None, channel_id: str) -> CaptureStore:
@@ -38,9 +39,13 @@ class CaptureStoreManager:
             return cached
         store = CaptureStore.open(db_path)          # 0o700 dir / 0o600 db (Plan 1)
         pare_dir = db_path.parent
-        if is_project:
-            self._write_gitignore(pare_dir)
-            self._take_lock(pare_dir)
+        try:
+            if is_project:
+                self._write_gitignore(pare_dir)
+                self._take_lock(pare_dir)
+        except Exception:
+            store.close()  # don't leak the handle if gitignore/lock fails (e.g. lock contested)
+            raise
         self._cache[db_path] = store
         return store
 

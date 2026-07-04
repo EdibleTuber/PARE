@@ -1,5 +1,8 @@
 import stat
 from pathlib import Path
+
+import pytest
+
 from pare.capture_store import CaptureStoreManager
 
 
@@ -34,3 +37,18 @@ def test_none_cwd_does_not_crash(tmp_path):
     store = mgr.resolve(None, "c1")  # falls back to os.getcwd() internally
     assert store is not None
     mgr.close_all()
+
+
+def test_contended_lock_raises_and_does_not_leak_store(tmp_path):
+    """A second manager on the same project can't take the advisory lock; it
+    must raise RuntimeError AND not cache/leak the store it opened."""
+    proj = tmp_path / "home" / "work" / "acme"
+    (proj / ".pare").mkdir(parents=True)
+    holder = _mgr(tmp_path)
+    holder.resolve(str(proj), "c1")           # takes the flock
+    contender = _mgr(tmp_path)
+    with pytest.raises(RuntimeError):
+        contender.resolve(str(proj), "c2")
+    # the store opened before the failed lock must not be retained (leak-free)
+    assert contender._cache == {}
+    holder.close_all()
