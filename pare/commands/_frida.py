@@ -22,8 +22,12 @@ async def call(ctx, tool: str, args: dict | None = None) -> dict:
     envelope. Returns the parsed dict, or an error-shaped dict ({"error": True,
     "summary": ...}) on a transport error or non-JSON result so callers render
     failures uniformly.
+
+    capture=False: the result is stored to the project capture store at the
+    wire (risk-tier auditing still runs), but the pool must never substitute a
+    stub in place of the real payload — the operator sees the actual response.
     """
-    result = await ctx.agent.tool_pool.call_tool(WORKER, tool, args or {}, ctx=ctx)
+    result = await ctx.agent.tool_pool.call_tool(WORKER, tool, args or {}, ctx=ctx, capture=False)
     if getattr(result, "isError", False):
         return {"error": True, "summary": f"{tool} call failed"}
     try:

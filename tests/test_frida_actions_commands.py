@@ -22,7 +22,7 @@ class _Pool:
         self._by_tool = by_tool
         self.calls = []
 
-    async def call_tool(self, worker, tool, args, ctx=None):
+    async def call_tool(self, worker, tool, args, ctx=None, capture=True):
         self.calls.append((worker, tool, args))
         return _Result(self._by_tool[tool])
 
