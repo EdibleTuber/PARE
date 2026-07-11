@@ -17,7 +17,15 @@
 - **Single-APK-open:** one current APK; tools take **no `apk_id`**; `load_apk` replaces any prior; every response echoes the active `package`.
 - **Lazy androguard import:** `import androguard` happens **inside** `load_apk`, never at module load (agent_core's 2s discovery ceiling silently drops slow-booting workers).
 - **Thread blocking work:** wrap androguard `Analysis`/xref build and the jadx subprocess in `asyncio.to_thread`; guard the shared APK-state with a lock.
-- **androguard pinned exact** (e.g. `androguard==4.1.3` — pin whatever the impl verifies); **jadx** located via `JADX_PATH` env (default `jadx` on PATH). androguard 4.x module paths / method names must be verified against the pinned version at test time — the TDD cycle is the ground truth where this plan's library calls drift.
+- **androguard pinned exact: `androguard==4.1.3`** (its API paths — `androguard.core.apk.APK`, `androguard.core.dex.DEX`, `androguard.core.analysis.analysis.Analysis` — are verified present in this version). **jadx** installed at `/home/edible/.local/bin/jadx` (v1.5.0); tests set `JADX_PATH=/home/edible/.local/bin/jadx`. androguard method names still verified at test time — the TDD cycle is ground truth where a call drifts.
+- **Silence androguard logging.** androguard logs verbosely via loguru; the worker must call `from loguru import logger; logger.remove()` before/at first androguard use (inside `loader.load`) so logs cannot muddy the stdio channel or test output.
+- **Environment (verified):** worker venv at `/home/edible/Projects/pare-static-mcp/.venv` (has `agent_core` editable + `androguard==4.1.3`); `RISK_TIER_META_KEY == "agent_core/risk_tier"`. Android build-tools at `/home/edible/Android/Sdk/build-tools/37.0.0/` if needed.
+- **Test APK (real OMTG, referenced not committed):** `tests/fixtures/locate.py::test_apk()` reads env `PARE_STATIC_TEST_APK`, default `/home/edible/Projects/bsides/off_the_leash/MSTG-Android-Java.apk`; skip the test when absent. Shared identifier constants (verified against that APK):
+  - `TEST_PACKAGE = "sg.vp.owasp_mobile.omtg_android"`
+  - `TEST_CLASS = "sg.vp.owasp_mobile.OMTG_Android.OMTG_DATAST_001_KeyStore"` (note: class package `OMTG_Android` differs in case from app package `omtg_android`)
+  - `TEST_METHOD = "encryptString"`, descriptor `"(Ljava/lang/String;)V"`
+  - `TEST_STRING = "Dummy"`
+  Every fixture-based test uses `test_apk()` + these constants — NOT synthetic identifiers.
 - Tests: `asyncio_mode = "auto"`, `testpaths = ["tests"]`.
 
 ---
@@ -283,65 +291,71 @@ git add -A && git commit -m "feat: scaffold pare-static-mcp worker (contract, st
 
 ---
 
-### Task 2: Test fixtures (tiny APK + locator)
+### Task 2: Test fixture locator (real OMTG by env var)
 
 **Files:**
-- Create: `tests/fixtures/README.md`, `tests/fixtures/tiny.apk` (built, committed), `tests/fixtures/__init__.py`, `tests/fixtures/locate.py`
+- Create: `tests/fixtures/__init__.py`, `tests/fixtures/locate.py`
 - Test: `tests/unit/test_fixtures.py`
 
 **Interfaces:**
-- Produces: `tests.fixtures.locate.fixture_path(name: str) -> pathlib.Path`; `tiny.apk` contains a class `com.example.tiny.Crypto` with a method `encryptString(String)` and a string literal `"Dummy"`.
+- Produces: `tests.fixtures.locate.test_apk() -> pathlib.Path` (from env `PARE_STATIC_TEST_APK`, default the known OMTG path); `tests.fixtures.locate.requires_apk` (a `pytest.mark.skipif` when the APK is absent); and the identifier constants `TEST_PACKAGE`, `TEST_CLASS`, `TEST_METHOD`, `TEST_DESCRIPTOR`, `TEST_STRING`.
 
-- [ ] **Step 1: Build `tiny.apk`** (documented in `tests/fixtures/README.md`)
+The fixture is the **real OMTG APK, referenced not committed** (per the fixture decision). Fixture-based tests skip when it's absent.
 
-Build a minimal APK containing one class with a known method and string. Documented recipe (requires Android SDK build-tools; run once, commit the artifact):
-```bash
-# tests/fixtures/README.md records these commands and the source
-mkdir -p /tmp/tinybuild/com/example/tiny
-cat > /tmp/tinybuild/Crypto.java <<'JAVA'
-package com.example.tiny;
-public class Crypto {
-    public String encryptString(String alias) { return "Dummy:" + alias; }
-}
-JAVA
-# compile -> dex -> package -> align -> sign (build-tools d8/aapt2/apksigner);
-# exact commands recorded in README. Result copied to tests/fixtures/tiny.apk
-```
-If the Android toolchain is unavailable, substitute a known-tiny public test APK and document its provenance + SHA256 in the README. Keep it under ~50 KB.
-
-- [ ] **Step 2: Write the locator**
+- [ ] **Step 1: Write the locator + constants**
 
 ```python
 # tests/fixtures/locate.py
 from __future__ import annotations
+import os
 from pathlib import Path
+import pytest
 
-def fixture_path(name: str) -> Path:
-    p = Path(__file__).parent / name
+_DEFAULT = "/home/edible/Projects/bsides/off_the_leash/MSTG-Android-Java.apk"
+
+TEST_PACKAGE = "sg.vp.owasp_mobile.omtg_android"
+TEST_CLASS = "sg.vp.owasp_mobile.OMTG_Android.OMTG_DATAST_001_KeyStore"
+TEST_METHOD = "encryptString"
+TEST_DESCRIPTOR = "(Ljava/lang/String;)V"
+TEST_STRING = "Dummy"
+
+def apk_path() -> Path:
+    return Path(os.environ.get("PARE_STATIC_TEST_APK", _DEFAULT))
+
+def test_apk() -> Path:
+    p = apk_path()
     if not p.is_file():
-        raise FileNotFoundError(f"fixture {name} missing at {p}")
+        pytest.skip(f"test APK not present at {p} (set PARE_STATIC_TEST_APK)")
     return p
+
+requires_apk = pytest.mark.skipif(
+    not apk_path().is_file(),
+    reason="OMTG test APK not present (set PARE_STATIC_TEST_APK)",
+)
 ```
 
-- [ ] **Step 3: Write the test**
+- [ ] **Step 2: Write the test**
 
 ```python
 # tests/unit/test_fixtures.py
-from tests.fixtures.locate import fixture_path
+from tests.fixtures.locate import apk_path, requires_apk, TEST_PACKAGE
 
-def test_tiny_apk_present():
-    p = fixture_path("tiny.apk")
-    assert p.stat().st_size > 0
+@requires_apk
+def test_apk_present():
+    assert apk_path().stat().st_size > 0
+
+def test_constants_shape():
+    assert TEST_PACKAGE.startswith("sg.vp.owasp_mobile")
 ```
 
-- [ ] **Step 4: Run + commit**
+- [ ] **Step 3: Run + commit**
 
-Run: `pytest tests/unit/test_fixtures.py -v` → PASS
+Run: `PARE_STATIC_TEST_APK=/home/edible/Projects/bsides/off_the_leash/MSTG-Android-Java.apk pytest tests/unit/test_fixtures.py -v` → PASS (or SKIP if APK absent)
 ```bash
-git add -A && git commit -m "test: add tiny.apk fixture + locator"
+git add -A && git commit -m "test: OMTG test-apk locator + identifier constants"
 ```
 
-> **Note (deferred fixtures):** an obfuscated fixture (built with `--rename-flags` / R8) and a multidex fixture are added in the tasks whose tests need them (Task 9 name-reconciliation; a multidex xref case in Task 7). Build them with the same recipe + `minifyEnabled`/multidex and record provenance in the README. Do not block Task 2 on them.
+> **Naming reconciliation note (used in Task 9):** jadx must run with `--rename-flags none` so its emitted identifiers match androguard's (OMTG is unobfuscated, so names align cleanly). No separate obfuscated/multidex fixtures are built in v1 — the real OMTG APK is a single-dex unobfuscated target; the obfuscation/multidex hardening cases from the spec are noted as a fast-follow once a second fixture APK is sourced.
 
 ---
 
@@ -360,21 +374,22 @@ git add -A && git commit -m "test: add tiny.apk fixture + locator"
 ```python
 # tests/unit/test_load_apk.py
 import json
-import pytest
 from pare_static_mcp import tools
-from tests.fixtures.locate import fixture_path
+from tests.fixtures.locate import test_apk, requires_apk, TEST_PACKAGE
 
+@requires_apk
 async def test_load_apk_returns_package_and_signals():
-    out = json.loads(await tools.load_apk(str(fixture_path("tiny.apk"))))
+    out = json.loads(await tools.load_apk(str(test_apk())))
     assert out.get("error") is not True
-    assert out["package"]  # non-empty package name
+    assert out["package"] == TEST_PACKAGE
     assert out["class_count"] >= 1
     assert out["dex_count"] >= 1
     assert "native_libs" in out and "dynamic_load" in out
 
+@requires_apk
 async def test_load_apk_replaces_previous():
-    await tools.load_apk(str(fixture_path("tiny.apk")))
-    out = json.loads(await tools.load_apk(str(fixture_path("tiny.apk"))))
+    await tools.load_apk(str(test_apk()))
+    out = json.loads(await tools.load_apk(str(test_apk())))
     assert out.get("error") is not True
 
 async def test_load_apk_rejects_missing_file():
@@ -441,7 +456,10 @@ def _guard_input(path: str, cfg) -> None:
 
 def load(path: str, cfg) -> APKState:
     _guard_input(path, cfg)
-    # Lazy import — MUST NOT be at module top (2s discovery ceiling).
+    # Silence androguard's verbose loguru output so it can't muddy the stdio
+    # channel; then lazy-import — MUST NOT be at module top (2s discovery ceiling).
+    from loguru import logger
+    logger.remove()
     from androguard.core.apk import APK
     from androguard.core.dex import DEX
     from androguard.core.analysis.analysis import Analysis
@@ -539,10 +557,11 @@ git add -A && git commit -m "feat: load_apk (single-open, lazy import, distrust 
 # tests/unit/test_read_manifest.py
 import json
 from pare_static_mcp import tools
-from tests.fixtures.locate import fixture_path
+from tests.fixtures.locate import test_apk, requires_apk
 
+@requires_apk
 async def test_read_manifest_shape():
-    await tools.load_apk(str(fixture_path("tiny.apk")))
+    await tools.load_apk(str(test_apk()))
     out = json.loads(await tools.read_manifest())
     for k in ("permissions", "activities", "services", "receivers",
               "providers", "exported", "application_class"):
@@ -629,14 +648,15 @@ async def read_manifest() -> str:
 # tests/unit/test_extract_strings.py
 import json
 from pare_static_mcp import tools
-from tests.fixtures.locate import fixture_path
+from tests.fixtures.locate import test_apk, requires_apk, TEST_STRING
 
+@requires_apk
 async def test_extract_finds_known_string():
-    await tools.load_apk(str(fixture_path("tiny.apk")))
-    out = json.loads(await tools.extract_strings("Dummy"))
+    await tools.load_apk(str(test_apk()))
+    out = json.loads(await tools.extract_strings(TEST_STRING))
     assert out.get("error") is not True
     vals = [r["value"] for r in out["rows"]]
-    assert any("Dummy" in v for v in vals)
+    assert any(TEST_STRING in v for v in vals)
     assert all(r["source"] == "dex" for r in out["rows"])
 ```
 
@@ -699,13 +719,14 @@ async def extract_strings(filter: str = "") -> str:
 # tests/unit/test_list_methods.py
 import json
 from pare_static_mcp import tools
-from tests.fixtures.locate import fixture_path
+from tests.fixtures.locate import test_apk, requires_apk, TEST_CLASS, TEST_METHOD
 
+@requires_apk
 async def test_list_methods_finds_encrypt():
-    await tools.load_apk(str(fixture_path("tiny.apk")))
-    out = json.loads(await tools.list_methods("com.example.tiny.Crypto"))
+    await tools.load_apk(str(test_apk()))
+    out = json.loads(await tools.list_methods(TEST_CLASS))
     assert out.get("error") is not True
-    assert any(r["method"] == "encryptString" for r in out["rows"])
+    assert any(r["method"] == TEST_METHOD for r in out["rows"])
 ```
 
 - [ ] **Step 2: Run → FAIL.**
@@ -770,19 +791,21 @@ async def list_methods(cls: str) -> str:
 # tests/unit/test_find_symbol.py
 import json
 from pare_static_mcp import tools
-from tests.fixtures.locate import fixture_path
+from tests.fixtures.locate import test_apk, requires_apk, TEST_METHOD
 
+@requires_apk
 async def test_find_symbol_def():
-    await tools.load_apk(str(fixture_path("tiny.apk")))
-    out = json.loads(await tools.find_symbol("encryptString"))
+    await tools.load_apk(str(test_apk()))
+    out = json.loads(await tools.find_symbol(TEST_METHOD))
     assert out.get("error") is not True
     defs = [r for r in out["rows"] if r["kind"] == "def"]
-    assert any(r["method"] == "encryptString"
-               and "Crypto" in r["class"] for r in defs)
+    assert any(r["method"] == TEST_METHOD
+               and "KeyStore" in r["class"] for r in defs)
 
+@requires_apk
 async def test_find_symbol_default_kind_is_def():
-    await tools.load_apk(str(fixture_path("tiny.apk")))
-    out = json.loads(await tools.find_symbol("encryptString"))
+    await tools.load_apk(str(test_apk()))
+    out = json.loads(await tools.find_symbol(TEST_METHOD))
     assert all(r["kind"] == "def" for r in out["rows"])
 ```
 
@@ -849,16 +872,18 @@ async def find_symbol(symbol: str, kind: str = "def", cls: str = "") -> str:
 # tests/unit/test_grep_smali.py
 import json
 from pare_static_mcp import tools
-from tests.fixtures.locate import fixture_path
+from tests.fixtures.locate import test_apk, requires_apk, TEST_STRING
 
+@requires_apk
 async def test_grep_smali_matches_string_pool():
-    await tools.load_apk(str(fixture_path("tiny.apk")))
-    out = json.loads(await tools.grep_smali("Dummy"))
+    await tools.load_apk(str(test_apk()))
+    out = json.loads(await tools.grep_smali(TEST_STRING))
     assert out.get("error") is not True
     assert len(out["rows"]) >= 1
 
+@requires_apk
 async def test_grep_smali_bad_regex_errors():
-    await tools.load_apk(str(fixture_path("tiny.apk")))
+    await tools.load_apk(str(test_apk()))
     out = json.loads(await tools.grep_smali("("))
     assert out["error"] is True
 ```
@@ -928,24 +953,26 @@ import json
 import pytest
 from pare_static_mcp import tools
 from pare_static_mcp.tools import CFG
-from tests.fixtures.locate import fixture_path
+from tests.fixtures.locate import test_apk, requires_apk, TEST_CLASS, TEST_METHOD
 
+@requires_apk
 async def test_decompile_smali_always_available():
-    await tools.load_apk(str(fixture_path("tiny.apk")))
+    await tools.load_apk(str(test_apk()))
     out = json.loads(await tools.decompile_method(
-        "com.example.tiny.Crypto", "encryptString", lang="smali"))
+        TEST_CLASS, TEST_METHOD, lang="smali"))
     assert out.get("error") is not True
     assert out["lang"] == "smali"
-    assert "encryptString" in out["source"]
+    assert TEST_METHOD in out["source"]
 
+@requires_apk
 @pytest.mark.skipif(not CFG.jadx_available, reason="JADX_PATH unresolved")
 async def test_decompile_java_via_jadx():
-    await tools.load_apk(str(fixture_path("tiny.apk")))
+    await tools.load_apk(str(test_apk()))
     out = json.loads(await tools.decompile_method(
-        "com.example.tiny.Crypto", "encryptString", lang="java"))
+        TEST_CLASS, TEST_METHOD, lang="java"))
     assert out.get("error") is not True
     assert out["lang"] == "java"
-    assert "encryptString" in out["source"]
+    assert TEST_METHOD in out["source"]
 ```
 
 - [ ] **Step 2: Run → FAIL.**
@@ -1049,7 +1076,7 @@ async def decompile_method(cls: str, method: str, signature: str = "",
 
 - [ ] **Step 5: Commit** `feat: decompile_method (guarded jadx + smali fallback + overloads)`
 
-> Build the **obfuscated fixture** here and add a test asserting name-reconciliation: `--rename-flags none` keeps jadx's identifiers aligned with androguard's, so the slice still finds the (renamed) method. Record fixture provenance in `tests/fixtures/README.md`.
+> jadx runs with `--rename-flags none` so its identifiers match androguard's dex names. OMTG is unobfuscated (names align directly); a dedicated obfuscated fixture + name-reconciliation test is a fast-follow once a second APK is sourced (noted in Task 2).
 
 ---
 
@@ -1068,17 +1095,18 @@ async def decompile_method(cls: str, method: str, signature: str = "",
 # tests/integration/test_keystore_chain.py
 import json
 from pare_static_mcp import tools
-from tests.fixtures.locate import fixture_path
+from tests.fixtures.locate import test_apk, requires_apk, TEST_METHOD, TEST_STRING
 
+@requires_apk
 async def test_derive_target_chain():
-    await tools.load_apk(str(fixture_path("tiny.apk")))
-    sym = json.loads(await tools.find_symbol("encryptString"))
+    await tools.load_apk(str(test_apk()))
+    sym = json.loads(await tools.find_symbol(TEST_METHOD))
     row = next(r for r in sym["rows"] if r["kind"] == "def")
     dec = json.loads(await tools.decompile_method(
         row["class"], row["method"], row["signature"], lang="smali"))
-    assert "encryptString" in dec["source"]
-    strings = json.loads(await tools.extract_strings("Dummy"))
-    assert any("Dummy" in r["value"] for r in strings["rows"])
+    assert TEST_METHOD in dec["source"]
+    strings = json.loads(await tools.extract_strings(TEST_STRING))
+    assert any(TEST_STRING in r["value"] for r in strings["rows"])
 ```
 
 - [ ] **Step 2: Run → PASS** (all pieces exist by now).
