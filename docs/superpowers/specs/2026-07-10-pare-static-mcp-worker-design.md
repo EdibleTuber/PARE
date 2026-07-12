@@ -86,7 +86,7 @@ load_apk ────────► androguard: parse APK, extract metadata + d
 list_methods ─────► androguard   (class → methods + descriptors + xref counts)
 read_manifest ────► androguard
 extract_strings ──► androguard   (DEX string pool; source="dex")
-find_symbol ──────► androguard xref  (definitions + callers of a method/field)
+find_symbol ──────► androguard xref  (definitions + callers of a method)
 grep_smali ───────► androguard   (regex over smali instructions + string pool)
 decompile_method ─► jadx subprocess: decompile the *containing class* once
                     (cached), slice out the method (name + descriptor)
@@ -145,7 +145,7 @@ in-band.
 | Tool (model sees `static_…`) | Signature | Returns | Notes |
 |------|-----------|---------|-------|
 | `load_apk` | `(path)` | `{package, min_sdk, target_sdk, class_count, dex_count, native_libs[], dynamic_load[]}` | Sets the current APK (replaces any prior). `dynamic_load[]` = DexClassLoader/`loadLibrary` indicators. **Distrust signals** tell the agent when static is blind and it should fall back to frida. |
-| `find_symbol` | `(symbol, kind?, class?)` | rows of `{class, method, signature, kind}` | Matches **method/field NAMES via xref** — *not* string literals. `kind` defaults to `def` (definitions), also `caller`; `class` scopes the match. Returns the `(class, method, signature)` tuple `decompile_method` consumes. |
+| `find_symbol` | `(symbol, kind?, class?)` | rows of `{class, method, signature, kind}` | Matches **method NAMES via xref** — *not* string literals (field-name search is deferred, not in v1). `kind` defaults to `def` (definitions), also `caller`; `class` scopes the match. Returns the `(class, method, signature)` tuple `decompile_method` consumes. |
 | `grep_smali` | `(pattern)` | rows of `{class, method, insn, match}` | Regex over **smali instructions + string pool** — reaches API/text patterns name-xref can't (e.g. `Ljavax/crypto/CipherOutputStream;->write`). |
 | `list_methods` | `(class)` | rows of `{method, descriptor, flags, xref_count}` | The methods of a found class — how you pick a hook/decompile target without decompiling the whole class. |
 | `extract_strings` | `(filter?)` | rows of `{value, class, method?, kind, source}` | DEX string pool. `kind` = `string`\|`const`; `source` = `dex` (arsc deferred). `class`/`method` via string xref (string→method pivot, the durable path on obfuscated apps). |
@@ -163,7 +163,7 @@ implementation afterthought. Each description MUST state:
 1. An opener: **"STATIC (reads the APK file; no device/attach) — …"** (separates
    the static world from frida's dynamic world).
 2. **What it matches vs. does NOT** — the load-bearing disambiguations:
-   - `find_symbol`: "matches METHOD and FIELD names, not string literals — for a
+   - `find_symbol`: "matches METHOD names, not string literals — for a
      string constant use `static_extract_strings`; for an API/text pattern use
      `static_grep_smali`."
    - `list_methods`: "lists methods of ONE class; to find a class or symbol use

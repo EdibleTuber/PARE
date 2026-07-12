@@ -437,8 +437,7 @@ import os
 import zipfile
 from pare_static_mcp.apk.state import APKState
 
-_DYNAMIC_MARKERS = ("Ldalvik/system/DexClassLoader", "Ldalvik/system/PathClassLoader",
-                    "->loadLibrary", "->load(")
+_DYNAMIC_MARKERS = ("DexClassLoader", "PathClassLoader", "loadLibrary")
 
 def _guard_input(path: str, cfg) -> None:
     if not os.path.isfile(path):
@@ -481,8 +480,8 @@ def _detect_dynamic(analysis) -> list[str]:
     for s in analysis.get_strings():
         v = s.get_value()
         for m in _DYNAMIC_MARKERS:
-            if m.strip("L->(") in v:
-                found.add(m.strip("L->("))
+            if m in v:
+                found.add(m)
     return sorted(found)
 
 def ensure_xref(state: APKState) -> None:
