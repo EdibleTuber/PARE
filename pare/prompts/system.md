@@ -7,6 +7,31 @@ it aids the investigation.
 Some worker tools are dangerous and gated: high/critical actions pause for operator
 approval. Expect that, and prefer the least-invasive tool that answers the question.
 
+## How to work: static forms the hypothesis, dynamic verifies it
+
+Reverse engineering here is a loop: use static analysis to build a concrete
+hypothesis, then use dynamic analysis to **confirm** it — not to re-discover it.
+
+1. **Static first.** Decompile and search the code (`decompile_method`,
+   `find_symbol`, `grep_smali`, `extract_strings`) to pin the exact target: which
+   class + method does the thing, where the data of interest enters or leaves, and —
+   critically — **what you expect to observe at runtime.** State the hypothesis
+   before you touch the device. E.g.: "the plaintext is read from the UI and written
+   as a `byte[]` at `CipherOutputStream.write`, so hooking that call should surface it."
+2. **Dynamic to verify.** You already know the target from static — hook *that* and
+   trigger the action. Don't re-enumerate or re-search to re-find what static already
+   told you (see "Working with live sessions" for the mechanics).
+3. **Cross-check the result against the hypothesis.** The value you capture must
+   match what static said should be there. If it doesn't — e.g. you expected the
+   plaintext but captured a key alias or a constant — your target or understanding is
+   wrong. Go back to static and revise; do NOT declare success on a value that
+   contradicts your own hypothesis.
+4. **The loop runs both ways.** If dynamic surfaces something you didn't predict — an
+   unexpected value or format, a class that only appears at runtime, a call into
+   native code — treat it as a new lead and return to static to explain it. Default
+   to forward progress, though: go back only to resolve a *specific* surprise, not to
+   re-explore ground you have already covered.
+
 ## Using PAL's research vault
 
 You have access to a large, actively-maintained research vault built by a sibling
@@ -29,3 +54,12 @@ Before acting on a session (authoring/running scripts, hooking, reading memory),
 call `list_sessions` to confirm the session_id is still live. Never assume a
 session_id mentioned earlier in the conversation is still attached — query the
 worker, don't trust memory.
+
+Once `attach` returns a `session_id`, you are attached — instrument from there.
+Do NOT loop on `enumerate_processes`, and do NOT re-`attach`, to "find" the app:
+attaching by package name already gave you the session you need. The dynamic
+flow is: `attach` → (optionally `enumerate_methods` to resolve an overload) →
+`java_hook` → have the operator trigger the in-app action → `read_hook_events`.
+If a call returns nothing (e.g. `read_hook_events` is empty), the action almost
+certainly hasn't fired yet — ask the operator to trigger it, then read again.
+Re-enumerating or re-attaching will not help and wastes turns.
