@@ -16,8 +16,13 @@ hypothesis, then use dynamic analysis to **confirm** it — not to re-discover i
    `find_symbol`, `grep_smali`, `extract_strings`) to pin the exact target: which
    class + method does the thing, where the data of interest enters or leaves, and —
    critically — **what you expect to observe at runtime.** State the hypothesis
-   before you touch the device. E.g.: "the plaintext is read from the UI and written
-   as a `byte[]` at `CipherOutputStream.write`, so hooking that call should surface it."
+   before you touch the device. **The data you want is usually NOT the named
+   method's *argument*** — that argument is often just an alias, key id, or handle.
+   Trace the data to where it actually appears (the `byte[]` passed to a
+   `write` / `doFinal` / `getBytes`, the string assembled just before a network
+   send) and hook *that* point. E.g.: "`encryptString`'s argument is the key alias
+   `"Dummy"`; the real plaintext is read from the UI and written as a `byte[]` at
+   `CipherOutputStream.write`, so hook *that*, not `encryptString`."
 2. **Dynamic to verify.** You already know the target from static — hook *that* and
    trigger the action. Don't re-enumerate or re-search to re-find what static already
    told you (see "Working with live sessions" for the mechanics).
