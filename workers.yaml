@@ -20,6 +20,18 @@ workers:
     risk_default: low           # advertised per-tool tiers govern; reads auto-execute, dangerous tools gate (read_memory/java_hook/write_memory=high, execute_script=critical)
     capability_tags: [mobile, dynamic, android, frida]
 
+  # In-house static-analysis worker (pare-static-mcp). Seven read-only APK tools,
+  # all wire tier low → auto-execute + audited, none gated. Tools surface to the
+  # model as static_* (agent_core prefixes by worker name). Requires the worker
+  # installed into this venv: `pip install -e ~/Projects/pare-static-mcp`, plus an
+  # external jadx binary on PATH (or JADX_PATH) for the Java decompile path (the
+  # smali path works without jadx). See docs/superpowers/ for the design + plan.
+  static:
+    command: /home/edible/Projects/PARE/.venv/bin/pare-static-mcp
+    transport: stdio
+    risk_default: low
+    capability_tags: [static, apk, android]
+
   # --- apk_re_agents (Streamable HTTP) — disabled until services run + discovery hardened ---
   # unpacker:
   #   endpoint: http://127.0.0.1:9000/mcp
