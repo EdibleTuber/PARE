@@ -72,3 +72,5 @@ def test_system_prompt_includes_re_workflow():
     assert "static forms the hypothesis" in prompt   # the method is stated
     assert "Cross-check" in prompt                    # verify result vs hypothesis
     assert "loop runs both ways" in prompt            # dynamic surprise -> static
+    assert "doFinal" in prompt                        # hook the data-flow point,
+    assert "not the named" in prompt.lower()          # not the named method's arg
