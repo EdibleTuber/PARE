@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pare.agent as agent_mod
 from pare.agent import PareAgent
+from pare.config import PAREConfig
 
 
 def test_register_tools_closes_pool_after_discovery(monkeypatch):
@@ -23,6 +24,7 @@ def test_register_tools_closes_pool_after_discovery(monkeypatch):
     monkeypatch.setattr(agent_mod, "discover_and_register", _fake_discover)
 
     agent = PareAgent()
+    agent.config = PAREConfig()   # register_tools reads config.enable_apk_re_agents
     agent._worker_specs = []
     agent.tool_pool = MagicMock()
     agent.tool_pool.close_all = AsyncMock()
