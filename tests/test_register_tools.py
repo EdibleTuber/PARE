@@ -58,3 +58,39 @@ def test_register_tools_runs_discover_and_register(tmp_path):
     assert hasattr(agent, "mcp_pool")
     assert agent.mcp_pool is not None
     assert hasattr(agent, "tool_pool")
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_static_analyze_gated_on_enable_flag(tmp_path, enabled):
+    """static_analyze (and its apk_re_agents client) are registered only when
+    config.enable_apk_re_agents is set; default off keeps the model from being
+    handed a dead tool whose backend isn't part of this deployment."""
+    from pare.tools import StaticAnalyze
+
+    wy = tmp_path / "workers.yaml"
+    wy.write_text(
+        "workers:\n"
+        "  stub:\n"
+        "    endpoint: http://127.0.0.1:1/mcp\n"
+        "    transport: streamable_http\n"
+        "    risk_default: low\n"
+    )
+    cfg = PAREConfig()
+    cfg.workers_yaml_path = str(wy)
+    cfg.audit_dir = tmp_path
+    cfg.enable_apk_re_agents = enabled
+
+    agent = PareAgent()
+    agent.config = cfg
+    for attr in ("profile", "wisdom", "channels", "learning", "allowlist",
+                 "approval_registry", "tool_approval_registry", "inference",
+                 "retrieval", "websearch", "fetcher"):
+        setattr(agent, attr, MagicMock())
+
+    with patch("pare.agent.discover_and_register", new_callable=AsyncMock) as mock_disc:
+        mock_disc.return_value = []
+        agent.setup()
+        tool_classes = agent.register_tools()
+
+    assert (StaticAnalyze in tool_classes) is enabled
+    assert (agent.apk_re_agents_client is not None) is enabled

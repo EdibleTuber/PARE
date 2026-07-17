@@ -60,7 +60,9 @@ class PareAgent(Agent):
     name = "pare"
     env_prefix = "PARE_"
 
-    tools = [StaticAnalyze, ReadVaultDoc, SearchCapture, ReadCapture]  # add Tool subclasses here
+    tools = [ReadVaultDoc, SearchCapture, ReadCapture]  # add Tool subclasses here
+    # StaticAnalyze (apk_re_agents) is appended in register_tools() only when
+    # config.enable_apk_re_agents is set (default off) — see setup().
     commands = [
         Hello, Health, Snapshot,
         Devices, Ps, Apps, Sessions,   # operator fast-path views
@@ -96,7 +98,10 @@ class PareAgent(Agent):
         Framework managers (including tool_approval_registry) are already
         populated on self at this point by agent_core's runtime.
         """
-        self.apk_re_agents_client = ApkReAgentsClient(self.config.apk_re_agents_url)
+        self.apk_re_agents_client = (
+            ApkReAgentsClient(self.config.apk_re_agents_url)
+            if self.config.enable_apk_re_agents else None
+        )
         registry = WorkerRegistry.load(self.config.workers_yaml_path)
         specs = registry.all()
         self._worker_specs = specs
@@ -144,7 +149,14 @@ class PareAgent(Agent):
             await self.tool_pool.close_all()
             return classes
 
-        return asyncio.run(_discover())
+        classes = asyncio.run(_discover())
+        # apk_re_agents' static_analyze is advertised only when explicitly enabled
+        # (default off). The coordinator isn't part of every deployment, and an
+        # always-registered tool the model reaches for first only dead-ends on a
+        # connection-refused. Gate keeps the Phase-1 integration one config flag away.
+        if self.config.enable_apk_re_agents:
+            classes = [*classes, StaticAnalyze]
+        return classes
 
     def system_prompt(self, ctx: HandlerContext) -> str:
         from pathlib import Path

@@ -37,6 +37,15 @@ hypothesis, then use dynamic analysis to **confirm** it — not to re-discover i
    to forward progress, though: go back only to resolve a *specific* surprise, not to
    re-explore ground you have already covered.
 
+**When the answer is something you can compute** — a weak or custom cipher, an
+encoding (Base64/hex), a checksum — *derive* it by computing, and **verify your
+candidate reproduces the exact target before concluding**: confirm
+`transform(candidate) == target` byte-for-byte (a candidate of the wrong length, or
+one that doesn't reproduce the target bytes, is wrong — do not guess or eyeball
+multi-byte arithmetic). You do not need a device or the Java bridge for this: a
+short pure-JS `execute_script` (plain JS only — no `Java`, no DOM globals like
+`atob`) or careful step-by-step computation suffices.
+
 ## Using PAL's research vault
 
 You have access to a large, actively-maintained research vault built by a sibling

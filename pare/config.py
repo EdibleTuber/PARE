@@ -26,6 +26,11 @@ class PAREConfig(BaseConfig):
     model: str = "gemma-4-26b-a4b-it-q4_k_m"
 
     apk_re_agents_url: str = "http://127.0.0.1:8000"
+    # Advertise static_analyze (the apk_re_agents coordinator) only when that
+    # pipeline is part of this deployment. Default off: an always-registered tool
+    # whose backend isn't running just hands the model a dead tool it reaches for
+    # first and dead-ends on (connection refused).
+    enable_apk_re_agents: bool = False
     workers_yaml_path: str = "workers.yaml"
     audit_dir: Path = field(
         default_factory=lambda: Path.home() / ".local" / "share" / "pare" / "audit"
