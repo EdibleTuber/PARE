@@ -99,6 +99,32 @@ async def test_loop_cap_emits_cap_message():
 
 
 @pytest.mark.asyncio
+async def test_repeat_guard_short_circuits_a_spinning_tool_call():
+    """When the model re-issues the SAME call returning the SAME result, the
+    guard stops hitting the backend after the hard limit — the loop-cap no
+    longer has to absorb the whole spin."""
+    agent = _make_agent(mode="on")
+    call = ToolCall(id="t1", name="static_grep_smali", arguments={"pattern": "X"})
+    # Model keeps asking for the identical call forever; tool always returns "0 matches".
+    agent.inference.complete = AsyncMock(return_value=CompletionResult(
+        type="tool_calls", tool_calls=[call], usage=None))
+    agent.tool_executor.run = AsyncMock(return_value="0 matches")
+    ctx = _ctx()
+    msg = MagicMock(); msg.text = "hi"
+
+    out = [m async for m in agent.handle_chat(msg, ctx)]
+
+    # Loop still terminates via the cap message...
+    assert isinstance(out[-1], ResponseMessage)
+    # ...but the backend was invoked only up to the guard's hard limit (3),
+    # not once per round (50) — the guard, not the blanket cap, did the stopping.
+    assert agent.tool_executor.run.await_count <= 3
+    # The model was told to change approach.
+    assert any(getattr(m, "arguments", None) == {"pattern": "X"} for m in out
+               if isinstance(m, ToolProgressMessage))
+
+
+@pytest.mark.asyncio
 async def test_exception_yields_error_message():
     agent = _make_agent(mode="off")
     agent.inference.stream = MagicMock(side_effect=RuntimeError("boom"))

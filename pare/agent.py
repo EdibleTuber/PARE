@@ -44,6 +44,7 @@ from pare.commands.frida_views import Devices, Ps, Apps, Sessions
 from pare.commands.frida_actions import Select, Attach, Detach
 from agent_core.capture import CaptureLayer, CaptureStore, SearchCapture, ReadCapture
 from pare.capture_store import CaptureStoreManager
+from pare.repeat_guard import RepeatGuard
 from pare.tools import ReadVaultDoc, StaticAnalyze
 from pare.tools._http import ApkReAgentsClient
 
@@ -199,6 +200,11 @@ class PareAgent(Agent):
             mode = self.decide_mode(conv)            # "on" | "off" (never "auto")
             messages = conv.get_messages_for_api(system_prompt=self.system_prompt(ctx))
             schemas = self.tool_executor.schemas()
+            # Smart no-progress stop: a fresh guard per turn catches verbatim
+            # tool-call repeats that return identical results (see repeat_guard).
+            # MAX_TOOL_ROUNDS stays only as a coarse final backstop — with the
+            # guard doing the real stopping, hitting it should be rare.
+            guard = RepeatGuard()
             MAX_TOOL_ROUNDS = 50
             MAX_TOKENS = 4096                        # runaway-loop stopgap (matches PAL)
 
@@ -241,7 +247,13 @@ class PareAgent(Agent):
                     ])
                     for tc in tool_calls:
                         yield ToolProgressMessage(tool=tc.name, arguments=tc.arguments)
-                        result = await self.tool_executor.run(tc.name, tc.arguments, ctx)
+                        if guard.should_run(tc.name, tc.arguments):
+                            result = await self.tool_executor.run(tc.name, tc.arguments, ctx)
+                            result = guard.record(tc.name, tc.arguments, result)
+                        else:
+                            # Identical call already returned the same result too many
+                            # times this turn — short-circuit instead of re-running.
+                            result = guard.blocked(tc.name, tc.arguments)
                         conv.add_tool_result(tc.id, result)
                     messages = conv.get_messages_for_api(system_prompt=self.system_prompt(ctx))
                     completion = await self.inference.complete(
