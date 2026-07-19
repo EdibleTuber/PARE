@@ -114,6 +114,14 @@ class RepeatGuard:
         self._handed_back.add(sig)
         return True
 
+    def entry(self, name: str, arguments: object) -> tuple[int, str] | None:
+        """Read-only accessor for the operator-handback question builder:
+        (total invocations, last-seen result) for this call signature this
+        turn, or None if it was never recorded. Callers outside this module
+        should use this instead of reaching into `_seen`/`_Entry`."""
+        e = self._seen.get(_signature(name, arguments))
+        return None if e is None else (e.total, e.result)
+
     def _note(self, name: str, count: int, total: int, *, blocked: bool) -> str:
         if blocked:
             lead = (f"`{name}` was NOT re-run: you have issued this identical call "

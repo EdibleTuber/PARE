@@ -44,6 +44,11 @@ from pare.commands.frida_views import Devices, Ps, Apps, Sessions
 from pare.commands.frida_actions import Select, Attach, Detach
 from agent_core.capture import CaptureLayer, CaptureStore, SearchCapture, ReadCapture
 from pare.capture_store import CaptureStoreManager
+from pare.handback import (
+    COMMIT_TOOLS, NAME_SEARCH_TOOLS, POLL_TOOLS,
+    candidate_classes, near_duplicate, normalize_class,
+    disambig_question, spin_question,
+)
 from pare.repeat_guard import RepeatGuard
 from pare.tools import ReadVaultDoc, StaticAnalyze
 from pare.tools._http import ApkReAgentsClient
@@ -128,6 +133,11 @@ class PareAgent(Agent):
             send_message=None,  # approval requests delivered via per-request ctx.emit
             capture_layer=self._capture_layer,
         )
+        # Per-channel sets of already-resolved disambiguation candidate groups
+        # (frozenset of dotted class names), so a resumed turn that re-commits
+        # to a class from a group the operator already picked from doesn't
+        # hand back a second time. Created lazily like `self.last_usage`.
+        self._disambig_resolved: dict[str, set[frozenset[str]]] = {}
 
     def register_tools(self):
         """Discover MCP-direct workers and return their tools, wired to dispatch
@@ -239,22 +249,72 @@ class PareAgent(Agent):
                         yield ResponseMessage(text="".join(full))
                         return
 
+                # Operator-handback checkpoints (see docs/superpowers/specs/
+                # 2026-07-18-operator-handback-checkpoints-design.md):
+                #   Trigger 1 (spin): RepeatGuard.tripped() fires once a call is
+                #     confirmed stuck (hard-blocked, not yet handed back this turn).
+                #   Trigger 2 (commit-time disambiguation): a class-scoped dig-in
+                #     tool commits to a class that a prior grep this turn showed is
+                #     one of several near-identical variants.
+                # name_searches remembers each grep pattern's candidate classes for
+                # the rest of the turn; resolved remembers which candidate groups
+                # this channel has already been asked about (persists across turns
+                # via self._disambig_resolved so an answered question isn't re-asked).
+                name_searches: dict[str, set[str]] = {}
+                resolved = self._disambig_resolved.setdefault(ctx.channel_id, set())
+
+                def _settle_and_handback(question: str, done_ids: set[str]) -> ResponseMessage:
+                    """Fill a synthetic tool result for every tool_call id in this
+                    round that hasn't been answered yet, then append the handback
+                    question as the assistant turn. A dangling tool_call id with no
+                    matching tool result makes the NEXT turn's API request invalid,
+                    so every id in the batch must be settled before we return."""
+                    for tc in tool_calls:
+                        if tc.id not in done_ids:
+                            conv.add_tool_result(
+                                tc.id, "[handed back to operator — call not executed]")
+                    conv.add_assistant(question)
+                    return ResponseMessage(text=question)
+
                 for _round in range(MAX_TOOL_ROUNDS):
                     conv.add_assistant_tool_calls([
                         {"id": tc.id, "type": "function",
                          "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
                         for tc in tool_calls
                     ])
+                    done_ids: set[str] = set()
                     for tc in tool_calls:
+                        if tc.name in COMMIT_TOOLS:
+                            cls = normalize_class(str((tc.arguments or {}).get("cls", "")))
+                            for pat, cands in name_searches.items():
+                                if (cls in cands and near_duplicate(cands, pat)
+                                        and frozenset(cands) not in resolved):
+                                    q = disambig_question(cls, cands)
+                                    resolved.add(frozenset(cands))
+                                    yield _settle_and_handback(q, done_ids)
+                                    return
                         yield ToolProgressMessage(tool=tc.name, arguments=tc.arguments)
                         if guard.should_run(tc.name, tc.arguments):
                             result = await self.tool_executor.run(tc.name, tc.arguments, ctx)
                             result = guard.record(tc.name, tc.arguments, result)
+                            if tc.name in NAME_SEARCH_TOOLS:
+                                pat = str((tc.arguments or {}).get("pattern", ""))
+                                if pat:
+                                    name_searches[pat] = candidate_classes(
+                                        result, pat, capture_store=self.capture_store)
                         else:
                             # Identical call already returned the same result too many
                             # times this turn — short-circuit instead of re-running.
+                            if tc.name not in POLL_TOOLS and guard.tripped(tc.name, tc.arguments):
+                                pat = str((tc.arguments or {}).get("pattern", ""))
+                                total, last_result = guard.entry(tc.name, tc.arguments) or (0, "")
+                                q = spin_question(tc.name, tc.arguments, total, last_result,
+                                                  name_searches.get(pat, set()))
+                                yield _settle_and_handback(q, done_ids)
+                                return
                             result = guard.blocked(tc.name, tc.arguments)
                         conv.add_tool_result(tc.id, result)
+                        done_ids.add(tc.id)
                     messages = conv.get_messages_for_api(system_prompt=self.system_prompt(ctx))
                     completion = await self.inference.complete(
                         messages, tools=schemas, reasoning=mode, max_tokens=MAX_TOKENS)
