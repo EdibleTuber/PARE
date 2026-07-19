@@ -65,6 +65,7 @@ class RepeatGuard:
         self.hard_after = hard_after
         self.call_ceiling = call_ceiling
         self._seen: dict[str, _Entry] = {}
+        self._handed_back: set[str] = set()
 
     def should_run(self, name: str, arguments: object) -> bool:
         """False once either hard-block trigger has fired for this exact call."""
@@ -100,6 +101,18 @@ class RepeatGuard:
         count = entry.count if entry is not None else self.hard_after
         total = entry.total if entry is not None else self.call_ceiling
         return self._note(name, count, total, blocked=True)
+
+    def tripped(self, name: str, arguments: object) -> bool:
+        """True the first time this signature is hard-blocked and has not yet
+        handed back this turn. Used to escalate a confirmed spin to the operator
+        exactly once (not on every subsequent blocked call)."""
+        if self.should_run(name, arguments):
+            return False
+        sig = _signature(name, arguments)
+        if sig in self._handed_back:
+            return False
+        self._handed_back.add(sig)
+        return True
 
     def _note(self, name: str, count: int, total: int, *, blocked: bool) -> str:
         if blocked:
