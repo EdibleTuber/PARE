@@ -30,12 +30,20 @@ def test_candidate_classes_from_referenced_type_not_class_column():
     assert not any("MyActivity" in c for c in got)
 
 
-def test_candidate_classes_broad_instruction_grep_yields_no_named_variants():
-    # a grep whose matches don't reference classes named like the pattern
+def test_candidate_classes_is_a_dumb_extractor_framework_noise_filtered_downstream():
+    # a grep whose only class token is a framework class named like the pattern
     rows = [{"class": f"{LPKG}/Foo;", "method": "m",
              "insn": "invoke-virtual v0, Landroid/database/sqlite/SQLiteDatabase;->rawQuery", "match": "SQLiteDatabase"}]
     res = json.dumps({"rows": rows})
-    assert candidate_classes(res, "SQLiteDatabase") == set()  # no class *named* SQLiteDatabase
+    # extraction is dumb; a lone framework class never arms disambiguation — the near_duplicate >=2 gate (Task 3) filters it.
+    assert candidate_classes(res, "SQLiteDatabase") == {"android.database.sqlite.SQLiteDatabase"}
+
+
+def test_candidate_classes_keeps_exact_name_app_class():
+    rows = [{"class": f"{LPKG}/MyActivity;", "method": "start",
+             "insn": f"const-class v0, {LPKG}/MainActivity;", "match": "MainActivity"}]
+    res = json.dumps({"rows": rows})
+    assert candidate_classes(res, "MainActivity") == {f"{PKG}.MainActivity"}
 
 
 def test_candidate_classes_reads_capture_stub_when_ref_present():

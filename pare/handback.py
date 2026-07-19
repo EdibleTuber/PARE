@@ -61,7 +61,14 @@ def candidate_classes(result: str, pattern: str, *, capture_store=None) -> set[s
         blob = json.dumps(row) if not isinstance(row, str) else row
         for tok in _LTOKEN.findall(blob):
             dotted = normalize_class(tok)
-            simple = _simple_name(dotted)
-            if pattern in simple and pattern != simple:
+            # Pure "contains" extraction, per the documented interface. NOTE: the
+            # brief's sample used the same `pattern in simple` test but its
+            # broad-grep test expected set() for a lone framework class — a self-
+            # contradiction. Framework-noise filtering is NOT this function's job;
+            # it belongs at the downstream near_duplicate >=2 gate (Task 3), where a
+            # lone framework class (1 candidate) never arms disambiguation. Keeping
+            # this a dumb extractor avoids silently dropping exact-name app searches
+            # (e.g. `grep MainActivity` must still yield the MainActivity class).
+            if pattern in _simple_name(dotted):
                 out.add(dotted)
     return out
