@@ -1,0 +1,67 @@
+"""Pure helpers for operator-handback checkpoints (see the 2026-07-18 spec).
+
+No agent_core / worker changes: candidate classes are parsed from a grep result
+(or its capture body), scanning L...; type tokens across the whole row so a
+variant is found whether it is the enclosing class or a referenced type."""
+from __future__ import annotations
+
+import json
+import re
+
+_LTOKEN = re.compile(r"L[\w/$]+;")
+
+# Worker-prefixed tool names (agent_core prefixes by worker). Any new class-scoped
+# dig-in / instrumentation tool that could commit to the wrong class goes here.
+COMMIT_TOOLS = frozenset({"static_list_methods", "static_decompile_method", "frida_java_hook"})
+NAME_SEARCH_TOOLS = frozenset({"static_grep_smali"})
+POLL_TOOLS = frozenset({"frida_read_hook_events", "list_sessions"})
+
+
+def normalize_class(name: str) -> str:
+    """smali `Lsg/vp/Foo$Bar;` -> dotted `sg.vp.Foo$Bar`; dotted passes through."""
+    if not name:
+        return name
+    n = name.strip()
+    if n.startswith("L") and n.endswith(";") and "/" in n:
+        n = n[1:-1].replace("/", ".")
+    return n
+
+
+def _simple_name(dotted: str) -> str:
+    return dotted.rsplit(".", 1)[-1]
+
+
+def _rows_from(result: str, capture_store) -> list:
+    try:
+        d = json.loads(result)
+    except (TypeError, ValueError):
+        return []
+    if isinstance(d, dict) and isinstance(d.get("rows"), list):
+        return d["rows"]
+    ref = None
+    if isinstance(d, dict):
+        ref = (d.get("captured") or {}).get("ref") or d.get("ref")
+    if ref and capture_store is not None:
+        rec = capture_store.get(ref)
+        if rec and rec.get("body"):
+            try:
+                inner = json.loads(rec["body"])
+                if isinstance(inner, dict) and isinstance(inner.get("rows"), list):
+                    return inner["rows"]
+            except (TypeError, ValueError):
+                return []
+    return []
+
+
+def candidate_classes(result: str, pattern: str, *, capture_store=None) -> set[str]:
+    """Distinct dotted class names referenced in a grep result whose simple name
+    contains `pattern`. Scans L...; tokens across each row (class/insn/match)."""
+    out: set[str] = set()
+    for row in _rows_from(result, capture_store):
+        blob = json.dumps(row) if not isinstance(row, str) else row
+        for tok in _LTOKEN.findall(blob):
+            dotted = normalize_class(tok)
+            simple = _simple_name(dotted)
+            if pattern in simple and pattern != simple:
+                out.add(dotted)
+    return out
