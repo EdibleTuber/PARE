@@ -140,9 +140,15 @@ one of ≥2 *near-duplicate* name-matched classes, block that call and hand back
      near-duplicates *and* that set is not already resolved (§ cross-turn state):
      block the call and hand back listing the candidates. Else run normally.
 
-  > "About to dig into `OMTG_DATAST_001_SQLite_Encrypted`, but the search matched 5
-  > near-identical classes: `_SQLite`, `_SQLite_Not_Encrypted`, `_SQLite_Encrypted`,
-  > `_SQLITE_Encrypted`, `_SQLiteEncrypted`. Which is the target?"
+  > "About to dig into `OMTG_DATAST_001_SQLite_Encrypted`, but the search referenced
+  > two near-identical classes: `OMTG_DATAST_001_SQLite_Encrypted` and
+  > `OMTG_DATAST_001_SQLite_Not_Encrypted`. Which is the target?"
+
+  (Grounded in the real capture: a `grep OMTG_DATAST_001_SQLite` surfaces the
+  *code-referenced* variants — here 2, both via `const-class` refs inside the
+  `MyActivity` menu dispatcher — not all declared spellings. The row's `class`
+  column is `MyActivity` (the dispatcher), which is exactly why candidate names
+  must come from the referenced-type token, not the `class` column.)
 
 ### Near-duplicate gate (the non-overfit trigger)
 
