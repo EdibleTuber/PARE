@@ -1,5 +1,5 @@
 import json
-from pare.handback import normalize_class, candidate_classes
+from pare.handback import normalize_class, candidate_classes, near_duplicate, disambig_question, spin_question
 
 PKG = "sg.vp.owasp_mobile.OMTG_Android"
 LPKG = "Lsg/vp/owasp_mobile/OMTG_Android"
@@ -52,3 +52,35 @@ def test_candidate_classes_reads_capture_stub_when_ref_present():
     stub = json.dumps({"summary": "grep_smali: 2 row(s)", "captured": {"ref": "abc"}, "hint": "read_capture"})
     got = candidate_classes(stub, "OMTG_DATAST_001_SQLite", capture_store=_Store())
     assert f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted" in got
+
+
+def test_near_duplicate_arms_on_omtg_variants():
+    cands = {f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted", f"{PKG}.OMTG_DATAST_001_SQLite_Not_Encrypted"}
+    assert near_duplicate(cands, "OMTG_DATAST_001_SQLite") is True
+
+
+def test_near_duplicate_does_not_arm_on_unrelated_shared_token():
+    cands = {f"{PKG}.UserManager", f"{PKG}.UserActivity", f"{PKG}.UserRepository"}
+    assert near_duplicate(cands, "User") is False
+
+
+def test_near_duplicate_needs_at_least_two():
+    assert near_duplicate({f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted"}, "OMTG_DATAST_001_SQLite") is False
+
+
+def test_near_duplicate_does_not_arm_on_framework_classes():
+    # candidate_classes may return framework classes (it's a dumb extractor);
+    # near_duplicate is the gate that must reject them.
+    assert near_duplicate({"android.database.sqlite.SQLiteDatabase"}, "SQLiteDatabase") is False  # lone
+    cands = {"android.database.sqlite.SQLiteDatabase",
+             "android.database.sqlite.SQLiteOpenHelper",
+             "android.database.sqlite.SQLiteCursor"}
+    assert near_duplicate(cands, "SQLite") is False  # share only a short prefix fragment
+
+
+def test_questions_list_the_candidates():
+    cands = {f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted", f"{PKG}.OMTG_DATAST_001_SQLite_Not_Encrypted"}
+    q = disambig_question(f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted", cands)
+    assert "OMTG_DATAST_001_SQLite_Not_Encrypted" in q and "?" in q
+    s = spin_question("static_grep_smali", {"pattern": "X"}, 6, "0 matches", cands)
+    assert "6" in s and "static_grep_smali" in s

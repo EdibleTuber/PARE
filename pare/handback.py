@@ -6,6 +6,7 @@ variant is found whether it is the enclosing class or a referenced type."""
 from __future__ import annotations
 
 import json
+import os
 import re
 
 _LTOKEN = re.compile(r"L[\w/$]+;")
@@ -72,3 +73,40 @@ def candidate_classes(result: str, pattern: str, *, capture_store=None) -> set[s
             if pattern in _simple_name(dotted):
                 out.add(dotted)
     return out
+
+
+def _common_prefix(names: list[str]) -> str:
+    return os.path.commonprefix(names)
+
+
+def near_duplicate(candidates: set[str], pattern: str) -> bool:
+    """≥2 candidates that are variants of EACH OTHER: a shared stem that contains
+    the pattern and is most of every simple name (guards against unrelated classes
+    that merely share a short token, e.g. User*)."""
+    simples = [_simple_name(c) for c in candidates]
+    if len(set(simples)) < 2:
+        return False
+    stem = _common_prefix(simples)
+    if pattern not in stem:
+        return False
+    return all(len(stem) >= 0.6 * len(s) for s in simples)
+
+
+def disambig_question(cls: str, candidates: set[str]) -> str:
+    listed = ", ".join(f"`{_simple_name(c)}`" for c in sorted(candidates))
+    return (f"I'm about to dig into `{_simple_name(cls)}`, but the search referenced "
+            f"{len(candidates)} near-identical classes: {listed}. Which is the target?")
+
+
+def spin_question(name: str, arguments: dict, repeats: int, last_result: str,
+                  candidates: set[str]) -> str:
+    base = (f"I've re-run `{name}({_fmt_args(arguments)})` {repeats}× with the same "
+            f"result (`{last_result[:80]}`) and I'm stuck.")
+    if candidates:
+        listed = ", ".join(f"`{_simple_name(c)}`" for c in sorted(candidates))
+        base += f" That search referenced: {listed}."
+    return base + " Which should I dig into, or how would you like me to proceed?"
+
+
+def _fmt_args(arguments: dict) -> str:
+    return ", ".join(f'{k}="{v}"' for k, v in (arguments or {}).items())
