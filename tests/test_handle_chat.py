@@ -1,4 +1,6 @@
 """handle_chat: streaming, tool-loop, loop-cap, and error paths."""
+import itertools
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,6 +25,8 @@ def _make_agent(mode="off"):
     # Stub the capture store manager so _bind_store works without full setup().
     agent._capture_stores = MagicMock()
     agent._capture_stores.resolve.return_value = CaptureStore.open_memory()
+    # setup() isn't run in these unit tests; stub the attr it would create.
+    agent._disambig_resolved = {}
     return agent
 
 
@@ -84,10 +88,20 @@ async def test_tool_round_then_text():
 
 @pytest.mark.asyncio
 async def test_loop_cap_emits_cap_message():
+    """Genuine round-cap scenario: arguments change every round, so
+    RepeatGuard never trips (each signature is new) and the spin handback
+    never fires — the coarse MAX_TOOL_ROUNDS backstop is what has to end
+    the turn. (A verbatim-repeat scenario is now covered by the spin
+    handback tests instead — see test_spin_hands_back_wellformed.)"""
     agent = _make_agent(mode="on")
-    call = ToolCall(id="t1", name="search_vault", arguments={})
-    agent.inference.complete = AsyncMock(return_value=CompletionResult(
-        type="tool_calls", tool_calls=[call], usage=None))
+    counter = itertools.count()
+
+    async def _complete(*_a, **_k):
+        i = next(counter)
+        call = ToolCall(id=f"t{i}", name="search_vault", arguments={"query": str(i)})
+        return CompletionResult(type="tool_calls", tool_calls=[call], usage=None)
+
+    agent.inference.complete = _complete
     agent.tool_executor.run = AsyncMock(return_value="r")
     ctx = _ctx()
     msg = MagicMock(); msg.text = "hi"
@@ -101,8 +115,10 @@ async def test_loop_cap_emits_cap_message():
 @pytest.mark.asyncio
 async def test_repeat_guard_short_circuits_a_spinning_tool_call():
     """When the model re-issues the SAME call returning the SAME result, the
-    guard stops hitting the backend after the hard limit — the loop-cap no
-    longer has to absorb the whole spin."""
+    guard stops hitting the backend after the hard limit — and now (with the
+    spin handback wired in) the turn ends by handing back to the operator
+    rather than grinding on to the round cap. See test_spin_hands_back_wellformed
+    for the well-formedness assertion on this same scenario."""
     agent = _make_agent(mode="on")
     call = ToolCall(id="t1", name="static_grep_smali", arguments={"pattern": "X"})
     # Model keeps asking for the identical call forever; tool always returns "0 matches".
@@ -114,9 +130,10 @@ async def test_repeat_guard_short_circuits_a_spinning_tool_call():
 
     out = [m async for m in agent.handle_chat(msg, ctx)]
 
-    # Loop still terminates via the cap message...
+    # The turn ends with the operator handback question, not the loop-cap...
     assert isinstance(out[-1], ResponseMessage)
-    # ...but the backend was invoked only up to the guard's hard limit (3),
+    assert "stuck" in out[-1].text.lower()
+    # ...and the backend was invoked only up to the guard's hard limit (3),
     # not once per round (50) — the guard, not the blanket cap, did the stopping.
     assert agent.tool_executor.run.await_count <= 3
     # The model was told to change approach.
@@ -135,3 +152,207 @@ async def test_exception_yields_error_message():
 
     assert any(isinstance(m, ErrorMessage) for m in out)
     assert "boom" in out[-1].error
+
+
+# --- Operator-handback checkpoints (spin trigger + commit-time disambiguation) ---
+
+def _msg(text):
+    msg = MagicMock()
+    msg.text = text
+    return msg
+
+
+def _assert_toolcalls_paired(msgs):
+    """Every assistant message carrying `tool_calls` must be followed by a
+    `tool` message for each of its ids — a dangling id makes the next API
+    request invalid."""
+    for i, m in enumerate(msgs):
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        ids = {tc["id"] for tc in m["tool_calls"]}
+        seen = set()
+        j = i + 1
+        while j < len(msgs) and msgs[j].get("role") == "tool":
+            seen.add(msgs[j]["tool_call_id"])
+            j += 1
+        missing = ids - seen
+        assert not missing, f"tool_calls {missing} at index {i} have no tool result"
+
+
+# Two near-duplicate classes referenced by one grep result — the smali tokens
+# are scanned by candidate_classes() regardless of which JSON field holds them.
+_GREP_RESULT_2VARIANTS = json.dumps({"rows": [
+    {"match": "Lsg/vp/owasp_mobile/OMTG_Android/OMTG_DATAST_001_SQLite_Encrypted;->test()V"},
+    {"match": "Lsg/vp/owasp_mobile/OMTG_Android/OMTG_DATAST_001_SQLite_Not_Encrypted;->test()V"},
+]})
+
+# A single candidate — nothing to disambiguate.
+_GREP_RESULT_1VARIANT = json.dumps({"rows": [
+    {"match": "Lsg/vp/owasp_mobile/OMTG_Android/OMTG_DATAST_001_SQLite_Encrypted;->test()V"},
+]})
+
+
+@pytest.mark.asyncio
+async def test_spin_hands_back_wellformed():
+    """Trigger 1 (spin): once RepeatGuard.tripped fires for a non-poll tool,
+    the turn ends with an operator question instead of grinding to the
+    round cap — and the message list stays well-formed (every tool_calls id
+    settled before the handback text is appended)."""
+    agent = _make_agent(mode="on")
+    call = ToolCall(id="t1", name="static_grep_smali", arguments={"pattern": "X"})
+    agent.inference.complete = AsyncMock(return_value=CompletionResult(
+        type="tool_calls", tool_calls=[call], usage=None))
+    agent.tool_executor.run = AsyncMock(return_value='{"rows": []}')
+    ctx = _ctx()
+
+    out = [m async for m in agent.handle_chat(_msg("hi"), ctx)]
+
+    assert isinstance(out[-1], ResponseMessage) and "stuck" in out[-1].text.lower()
+    msgs = ctx.conversation.get_messages_for_api(system_prompt="S")
+    _assert_toolcalls_paired(msgs)
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_commit_not_dispatched():
+    """Trigger 2 (commit-time disambiguation): a prior grep surfaced two
+    near-duplicate classes; when the model commits to one of them, the
+    commit tool must NOT run — the turn hands back with the choice instead.
+
+    Uses mode="off" (not the brief's mode="on") so the first turn goes
+    through inference.stream() (-> grep) and the follow-up round goes
+    through inference.complete() (-> commit) — matching the "first
+    inference: grep; second: commit" comment. mode="on" would route BOTH
+    calls through inference.complete(), so the stream()-stubbed grep would
+    never run and the single-item complete() side_effect would fire on the
+    very first turn with no prior grep to disambiguate against.
+    """
+    agent = _make_agent(mode="off")
+    grep = ToolCall(id="g", name="static_grep_smali", arguments={"pattern": "OMTG_DATAST_001_SQLite"})
+    commit = ToolCall(id="c", name="static_decompile_method",
+                      arguments={"cls": "sg.vp.owasp_mobile.OMTG_Android.OMTG_DATAST_001_SQLite_Encrypted"})
+    agent.inference.stream = MagicMock(return_value=_Stream([[grep]]))
+    agent.inference.complete = AsyncMock(side_effect=[
+        CompletionResult(type="tool_calls", tool_calls=[commit], usage=None),
+    ])
+    agent.tool_executor.run = AsyncMock(return_value=_GREP_RESULT_2VARIANTS)
+    ctx = _ctx()
+
+    out = [m async for m in agent.handle_chat(_msg("hi"), ctx)]
+
+    dispatched = [c.args[0] for c in agent.tool_executor.run.await_args_list]
+    assert "static_decompile_method" not in dispatched
+    assert isinstance(out[-1], ResponseMessage) and "Not_Encrypted" in out[-1].text
+    msgs = ctx.conversation.get_messages_for_api(system_prompt="S")
+    _assert_toolcalls_paired(msgs)
+
+
+@pytest.mark.asyncio
+async def test_unambiguous_commit_runs():
+    """A grep that surfaces exactly one candidate class is not ambiguous —
+    committing to it must dispatch normally, no handback."""
+    agent = _make_agent(mode="off")
+    grep = ToolCall(id="g", name="static_grep_smali", arguments={"pattern": "OMTG_DATAST_001_SQLite"})
+    commit = ToolCall(id="c", name="static_decompile_method",
+                      arguments={"cls": "sg.vp.owasp_mobile.OMTG_Android.OMTG_DATAST_001_SQLite_Encrypted"})
+    agent.inference.stream = MagicMock(return_value=_Stream([[grep]]))
+    agent.inference.complete = AsyncMock(side_effect=[
+        CompletionResult(type="tool_calls", tool_calls=[commit], usage=None),
+        CompletionResult(type="text", content="decompiled it", usage=None),
+    ])
+    agent.tool_executor.run = AsyncMock(return_value=_GREP_RESULT_1VARIANT)
+    ctx = _ctx()
+
+    out = [m async for m in agent.handle_chat(_msg("hi"), ctx)]
+
+    dispatched = [c.args[0] for c in agent.tool_executor.run.await_args_list]
+    assert dispatched == ["static_grep_smali", "static_decompile_method"]
+    assert isinstance(out[-1], ResponseMessage) and out[-1].text == "decompiled it"
+    msgs = ctx.conversation.get_messages_for_api(system_prompt="S")
+    _assert_toolcalls_paired(msgs)
+
+
+@pytest.mark.asyncio
+async def test_answer_turn_resolves_without_second_handback():
+    """Cross-turn resolution (guards the operator ping-pong must-fix): once the
+    operator has answered a disambiguation question, a LATER turn that
+    re-greps (repopulating the same near-duplicate candidate set, since
+    `name_searches` is rebuilt fresh each turn) and re-commits to a class in
+    that set must NOT hand back a second time — `self._disambig_resolved`
+    persists per channel_id across separate `handle_chat` calls on the same
+    agent (same daemon session), not just within one turn's tool-call loop."""
+    agent = _make_agent(mode="off")
+    ctx = _ctx()
+
+    # --- Turn 1: grep surfaces 2 near-duplicates; commit to one -> handback.
+    grep1 = ToolCall(id="g1", name="static_grep_smali",
+                     arguments={"pattern": "OMTG_DATAST_001_SQLite"})
+    commit1 = ToolCall(id="c1", name="static_decompile_method",
+                       arguments={"cls": "sg.vp.owasp_mobile.OMTG_Android.OMTG_DATAST_001_SQLite_Encrypted"})
+    agent.inference.stream = MagicMock(return_value=_Stream([[grep1]]))
+    agent.inference.complete = AsyncMock(side_effect=[
+        CompletionResult(type="tool_calls", tool_calls=[commit1], usage=None),
+    ])
+    agent.tool_executor.run = AsyncMock(return_value=_GREP_RESULT_2VARIANTS)
+
+    out1 = [m async for m in agent.handle_chat(_msg("what handles storage?"), ctx)]
+
+    dispatched1 = [c.args[0] for c in agent.tool_executor.run.await_args_list]
+    assert "static_decompile_method" not in dispatched1
+    assert isinstance(out1[-1], ResponseMessage) and "Not_Encrypted" in out1[-1].text
+    resolved_after_turn1 = agent._disambig_resolved[ctx.channel_id]
+    assert len(resolved_after_turn1) == 1
+    variant_group = next(iter(resolved_after_turn1))
+    assert "sg.vp.owasp_mobile.OMTG_Android.OMTG_DATAST_001_SQLite_Not_Encrypted" in variant_group
+
+    # --- Turn 2: same agent + same ctx (same channel_id), a fresh
+    # handle_chat call. The operator answered "the non-encrypted one"; the
+    # model re-greps the same pattern (a new tool_call id, fresh per-turn
+    # name_searches dict) and re-commits to a class from the now-resolved
+    # group -> this time the commit must actually dispatch, no handback.
+    grep2 = ToolCall(id="g2", name="static_grep_smali",
+                     arguments={"pattern": "OMTG_DATAST_001_SQLite"})
+    commit2 = ToolCall(id="c2", name="static_decompile_method",
+                       arguments={"cls": "sg.vp.owasp_mobile.OMTG_Android.OMTG_DATAST_001_SQLite_Not_Encrypted"})
+    agent.inference.stream = MagicMock(return_value=_Stream([[grep2]]))
+    agent.inference.complete = AsyncMock(side_effect=[
+        CompletionResult(type="tool_calls", tool_calls=[commit2], usage=None),
+        CompletionResult(type="text", content="Here's the Not_Encrypted decompile.", usage=None),
+    ])
+    agent.tool_executor.run = AsyncMock(side_effect=[_GREP_RESULT_2VARIANTS, "decompiled body"])
+
+    out2 = [m async for m in agent.handle_chat(_msg("the non-encrypted one"), ctx)]
+
+    dispatched2 = [c.args[0] for c in agent.tool_executor.run.await_args_list]
+    assert dispatched2 == ["static_grep_smali", "static_decompile_method"]
+    agent.tool_executor.run.assert_any_await("static_decompile_method", commit2.arguments, ctx)
+    assert isinstance(out2[-1], ResponseMessage)
+    assert out2[-1].text == "Here's the Not_Encrypted decompile."
+    # No second handback question was raised, and the resolved set didn't grow
+    # (same group, not re-recorded).
+    assert len(agent._disambig_resolved[ctx.channel_id]) == 1
+    msgs = ctx.conversation.get_messages_for_api(system_prompt="S")
+    _assert_toolcalls_paired(msgs)
+
+
+@pytest.mark.asyncio
+async def test_poll_spin_does_not_handback():
+    """A poll tool (frida_read_hook_events / list_sessions) that keeps
+    returning the same result is exempt from the spin handback — legitimate
+    re-polls must not be penalized into an early stop (see repeat_guard.py).
+    The backend still stops being hit once the guard's hard limit kicks in,
+    but the turn runs to the round cap instead of handing back early."""
+    agent = _make_agent(mode="on")
+    call = ToolCall(id="t1", name="frida_list_sessions", arguments={})
+    agent.inference.complete = AsyncMock(return_value=CompletionResult(
+        type="tool_calls", tool_calls=[call], usage=None))
+    agent.tool_executor.run = AsyncMock(return_value="no sessions")
+    ctx = _ctx()
+
+    out = [m async for m in agent.handle_chat(_msg("hi"), ctx)]
+
+    assert isinstance(out[-1], ResponseMessage)
+    assert "stuck" not in out[-1].text.lower()
+    assert "limit" in out[-1].text.lower()
+    assert agent.tool_executor.run.await_count <= 3
+    msgs = ctx.conversation.get_messages_for_api(system_prompt="S")
+    _assert_toolcalls_paired(msgs)

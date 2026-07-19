@@ -83,3 +83,15 @@ def test_signature_is_argument_order_independent():
     g.record("t", {"a": 1, "b": 2}, "r")
     annotated = g.record("t", {"b": 2, "a": 1}, "r")  # same args, different key order
     assert "repeat-guard" in annotated
+
+
+def test_tripped_fires_once_per_signature():
+    g = RepeatGuard(soft_after=1, hard_after=3, call_ceiling=5)
+    for _ in range(3):
+        g.record("static_grep_smali", {"pattern": "X"}, "0 matches")
+    # now hard-blocked
+    assert g.should_run("static_grep_smali", {"pattern": "X"}) is False
+    assert g.tripped("static_grep_smali", {"pattern": "X"}) is True   # first time
+    assert g.tripped("static_grep_smali", {"pattern": "X"}) is False  # only once
+    # a different, non-blocked signature never trips
+    assert g.tripped("static_grep_smali", {"pattern": "Y"}) is False
