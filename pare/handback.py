@@ -15,7 +15,7 @@ _LTOKEN = re.compile(r"L[\w/$]+;")
 # dig-in / instrumentation tool that could commit to the wrong class goes here.
 COMMIT_TOOLS = frozenset({"static_list_methods", "static_decompile_method", "frida_java_hook"})
 NAME_SEARCH_TOOLS = frozenset({"static_grep_smali"})
-POLL_TOOLS = frozenset({"frida_read_hook_events", "list_sessions"})
+POLL_TOOLS = frozenset({"frida_read_hook_events", "frida_list_sessions"})
 
 
 def normalize_class(name: str) -> str:
