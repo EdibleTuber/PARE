@@ -32,6 +32,17 @@ def _simple_name(dotted: str) -> str:
     return dotted.rsplit(".", 1)[-1]
 
 
+def _pattern_stem(pattern: str) -> str:
+    """The bare class-name portion of a grep pattern, so a qualified pattern
+    compares against a class simple name. gemma greps in either form — bare
+    (`OMTG_DATAST_001_SQLite`) or fully-qualified smali/dotted
+    (`Lsg/vp/.../OMTG_DATAST_001_SQLite`, `...SQLite;`, `sg....SQLite`). Without
+    this, the qualified form never matched a simple name and disambiguation
+    silently didn't fire (smoke test 1)."""
+    p = (pattern or "").strip().rstrip(";")
+    return p.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
+
+
 def _rows_from(result: str, capture_store) -> list:
     try:
         d = json.loads(result)
@@ -58,6 +69,9 @@ def candidate_classes(result: str, pattern: str, *, capture_store=None) -> set[s
     """Distinct dotted class names referenced in a grep result whose simple name
     contains `pattern`. Scans L...; tokens across each row (class/insn/match)."""
     out: set[str] = set()
+    stem = _pattern_stem(pattern)
+    if not stem:            # empty pattern must not match everything
+        return out
     for row in _rows_from(result, capture_store):
         blob = json.dumps(row) if not isinstance(row, str) else row
         for tok in _LTOKEN.findall(blob):
@@ -70,7 +84,7 @@ def candidate_classes(result: str, pattern: str, *, capture_store=None) -> set[s
             # lone framework class (1 candidate) never arms disambiguation. Keeping
             # this a dumb extractor avoids silently dropping exact-name app searches
             # (e.g. `grep MainActivity` must still yield the MainActivity class).
-            if pattern in _simple_name(dotted):
+            if stem in _simple_name(dotted):
                 out.add(dotted)
     return out
 
@@ -87,7 +101,7 @@ def near_duplicate(candidates: set[str], pattern: str) -> bool:
     if len(set(simples)) < 2:
         return False
     stem = _common_prefix(simples)
-    if pattern not in stem:
+    if _pattern_stem(pattern) not in stem:
         return False
     return all(len(stem) >= 0.6 * len(s) for s in simples)
 
