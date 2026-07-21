@@ -11,6 +11,40 @@ from curated knowledge, not just training data), and **drives RE worker tools**
 high-risk actions for operator approval and audits every call. Built on
 [`agent_core`](https://github.com/EdibleTuber/agent_core).
 
+## How PARE works: the RE loop
+
+Reverse engineering in PARE is a loop. Static and dynamic analysis are *tools that
+serve the loop's beats* — the structure is the methodology, not any one tool:
+
+1. **Orient** — from the behavior the operator describes, find the region of code (or
+   traffic) it corresponds to. The operator's description is a lead to corroborate, not
+   ground truth.
+2. **Enumerate** — build the *candidate set* before committing: every site that could
+   produce the symptom (the whole API family, not the first idiom that matches).
+3. **Hypothesize** — pick one candidate and pin what you expect to observe at runtime.
+4. **Verify** — confirm, don't re-discover: an empty capture means "not triggered yet,"
+   a *contradicting* value means the target is wrong.
+5. **Re-orient** — on a dead-end, advance to the next candidate; on a runtime surprise,
+   go back to static to explain it.
+
+The two worker repos serve different beats:
+
+- **[`pare-static-mcp`](https://github.com/EdibleTuber/pare-static-mcp)** — static APK
+  analysis: the front of the loop (Orient / Enumerate / Hypothesize).
+- **[`pare-frida-mcp`](https://github.com/EdibleTuber/pare-frida-mcp)** — Frida dynamic
+  instrumentation: the Verify beat.
+
+Two mechanical guards keep the loop honest — the model won't reliably obey prose alone:
+
+- **Repeat-guard** (`pare/repeat_guard.py`) — a no-progress floor: a tool call that
+  repeats with the same result is short-circuited instead of spinning to the round cap.
+- **Operator-handback checkpoints** (`pare/handback.py`) — PARE hands control back to the
+  operator (by ending the turn with a question) when it is stuck (a spin) or about to
+  commit to one of several near-duplicate classes (commit-time disambiguation), turning a
+  silent wrong-commit into a one-line correction.
+
+The loop as the model runs it lives in [`pare/prompts/system.md`](pare/prompts/system.md).
+
 ## Design & Plans
 
 - Design spec: [`docs/superpowers/specs/2026-05-12-pare-v1-design.md`](docs/superpowers/specs/2026-05-12-pare-v1-design.md)
