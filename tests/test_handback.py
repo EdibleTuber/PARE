@@ -116,3 +116,19 @@ def test_questions_list_the_candidates():
     assert "OMTG_DATAST_001_SQLite_Not_Encrypted" in q and "?" in q
     s = spin_question("static_grep_smali", {"pattern": "X"}, 6, "0 matches", cands)
     assert "6" in s and "static_grep_smali" in s
+
+
+def test_disambig_question_annotates_nested_inner_class():
+    """`Foo` and `Foo$1` are a parent/nested-inner-class relationship, not sibling
+    variants — surface that so the operator has the context (live BadEncryption case)."""
+    cands = {f"{PKG}.OMTG_DATAST_001_BadEncryption", f"{PKG}.OMTG_DATAST_001_BadEncryption$1"}
+    q = disambig_question(f"{PKG}.OMTG_DATAST_001_BadEncryption", cands)
+    assert "OMTG_DATAST_001_BadEncryption$1" in q
+    assert "inner class of" in q                          # nesting is labeled
+    assert "`OMTG_DATAST_001_BadEncryption`" in q         # the parent is named
+
+
+def test_disambig_question_no_nesting_annotation_for_siblings():
+    cands = {f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted", f"{PKG}.OMTG_DATAST_001_SQLite_Not_Encrypted"}
+    q = disambig_question(f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted", cands)
+    assert "inner class of" not in q                      # true siblings, no nesting

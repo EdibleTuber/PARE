@@ -107,9 +107,9 @@ def near_duplicate(candidates: set[str], pattern: str) -> bool:
 
 
 def disambig_question(cls: str, candidates: set[str]) -> str:
-    listed = ", ".join(f"`{_simple_name(c)}`" for c in sorted(candidates))
+    listed = _format_candidate_list(candidates)
     return (f"I'm about to dig into `{_simple_name(cls)}`, but the search referenced "
-            f"{len(candidates)} near-identical classes: {listed}. Which is the target?")
+            f"{len(candidates)} closely-related classes: {listed}. Which is the target?")
 
 
 def spin_question(name: str, arguments: dict, repeats: int, last_result: str,
@@ -117,9 +117,25 @@ def spin_question(name: str, arguments: dict, repeats: int, last_result: str,
     base = (f"I've re-run `{name}({_fmt_args(arguments)})` {repeats}× with the same "
             f"result (`{last_result[:80]}`) and I'm stuck.")
     if candidates:
-        listed = ", ".join(f"`{_simple_name(c)}`" for c in sorted(candidates))
-        base += f" That search referenced: {listed}."
+        base += f" That search referenced: {_format_candidate_list(candidates)}."
     return base + " Which should I dig into, or how would you like me to proceed?"
+
+
+def _format_candidate_list(candidates: set[str]) -> str:
+    """Backtick-list candidate simple names, annotating a nested class `X$Y` as an
+    inner class of `X` when `X` is also a candidate — so the operator can see it's a
+    parent/child nesting (e.g. `BadEncryption` + `BadEncryption$1`), not sibling
+    variants like `_SQLite_Encrypted` / `_SQLite_Not_Encrypted`."""
+    simples = {_simple_name(c) for c in candidates}
+    parts = []
+    for c in sorted(candidates):
+        s = _simple_name(c)
+        parent = s.split("$", 1)[0] if "$" in s else ""
+        if parent and parent != s and parent in simples:
+            parts.append(f"`{s}` (inner class of `{parent}`)")
+        else:
+            parts.append(f"`{s}`")
+    return ", ".join(parts)
 
 
 def _fmt_args(arguments: dict) -> str:
