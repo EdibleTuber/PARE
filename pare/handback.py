@@ -32,6 +32,17 @@ def _simple_name(dotted: str) -> str:
     return dotted.rsplit(".", 1)[-1]
 
 
+def _pattern_stem(pattern: str) -> str:
+    """The bare class-name portion of a grep pattern, so a qualified pattern
+    compares against a class simple name. gemma greps in either form — bare
+    (`OMTG_DATAST_001_SQLite`) or fully-qualified smali/dotted
+    (`Lsg/vp/.../OMTG_DATAST_001_SQLite`, `...SQLite;`, `sg....SQLite`). Without
+    this, the qualified form never matched a simple name and disambiguation
+    silently didn't fire (smoke test 1)."""
+    p = (pattern or "").strip().rstrip(";")
+    return p.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
+
+
 def _rows_from(result: str, capture_store) -> list:
     try:
         d = json.loads(result)
@@ -58,6 +69,9 @@ def candidate_classes(result: str, pattern: str, *, capture_store=None) -> set[s
     """Distinct dotted class names referenced in a grep result whose simple name
     contains `pattern`. Scans L...; tokens across each row (class/insn/match)."""
     out: set[str] = set()
+    stem = _pattern_stem(pattern)
+    if not stem:            # empty pattern must not match everything
+        return out
     for row in _rows_from(result, capture_store):
         blob = json.dumps(row) if not isinstance(row, str) else row
         for tok in _LTOKEN.findall(blob):
@@ -70,7 +84,7 @@ def candidate_classes(result: str, pattern: str, *, capture_store=None) -> set[s
             # lone framework class (1 candidate) never arms disambiguation. Keeping
             # this a dumb extractor avoids silently dropping exact-name app searches
             # (e.g. `grep MainActivity` must still yield the MainActivity class).
-            if pattern in _simple_name(dotted):
+            if stem in _simple_name(dotted):
                 out.add(dotted)
     return out
 
@@ -87,15 +101,15 @@ def near_duplicate(candidates: set[str], pattern: str) -> bool:
     if len(set(simples)) < 2:
         return False
     stem = _common_prefix(simples)
-    if pattern not in stem:
+    if _pattern_stem(pattern) not in stem:
         return False
     return all(len(stem) >= 0.6 * len(s) for s in simples)
 
 
 def disambig_question(cls: str, candidates: set[str]) -> str:
-    listed = ", ".join(f"`{_simple_name(c)}`" for c in sorted(candidates))
+    listed = _format_candidate_list(candidates)
     return (f"I'm about to dig into `{_simple_name(cls)}`, but the search referenced "
-            f"{len(candidates)} near-identical classes: {listed}. Which is the target?")
+            f"{len(candidates)} closely-related classes: {listed}. Which is the target?")
 
 
 def spin_question(name: str, arguments: dict, repeats: int, last_result: str,
@@ -103,9 +117,25 @@ def spin_question(name: str, arguments: dict, repeats: int, last_result: str,
     base = (f"I've re-run `{name}({_fmt_args(arguments)})` {repeats}× with the same "
             f"result (`{last_result[:80]}`) and I'm stuck.")
     if candidates:
-        listed = ", ".join(f"`{_simple_name(c)}`" for c in sorted(candidates))
-        base += f" That search referenced: {listed}."
+        base += f" That search referenced: {_format_candidate_list(candidates)}."
     return base + " Which should I dig into, or how would you like me to proceed?"
+
+
+def _format_candidate_list(candidates: set[str]) -> str:
+    """Backtick-list candidate simple names, annotating a nested class `X$Y` as an
+    inner class of `X` when `X` is also a candidate — so the operator can see it's a
+    parent/child nesting (e.g. `BadEncryption` + `BadEncryption$1`), not sibling
+    variants like `_SQLite_Encrypted` / `_SQLite_Not_Encrypted`."""
+    simples = {_simple_name(c) for c in candidates}
+    parts = []
+    for c in sorted(candidates):
+        s = _simple_name(c)
+        parent = s.split("$", 1)[0] if "$" in s else ""
+        if parent and parent != s and parent in simples:
+            parts.append(f"`{s}` (inner class of `{parent}`)")
+        else:
+            parts.append(f"`{s}`")
+    return ", ".join(parts)
 
 
 def _fmt_args(arguments: dict) -> str:

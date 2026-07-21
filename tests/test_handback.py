@@ -30,6 +30,38 @@ def test_candidate_classes_from_referenced_type_not_class_column():
     assert not any("MyActivity" in c for c in got)
 
 
+def test_candidate_classes_matches_qualified_smali_pattern():
+    """Live regression (smoke test 1): gemma greps the FULLY-QUALIFIED pattern
+    `Lsg/.../OMTG_DATAST_001_SQLite`, not the bare name — which never appeared as a
+    substring of a class simple name, so disambiguation silently didn't fire. Every
+    pattern form must yield the same variant set."""
+    expected = {
+        f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted",
+        f"{PKG}.OMTG_DATAST_001_SQLite_Not_Encrypted",
+    }
+    for pat in (
+        "OMTG_DATAST_001_SQLite",                     # bare
+        f"{LPKG}/OMTG_DATAST_001_SQLite",            # smali-qualified, no trailing ;
+        f"{LPKG}/OMTG_DATAST_001_SQLite;",           # smali-qualified with ;
+        f"{PKG}.OMTG_DATAST_001_SQLite",             # dotted-qualified
+    ):
+        assert candidate_classes(_GREP_RESULT, pat) == expected, f"pattern {pat!r}"
+
+
+def test_candidate_classes_empty_pattern_yields_nothing():
+    """An empty stem must not match everything."""
+    assert candidate_classes(_GREP_RESULT, "") == set()
+
+
+def test_near_duplicate_arms_on_qualified_pattern():
+    cands = {
+        f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted",
+        f"{PKG}.OMTG_DATAST_001_SQLite_Not_Encrypted",
+    }
+    assert near_duplicate(cands, f"{LPKG}/OMTG_DATAST_001_SQLite") is True
+    assert near_duplicate(cands, f"{LPKG}/OMTG_DATAST_001_SQLite;") is True
+
+
 def test_candidate_classes_is_a_dumb_extractor_framework_noise_filtered_downstream():
     # a grep whose only class token is a framework class named like the pattern
     rows = [{"class": f"{LPKG}/Foo;", "method": "m",
@@ -84,3 +116,19 @@ def test_questions_list_the_candidates():
     assert "OMTG_DATAST_001_SQLite_Not_Encrypted" in q and "?" in q
     s = spin_question("static_grep_smali", {"pattern": "X"}, 6, "0 matches", cands)
     assert "6" in s and "static_grep_smali" in s
+
+
+def test_disambig_question_annotates_nested_inner_class():
+    """`Foo` and `Foo$1` are a parent/nested-inner-class relationship, not sibling
+    variants — surface that so the operator has the context (live BadEncryption case)."""
+    cands = {f"{PKG}.OMTG_DATAST_001_BadEncryption", f"{PKG}.OMTG_DATAST_001_BadEncryption$1"}
+    q = disambig_question(f"{PKG}.OMTG_DATAST_001_BadEncryption", cands)
+    assert "OMTG_DATAST_001_BadEncryption$1" in q
+    assert "inner class of" in q                          # nesting is labeled
+    assert "`OMTG_DATAST_001_BadEncryption`" in q         # the parent is named
+
+
+def test_disambig_question_no_nesting_annotation_for_siblings():
+    cands = {f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted", f"{PKG}.OMTG_DATAST_001_SQLite_Not_Encrypted"}
+    q = disambig_question(f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted", cands)
+    assert "inner class of" not in q                      # true siblings, no nesting
