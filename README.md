@@ -11,6 +11,40 @@ from curated knowledge, not just training data), and **drives RE worker tools**
 high-risk actions for operator approval and audits every call. Built on
 [`agent_core`](https://github.com/EdibleTuber/agent_core).
 
+## How PARE works: the RE loop
+
+Reverse engineering in PARE is a loop. Static and dynamic analysis are *tools that
+serve the loop's beats* — the structure is the methodology, not any one tool:
+
+1. **Orient** — from the behavior the operator describes, find the region of code (or
+   traffic) it corresponds to. The operator's description is a lead to corroborate, not
+   ground truth.
+2. **Enumerate** — build the *candidate set* before committing: every site that could
+   produce the symptom (the whole API family, not the first idiom that matches).
+3. **Hypothesize** — pick one candidate and pin what you expect to observe at runtime.
+4. **Verify** — confirm, don't re-discover: an empty capture means "not triggered yet,"
+   a *contradicting* value means the target is wrong.
+5. **Re-orient** — on a dead-end, advance to the next candidate; on a runtime surprise,
+   go back to static to explain it.
+
+The two worker repos serve different beats:
+
+- **[`pare-static-mcp`](https://github.com/EdibleTuber/pare-static-mcp)** — static APK
+  analysis: the front of the loop (Orient / Enumerate / Hypothesize).
+- **[`pare-frida-mcp`](https://github.com/EdibleTuber/pare-frida-mcp)** — Frida dynamic
+  instrumentation: the Verify beat.
+
+Two mechanical guards keep the loop honest — the model won't reliably obey prose alone:
+
+- **Repeat-guard** (`pare/repeat_guard.py`) — a no-progress floor: a tool call that
+  repeats with the same result is short-circuited instead of spinning to the round cap.
+- **Operator-handback checkpoints** (`pare/handback.py`) — PARE hands control back to the
+  operator (by ending the turn with a question) when it is stuck (a spin) or about to
+  commit to one of several near-duplicate classes (commit-time disambiguation), turning a
+  silent wrong-commit into a one-line correction.
+
+The loop as the model runs it lives in [`pare/prompts/system.md`](pare/prompts/system.md).
+
 ## Design & Plans
 
 - Design spec: [`docs/superpowers/specs/2026-05-12-pare-v1-design.md`](docs/superpowers/specs/2026-05-12-pare-v1-design.md)
@@ -21,6 +55,7 @@ high-risk actions for operator approval and audits every call. Built on
 - Risk enforcement (`agent_core@v1.5.0`/`v1.5.1`): [`docs/superpowers/plans/2026-05-27-risk-enforcement-mcp-dispatch.md`](docs/superpowers/plans/2026-05-27-risk-enforcement-mcp-dispatch.md) — `RiskAwareToolPool`: dispatch-time risk gating + HITL approval prompt + audit log
 - Risk tier on the wire (`agent_core@v1.6.0`): per-tool risk tiers advertised over MCP `_meta`; effective tier = `max(floor, wire, operator-pin)`
 - Phase 4 (landed): in-house Python Frida MCP server (`pare-frida-mcp`, stdio worker) registered + risk-gated; smoke-tested end-to-end
+- Static worker moved in-house: [`pare-static-mcp`](https://github.com/EdibleTuber/pare-static-mcp) (stdio, `static_*` tools) replaces the `apk_re_agents` Streamable-HTTP backend as the active static-analysis path
 - Conversational loop: [`docs/superpowers/specs/2026-05-30-pare-handle-chat-design.md`](docs/superpowers/specs/2026-05-30-pare-handle-chat-design.md) — `handle_chat`/`handle_command`, vault reads via `search_vault` + `read_vault_doc`
 
 ## Install
@@ -88,7 +123,7 @@ The full suite passes (currently 44 passed, 3 skipped). The 3 skips are env-gate
 
 PARE reaches analysis tools through MCP workers declared in `workers.yaml`. Each entry maps to an `agent_core` `WorkerSpec`:
 
-- **Transport** — `streamable_http` (a worker reached over HTTP, e.g. the apk_re_agents agents) or `stdio` (a worker PARE launches as a subprocess and talks to over stdin/stdout, e.g. the in-house `pare-frida-mcp` Frida server).
+- **Transport** — `streamable_http` (a worker reached over HTTP) or `stdio` (a worker PARE launches as a subprocess and talks to over stdin/stdout). Both in-house workers ship as stdio console scripts: the `pare-frida-mcp` Frida server and the `pare-static-mcp` static-analysis server. (The legacy `apk_re_agents` Streamable-HTTP backend is superseded by `pare-static-mcp` and disabled in `workers.yaml`.)
 
 > For the end-to-end Frida dynamic-analysis workflow (device + `frida-server`
 > setup, attach, Java hooks, scripts, capture store), see
@@ -271,7 +306,7 @@ flowchart TB
         PAL["PAL agent"] --> VAULT[("vault (git repo)")]
     end
     subgraph pareside["PARE host"]
-        PARE["PARE agent"] --> WK["MCP workers: frida, apk_re"]
+        PARE["PARE agent"] --> WK["MCP workers: frida, static"]
     end
     VAULT -. indexed into .-> RAG
     PAL -->|"chat + RAG"| MGR
@@ -294,9 +329,9 @@ pare/
         hello.py         example Command
         health.py        /health — daemon status + endpoints
     tools/
-        static_analyze.py  apk_re_agents /jobs wrapper
+        static_analyze.py  optional apk_re_agents /jobs coordinator (off by default; static analysis now runs via the pare-static-mcp stdio worker)
         read_vault_doc.py  fetch a full vault note over RAG (pairs with the search_vault builtin)
-workers.yaml            MCP worker registry — stdio (frida) + streamable_http (apk_re); see "Workers & risk gating"
+workers.yaml            MCP worker registry — stdio workers (frida, static); see "Workers & risk gating"
 ```
 
 MCP-discovered tools are registered at startup by `PareAgent.register_tools()` and dispatched through a `RiskAwareToolPool`, so every worker tool call is risk-evaluated and audited.
