@@ -9,11 +9,23 @@ from agent_core.commands.base import Command
 from agent_core.protocol.messages import ResponseMessage
 
 
+_NOT_FOUND = (
+    "pare-mitm-daemon not found — install the worker into this venv: "
+    "pip install -e ~/Projects/pare-mitm-mcp")
+
+
+class DaemonNotFound(Exception):
+    """Raised when the pare-mitm-daemon executable isn't on PATH."""
+
+
 async def _launch_daemon() -> tuple[int, str]:
     """Run `pare-mitm-daemon up` (idempotent) and return (rc, last-output-line)."""
-    proc = await asyncio.create_subprocess_exec(
-        "pare-mitm-daemon", "up",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "pare-mitm-daemon", "up",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    except FileNotFoundError:
+        raise DaemonNotFound(_NOT_FOUND)
     out, _ = await proc.communicate()
     text = (out or b"").decode().strip().splitlines()
     return proc.returncode or 0, (text[-1] if text else "")
@@ -35,7 +47,11 @@ class Mitm(Command):
         sub = raw_args.strip().split()[0] if raw_args.strip() else "status"
 
         if sub == "up":
-            rc, line = await _launch_daemon()
+            try:
+                rc, line = await _launch_daemon()
+            except (DaemonNotFound, FileNotFoundError):
+                yield ResponseMessage(text=_NOT_FOUND)
+                return
             prefix = "" if rc == 0 else f"(exit {rc}) "
             yield ResponseMessage(text=prefix + (line or "started pare-mitm-daemon up"))
             return

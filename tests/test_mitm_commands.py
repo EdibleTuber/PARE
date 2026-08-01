@@ -63,3 +63,15 @@ async def test_up_invokes_launcher(monkeypatch):
     agent = _Agent(_Pool({}))
     msgs = await _run("up", agent)
     assert calls.get("ran") and "daemon up" in msgs[-1].text
+
+
+async def test_up_when_daemon_not_on_path_is_friendly(monkeypatch):
+    async def fake_launch():
+        raise FileNotFoundError("pare-mitm-daemon")
+
+    monkeypatch.setattr("pare.commands.mitm._launch_daemon", fake_launch)
+    agent = _Agent(_Pool({}))
+    msgs = await _run("up", agent)  # must not raise
+    assert len(msgs) == 1
+    assert "install" in msgs[-1].text.lower()
+    assert "pare-mitm-mcp" in msgs[-1].text
