@@ -1,0 +1,240 @@
+# PARE + mitm Quick Start
+
+Capture and inspect **HTTPS traffic** from a device/emulator through PARE:
+start a mitmproxy daemon, route the target app through it, and query the
+capture with four read-only tools — while mitmweb's own UI stays open
+side-by-side for a human view of the same capture.
+
+This builds on the base [`QUICKSTART.md`](../QUICKSTART.md) (inference server,
+vault, daemon, CLI). Read that first; this guide adds the mitm worker.
+
+## What the mitm worker provides
+
+Unlike `frida`, the mitm worker does **not** own the capture. An
+operator-launched `mitmweb -s <addon>` process is the daemon that runs the
+proxy, the mitmweb web UI, and a localhost control API. The MCP worker
+(`pare-mitm-mcp`) is a thin HTTP client of that control API — it can't start,
+stop, or configure the proxy, and it can't modify or replay traffic. It just
+exposes four **read-only**, tier-**low** tools over whatever the daemon has
+already captured, so mitmweb (browser) and PARE (REPL) can look at one live
+capture side-by-side.
+
+| Tool | Wire tier | What it does |
+|---|---|---|
+| `list_flows` | low | Summary rows (`id, ts, kind, method, host, path, scheme, status, content_type, resp_size, error`) for captured flows. Filterable by `host`, `method`, `status`, `since` (unix ts), `limit`. `kind="error"` rows (failed TLS/connection attempts, e.g. cert pinning) are surfaced, not hidden. |
+| `get_flow` | low | Full detail for one flow id: request line + headers + body, response headers + body. JSON bodies pretty-printed; binary bodies shown as `<binary N bytes>`. |
+| `search_flows` | low | Regex/substring search across a scope (`url`, `headers`, `req-body`, `resp-body`, `all`); returns matching flow ids with a context snippet. Runs daemon-side. |
+| `capture_health` | low | Is the proxy reachable? Returns `{reachable, flows, tls_errors, last_flow_ts}` — the tool for disambiguating "daemon down" vs. "nothing triggered yet" vs. "pinning is breaking the handshake" (`tls_errors > 0`). |
+
+Tools surface to the model as `mitm_list_flows`, `mitm_get_flow`,
+`mitm_search_flows`, `mitm_capture_health`. All four auto-execute (still
+audited) — nothing in this worker prompts for operator approval.
+
+## 1. Prerequisites
+
+Beyond the base quickstart:
+
+- **The `pare-mitm-mcp` worker installed** into PARE's venv (it is not a PARE
+  dependency by default):
+  ```bash
+  .venv/bin/pip install -e ~/Projects/pare-mitm-mcp
+  ```
+  This pulls `mitmproxy>=11.0.0` into PARE's venv — it's a hard dependency of
+  the worker, not optional.
+
+  > **Known tension: `typing-extensions`.** mitmproxy pins
+  > `typing-extensions<=4.14` (for Python < 3.13); PARE's venv already carries
+  > a newer `typing-extensions` for `mcp`/`pydantic`/`anyio`. This has only
+  > been observed to matter when `mitmweb` actually **runs** (not at import
+  > time), so a `pip install` that appears to succeed can still hit it later
+  > at `/mitm up`. If you see `mitmweb` fail to start with a
+  > `typing_extensions`-related `ImportError`/`AttributeError`, the
+  > workaround is to run the daemon out of a **separate virtualenv** (install
+  > just `mitmproxy` there) and point `pare-mitm-daemon` at the same ports via
+  > the `PARE_MITM_*` env vars — the worker and the daemon only need to agree
+  > on ports, not share a Python environment.
+- **`mitmweb` on `PATH`** in whatever environment will run
+  `pare-mitm-daemon up` (normally the same venv the `pip install -e` above
+  installed into):
+  ```bash
+  .venv/bin/mitmweb --version
+  ```
+- **A device or emulator you can route through an HTTP(S) proxy** — a
+  physical phone/tablet on the same LAN as the PARE host, or an emulator/AVD
+  with proxy support.
+
+## 2. Start the daemon
+
+From inside a PARE session:
+
+```
+/mitm up
+```
+
+This shells out to `pare-mitm-daemon up`, which launches `mitmweb` if it
+isn't already listening, waits up to ~5s for the control API to answer, and
+reports the three ports. It's **idempotent** — running it again while the
+daemon is already up just prints `mitm daemon already up` rather than
+spawning a second instance.
+
+You can also run the launcher directly (useful if you want the daemon's own
+stdout/stderr in front of you, e.g. while debugging `mitmweb` itself):
+
+```bash
+.venv/bin/pare-mitm-daemon up
+```
+
+Check status and stop:
+
+```
+/mitm status
+/mitm down
+```
+
+`/mitm status` works even when the worker isn't mounted in this PARE process
+— it calls the daemon directly. `/mitm down` in v1 does **not** kill the
+process (mitmweb is operator-launched in its own terminal/session); it prints
+the `pkill` invocation to run yourself.
+
+**Bind split** (this is what makes the side-by-side model safe by default):
+
+| Listener | Bind | Purpose |
+|---|---|---|
+| Proxy (device traffic) | `0.0.0.0:8080` | so a phone/emulator on the LAN can reach it |
+| mitmweb UI | `127.0.0.1:8081` | human browser view, local only |
+| Control API (worker) | `127.0.0.1:8788` | `pare-mitm-mcp`'s HTTP client, local only |
+
+All three ports are configurable via `PARE_MITM_PROXY_PORT`,
+`PARE_MITM_WEB_PORT`, `PARE_MITM_CONTROL_HOST`/`PARE_MITM_CONTROL_PORT` — see
+the [`pare-mitm-mcp` README](https://github.com/EdibleTuber/pare-mitm-mcp#configuration)
+for the full list (also covers `PARE_MITM_MAX_FLOWS`, the ring-buffer
+retention cap).
+
+Open `http://127.0.0.1:8081` in a browser now — that's the mitmweb UI you'll
+watch alongside the PARE CLI.
+
+## 3. Point the device at the proxy, then trust the CA
+
+1. Find the PARE host's LAN IP (`ip addr` / `ifconfig`) and set the device's
+   Wi-Fi proxy to `<host-ip>:8080` (the proxy port from step 2, **not** the
+   web/control ports).
+2. With the proxy set, browse to `http://mitm.it` on the device and install
+   the mitmproxy CA certificate for your platform.
+
+**Footgun: on Android 7+, a user-installed CA is not trusted by app traffic
+by default.** Android split the trust store in Nougat — a CA you install as
+a "user" certificate (via Settings, or the `mitm.it` flow) is trusted by the
+browser and by apps that opt in, but **not** by apps targeting API 24+ unless
+they explicitly declare a network security config that trusts user CAs. Most
+apps don't. You will see the CA install "succeed" and then still get
+`tls_errors > 0` from `capture_health` — that's not a proxy misconfiguration,
+it's this default. Fixes are all operator-side and out of scope for this
+worker: push the CA into the **system** trust store (needs root), or patch
+the target app's network security config, or use a Frida CA-pin/trust
+override alongside step 4 below.
+
+## 4. Defeat certificate pinning
+
+If the target app pins certificates, plaintext never reaches the proxy no
+matter how correctly steps 1–3 are done — you'll see `capture_health` report
+`tls_errors > 0` and `list_flows` return `kind="error"` rows instead of real
+traffic. PARE **cannot see or verify whether an app is pinning** — the mitm
+worker only reports the symptom (`tls_errors > 0`), and this ships no
+first-class pinning-bypass tool of its own. Defeating pinning is entirely
+operator-driven, typically via Frida (`objection`'s universal SSL-unpinning
+script, or a hand-written unpin hook) run *before* you drive traffic. See
+[`docs/frida-quickstart.md`](frida-quickstart.md) for attaching and hooking
+with PARE's `frida_*` tools.
+
+## 5. Enable the worker in PARE
+
+The `mitm` worker is declared in `workers.yaml` but filtered out of discovery
+unless opted in (`pare/agent.py`'s `setup()`, `pare/config.py`'s
+`enable_mitm`):
+
+```bash
+export PARE_ENABLE_MITM=1
+```
+
+Restart the daemon (`python -m pare`), then confirm from the CLI:
+
+```
+> What mitm tools do you have?
+```
+
+PARE should list `mitm_list_flows`, `mitm_get_flow`, `mitm_search_flows`,
+`mitm_capture_health`. If it doesn't, check Troubleshooting.
+
+## 6. A guided session
+
+With the daemon up (step 2), the device routed and CA-trusted (step 3), and
+pinning handled if needed (step 4):
+
+```
+> Is the capture reachable, and has anything come through yet?
+
+  → mitm_capture_health
+  → {"reachable": true, "flows": 0, "tls_errors": 0, "last_flow_ts": null}
+
+Reachable, but nothing captured yet — go trigger the request in the app.
+
+(you drive the app: log in, load a screen, whatever you're investigating)
+
+> List what's come in during the last minute.
+
+  → mitm_list_flows(since=<now - 60>)
+  → 6 flows: GET api.example.com/v1/session (200), POST api.example.com/v1/login (200), ...
+
+> Search the captures for "session_token".
+
+  → mitm_search_flows(pattern="session_token", scope="all")
+  → 2 matches: flow f-0021 (resp-body), flow f-0023 (headers)
+
+> Show me the full detail on f-0021.
+
+  → mitm_get_flow(id="f-0021")
+  → POST api.example.com/v1/login
+    request headers: {...}
+    request body: {"user": "...", "password": "..."}
+    response headers: {...}
+    response body: {"session_token": "eyJ...", "expires_in": 3600}
+```
+
+Flip over to the mitmweb tab in your browser at any point — it's the same
+live capture, just a different lens on it.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| No flows at all, `capture_health` shows `flows: 0, tls_errors: 0` | One of: daemon isn't up (`/mitm status`), device isn't actually routed through the proxy (check the device's proxy settings and that it's on the same network as the PARE host), or you just haven't triggered a request yet. Nothing wrong here yet — go drive the app. |
+| `capture_health` shows `tls_errors > 0` | **The diagnostic that distinguishes pinning from nothing-happened.** Either the app is pinning certificates (see step 4) or the device hasn't trusted the mitmproxy CA correctly (see step 3's Android 7+ footgun). `list_flows` will show `kind="error"` rows alongside/instead of real traffic. |
+| A tool call returns `{"error": true, "summary": "daemon not reachable — start it with /mitm up"}` | The worker is mounted but can't reach the control API — the daemon isn't running (or died). Run `/mitm up` (or `/mitm status`, which works even with the worker unmounted). |
+| `/mitm up`/`down` replies `pare-mitm-daemon not found — install the worker into this venv: pip install -e ~/Projects/pare-mitm-mcp` | The worker isn't installed into whatever venv the PARE daemon process is running with `PATH` set from. Install it (step 1) and make sure the daemon's shell has that venv activated/on `PATH`. |
+| `/mitm up` prints `mitmweb not found — is mitmproxy installed in this env?` | Same root cause as above, but for the `mitmweb` binary specifically — confirm `.venv/bin/mitmweb --version` runs. |
+| `/mitm up` prints `mitm daemon did not come up within 5s — check the port isn't held (:8080/:8081/:8788)` | Another process already has one of the three ports. Free it, or move the daemon's ports with `PARE_MITM_PROXY_PORT` / `PARE_MITM_WEB_PORT` / `PARE_MITM_CONTROL_PORT` (and set the same values before starting the worker, so the two sides still agree). |
+| `/mitm status` says `mitm worker is disabled — set PARE_ENABLE_MITM=1 and restart to mount it, then /mitm up to start the daemon.` | Expected when `PARE_ENABLE_MITM` isn't set — the daemon-control half of `/mitm` works regardless, but `capture_health` needs the worker mounted. |
+
+## A short security note
+
+- **The proxy listener (`0.0.0.0:8080` by default) is an open forward proxy
+  on your LAN.** Anything that can reach that port can tunnel traffic through
+  it. Scope it to your device's IP with a firewall rule before pointing a
+  device at it on anything other than an isolated lab network:
+  ```bash
+  sudo ufw allow from 192.168.1.50 to any port 8080 proto tcp   # replace with your device's IP
+  sudo ufw deny 8080/tcp
+  ```
+  (add the allow rule *before* the deny — `ufw` matches in rule order). The
+  mitmweb UI (`8081`) and control API (`8788`) already bind `127.0.0.1` and
+  don't need a rule.
+- **Captures hold live tokens, session cookies, and credentials.** The
+  `pare-mitm-mcp` repo's `.gitignore` already excludes `*.mitm`, `*.flows`,
+  and `captures/` — don't override that by exporting a `.mitm` file into the
+  repo. The worker itself keeps flows in an in-memory ring buffer only
+  (`PARE_MITM_MAX_FLOWS`, default 5000) and writes nothing to disk on its own.
+- **Response/request bodies flow into the model's context.** `get_flow` and
+  `search_flows` hand raw bodies (which may include auth tokens or PII from
+  the target app) to the model. That's fine while PARE's inference is local
+  — the traffic never leaves the box — but it's worth knowing before pointing
+  PARE at a hosted/cloud model, where that context would leave the machine.
