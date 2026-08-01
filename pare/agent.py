@@ -42,6 +42,7 @@ from pare.commands.health import Health
 from pare.commands.snapshot import Snapshot
 from pare.commands.frida_views import Devices, Ps, Apps, Sessions
 from pare.commands.frida_actions import Select, Attach, Detach
+from pare.commands.mitm import Mitm
 from agent_core.capture import CaptureLayer, CaptureStore, SearchCapture, ReadCapture
 from pare.capture_store import CaptureStoreManager
 from pare.handback import (
@@ -73,6 +74,7 @@ class PareAgent(Agent):
         Hello, Health, Snapshot,
         Devices, Ps, Apps, Sessions,   # operator fast-path views
         Select, Attach, Detach,        # operator fast-path actions
+        Mitm,                          # HTTPS-traffic daemon control
     ]  # framework builtins serve /help, /clear, etc.
 
     # vault_path is PARE's private state dir (RAG-only reads of PAL's vault),
