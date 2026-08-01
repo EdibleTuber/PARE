@@ -18,11 +18,11 @@ class DaemonNotFound(Exception):
     """Raised when the pare-mitm-daemon executable isn't on PATH."""
 
 
-async def _launch_daemon() -> tuple[int, str]:
-    """Run `pare-mitm-daemon up` (idempotent) and return (rc, last-output-line)."""
+async def _launch_daemon(subcommand: str) -> tuple[int, str]:
+    """Run `pare-mitm-daemon <subcommand>` and return (rc, last-output-line)."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "pare-mitm-daemon", "up",
+            "pare-mitm-daemon", subcommand,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     except FileNotFoundError:
         raise DaemonNotFound(_NOT_FOUND)
@@ -38,22 +38,30 @@ def _result_text(result) -> str:
     return "{}"
 
 
+_SUBCOMMANDS = ("up", "down", "status")
+
+
 class Mitm(Command):
     name = "mitm"
-    args = "[up|status]"
-    description = "Start / check the HTTPS-traffic (mitmproxy) daemon"
+    args = "[up|down|status]"
+    description = "Start / stop / check the HTTPS-traffic (mitmproxy) daemon"
 
     async def run(self, raw_args: str, ctx) -> AsyncIterator:
         sub = raw_args.strip().split()[0] if raw_args.strip() else "status"
 
-        if sub == "up":
+        if sub not in _SUBCOMMANDS:
+            yield ResponseMessage(
+                text=f"unknown /mitm subcommand {sub!r} — usage: /mitm {self.args}")
+            return
+
+        if sub in ("up", "down"):
             try:
-                rc, line = await _launch_daemon()
+                rc, line = await _launch_daemon(sub)
             except (DaemonNotFound, FileNotFoundError):
                 yield ResponseMessage(text=_NOT_FOUND)
                 return
             prefix = "" if rc == 0 else f"(exit {rc}) "
-            yield ResponseMessage(text=prefix + (line or "started pare-mitm-daemon up"))
+            yield ResponseMessage(text=prefix + (line or f"started pare-mitm-daemon {sub}"))
             return
 
         # status (default)

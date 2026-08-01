@@ -55,18 +55,18 @@ async def test_status_when_disabled_hints_flag():
 async def test_up_invokes_launcher(monkeypatch):
     calls = {}
 
-    async def fake_launch():
-        calls["ran"] = True
+    async def fake_launch(subcommand):
+        calls["ran"] = subcommand
         return 0, "mitm daemon up (proxy :8080, ui :8081, control :8788)"
 
     monkeypatch.setattr("pare.commands.mitm._launch_daemon", fake_launch)
     agent = _Agent(_Pool({}))
     msgs = await _run("up", agent)
-    assert calls.get("ran") and "daemon up" in msgs[-1].text
+    assert calls.get("ran") == "up" and "daemon up" in msgs[-1].text
 
 
 async def test_up_when_daemon_not_on_path_is_friendly(monkeypatch):
-    async def fake_launch():
+    async def fake_launch(subcommand):
         raise FileNotFoundError("pare-mitm-daemon")
 
     monkeypatch.setattr("pare.commands.mitm._launch_daemon", fake_launch)
@@ -75,3 +75,33 @@ async def test_up_when_daemon_not_on_path_is_friendly(monkeypatch):
     assert len(msgs) == 1
     assert "install" in msgs[-1].text.lower()
     assert "pare-mitm-mcp" in msgs[-1].text
+
+
+async def test_down_invokes_launcher(monkeypatch):
+    calls = {}
+
+    async def fake_launch(subcommand):
+        calls["ran"] = subcommand
+        return 0, "mitm daemon down"
+
+    monkeypatch.setattr("pare.commands.mitm._launch_daemon", fake_launch)
+    agent = _Agent(_Pool({}))
+    msgs = await _run("down", agent)
+    assert calls.get("ran") == "down" and "daemon down" in msgs[-1].text
+
+
+async def test_unknown_subcommand_yields_usage_and_makes_no_calls(monkeypatch):
+    called = {}
+
+    async def fake_launch(subcommand):
+        called["ran"] = subcommand
+        return 0, "should not run"
+
+    monkeypatch.setattr("pare.commands.mitm._launch_daemon", fake_launch)
+    agent = _Agent(_Pool({}))
+    msgs = await _run("foo", agent)
+    assert len(msgs) == 1
+    assert "unknown" in msgs[-1].text.lower()
+    assert "up" in msgs[-1].text and "down" in msgs[-1].text and "status" in msgs[-1].text
+    assert agent.tool_pool.calls == []  # no worker call
+    assert "ran" not in called  # no subprocess launch
