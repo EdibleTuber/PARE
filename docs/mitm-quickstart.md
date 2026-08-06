@@ -34,30 +34,29 @@ audited) — nothing in this worker prompts for operator approval.
 
 Beyond the base quickstart:
 
-- **The `pare-mitm-mcp` worker installed** into PARE's venv (it is not a PARE
-  dependency by default):
+- **The `pare-mitm-mcp` worker installed** into PARE's venv — **with
+  `--no-deps`** (it is not a PARE dependency by default):
   ```bash
-  .venv/bin/pip install -e ~/Projects/pare-mitm-mcp
+  .venv/bin/pip install -e ~/Projects/pare-mitm-mcp --no-deps
   ```
-  This pulls `mitmproxy>=11.0.0` into PARE's venv — it's a hard dependency of
-  the worker, not optional.
 
-  > **Known tension: `typing-extensions`.** mitmproxy pins
-  > `typing-extensions<=4.14` (for Python < 3.13); PARE's venv already carries
-  > a newer `typing-extensions` for `mcp`/`pydantic`/`anyio`. This has only
-  > been observed to matter when `mitmweb` actually **runs** (not at import
-  > time), so a `pip install` that appears to succeed can still hit it later
-  > at `/mitm up`. If you see `mitmweb` fail to start with a
-  > `typing_extensions`-related `ImportError`/`AttributeError`, the
-  > workaround is to run the daemon out of a **separate virtualenv** (install
-  > just `mitmproxy` there) and point `pare-mitm-daemon` at the same ports via
-  > the `PARE_MITM_*` env vars — the worker and the daemon only need to agree
-  > on ports, not share a Python environment.
-- **`mitmweb` on `PATH`** in whatever environment will run
-  `pare-mitm-daemon up` (normally the same venv the `pip install -e` above
-  installed into):
+  > **Why `--no-deps` (verified 2026-08-04).** The worker is a pure *client* of
+  > the daemon — it never imports mitmproxy, only `mcp` (already in PARE's
+  > venv) and the stdlib. A plain install would pull mitmproxy, which pins
+  > `typing-extensions<=4.14`, **downgrading** PARE's `typing-extensions`
+  > (4.15.0) out from under `pydantic`/`mcp`. `--no-deps` keeps PARE's
+  > environment untouched and is the architecturally correct split: PARE runs
+  > the client, a separate env runs the daemon.
+
+  Confirm the worker imports cleanly under PARE's venv:
   ```bash
-  .venv/bin/mitmweb --version
+  .venv/bin/python -c "import pare_mitm_mcp.server as s; print(type(s.build_server()).__name__)"
+  # -> FastMCP
+  ```
+- **A separate environment that has `mitmweb`** to run the daemon. The
+  `pare-mitm-mcp` repo's own venv already does:
+  ```bash
+  ~/Projects/pare-mitm-mcp/.venv/bin/mitmweb --version   # -> Mitmproxy: 12.x
   ```
 - **A device or emulator you can route through an HTTP(S) proxy** — a
   physical phone/tablet on the same LAN as the PARE host, or an emulator/AVD
@@ -65,24 +64,29 @@ Beyond the base quickstart:
 
 ## 2. Start the daemon
 
-From inside a PARE session:
-
-```
-/mitm up
-```
-
-This shells out to `pare-mitm-daemon up`, which launches `mitmweb` if it
-isn't already listening, waits up to ~5s for the control API to answer, and
-reports the three ports. It's **idempotent** — running it again while the
-daemon is already up just prints `mitm daemon already up` rather than
-spawning a second instance.
-
-You can also run the launcher directly (useful if you want the daemon's own
-stdout/stderr in front of you, e.g. while debugging `mitmweb` itself):
+Start it from the environment that has `mitmweb` — its `bin/` must be on
+`PATH` (see the known bug below):
 
 ```bash
-.venv/bin/pare-mitm-daemon up
+export PATH=~/Projects/pare-mitm-mcp/.venv/bin:$PATH
+pare-mitm-daemon up
+# -> mitm daemon up (proxy :8080, ui :8081, control :8788)
 ```
+
+The launcher starts `mitmweb` if it isn't already listening, waits up to ~5s
+for the control API to answer, and reports the three ports. It's
+**idempotent** — running it again while the daemon is up just prints
+`mitm daemon already up` rather than spawning a second instance.
+
+> **Known bug (open): `/mitm up` from inside PARE does not work yet.** The
+> launcher spawns the bare name `mitmweb`, which is resolved via `PATH`.
+> PARE's venv deliberately has no mitmproxy (see `--no-deps` above), and
+> invoking a venv console script does not put that venv's `bin/` on `PATH`
+> either — so you get `mitmweb not found — is mitmproxy installed in this
+> env?`. Start the daemon from the mitm venv as above until the launcher
+> resolves the binary properly (planned: an env override →
+> alongside `sys.executable` → `PATH`). `/mitm status` is unaffected — it
+> talks to the control API over HTTP and works from anywhere.
 
 Check status and stop:
 
@@ -113,13 +117,71 @@ retention cap).
 Open `http://127.0.0.1:8081` in a browser now — that's the mitmweb UI you'll
 watch alongside the PARE CLI.
 
+### 2b. Smoke-test the stack with no device (2 minutes)
+
+Do this **before** touching the emulator. It proves the proxy, the CA, the
+control API, and all four tools work, so that if the device later shows
+nothing you know the problem is device-side. Verified end-to-end 2026-08-04.
+
+```bash
+# 1) plain HTTP through the proxy
+curl -s -o /dev/null -w "%{http_code}\n" -x http://127.0.0.1:8080 http://example.com/
+
+# 2) HTTPS trusting the mitm CA -> proves interception + decryption
+curl -s -o /dev/null -w "%{http_code}\n" -x http://127.0.0.1:8080 \
+     --cacert ~/.mitmproxy/mitmproxy-ca-cert.pem https://example.com/
+
+# 3) HTTPS *rejecting* the CA -> simulates a pinned/untrusting app
+curl -s -o /dev/null -x http://127.0.0.1:8080 https://example.com/; echo "exit=$?"
+```
+
+Expected: `200`, `200`, `exit=60`. Then:
+
+```bash
+pare-mitm-daemon status
+# -> up — 3 flows, 1 tls-errors
+```
+
+That third curl is the important one: it is the same signal a
+CA-untrusting or pinned app produces, and it **must** show up as
+`tls-errors`, not as silence. Now check the tools see it (from PARE's venv):
+
+```bash
+~/Projects/PARE/.venv/bin/python -c "
+import asyncio, json
+from pare_mitm_mcp import tools
+print(json.loads(asyncio.run(tools.capture_health())))
+print(json.loads(asyncio.run(tools.list_flows()))['summary'])"
+```
+
+Expected — note the hint on the second line, which is what stops the agent
+from mis-reading a pinned app as 'nothing triggered yet':
+
+```
+{'summary': 'proxy reachable — 3 flows, 1 tls-errors', 'reachable': True, ...}
+3 flows (1 tls-error rows — pinning?)
+```
+
 ## 3. Point the device at the proxy, then trust the CA
 
-1. Find the PARE host's LAN IP (`ip addr` / `ifconfig`) and set the device's
-   Wi-Fi proxy to `<host-ip>:8080` (the proxy port from step 2, **not** the
-   web/control ports).
-2. With the proxy set, browse to `http://mitm.it` on the device and install
-   the mitmproxy CA certificate for your platform.
+**On an emulator/AVD** (the usual case here). The emulator reaches the host
+loopback at the special address **`10.0.2.2`** — no LAN IP needed:
+
+```bash
+adb shell settings put global http_proxy 10.0.2.2:8080
+adb shell settings get global http_proxy      # verify -> 10.0.2.2:8080
+```
+
+To clear it later: `adb shell settings put global http_proxy :0`. You can
+also bake it in at boot with `emulator -avd <name> -http-proxy http://10.0.2.2:8080`.
+
+**On a physical device**: find the PARE host's LAN IP (`ip addr`) and set the
+device's Wi-Fi proxy to `<host-ip>:8080` (the proxy port, **not** the
+web/control ports).
+
+Then install the CA — with the proxy set, browse to `http://mitm.it` on the
+device, or push `~/.mitmproxy/mitmproxy-ca-cert.cer` over and install it via
+Settings.
 
 **Footgun: on Android 7+, a user-installed CA is not trusted by app traffic
 by default.** Android split the trust store in Nougat — a CA you install as
