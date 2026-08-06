@@ -64,29 +64,42 @@ Beyond the base quickstart:
 
 ## 2. Start the daemon
 
-Start it from the environment that has `mitmweb` — its `bin/` must be on
-`PATH` (see the known bug below):
+From inside a PARE session:
 
-```bash
-export PATH=~/Projects/pare-mitm-mcp/.venv/bin:$PATH
-pare-mitm-daemon up
-# -> mitm daemon up (proxy :8080, ui :8081, control :8788)
+```
+/mitm up
 ```
 
-The launcher starts `mitmweb` if it isn't already listening, waits up to ~5s
-for the control API to answer, and reports the three ports. It's
-**idempotent** — running it again while the daemon is up just prints
-`mitm daemon already up` rather than spawning a second instance.
+That's all it takes — no `PATH` juggling. The launcher locates the `mitmweb`
+binary itself, trying in order:
 
-> **Known bug (open): `/mitm up` from inside PARE does not work yet.** The
-> launcher spawns the bare name `mitmweb`, which is resolved via `PATH`.
-> PARE's venv deliberately has no mitmproxy (see `--no-deps` above), and
-> invoking a venv console script does not put that venv's `bin/` on `PATH`
-> either — so you get `mitmweb not found — is mitmproxy installed in this
-> env?`. Start the daemon from the mitm venv as above until the launcher
-> resolves the binary properly (planned: an env override →
-> alongside `sys.executable` → `PATH`). `/mitm status` is unaffected — it
-> talks to the control API over HTTP and works from anywhere.
+1. `PARE_MITM_MITMWEB`, if you set it (an explicit override; if it points at
+   something unusable the launcher fails loudly rather than guessing);
+2. alongside the running interpreter (mitmproxy installed in the same venv);
+3. `PATH`;
+4. the worker repo's own venv — for an editable install it finds
+   `~/Projects/pare-mitm-mcp/.venv/bin/mitmweb`.
+
+Step 4 is what makes `/mitm up` work from PARE even though PARE's venv
+deliberately has no mitmproxy (see `--no-deps` above). The startup line tells
+you which binary it used:
+
+```
+mitm daemon up (proxy :8080, ui :8081, control :8788, mitmweb: /home/…/pare-mitm-mcp/.venv/bin/mitmweb)
+```
+
+It's **idempotent** — running it again while the daemon is up just prints
+`mitm daemon already up` rather than spawning a second instance. You can also
+run the launcher directly if you want its stdout in front of you:
+
+```bash
+~/Projects/PARE/.venv/bin/pare-mitm-daemon up
+```
+
+> **One requirement:** `/mitm up` shells out to the `pare-mitm-daemon` console
+> script by name, so **activate PARE's venv** before starting PARE (the same
+> reason PARE's README gives for `pare-frida-mcp`). If you launch PARE without
+> activating, `/mitm up` reports that `pare-mitm-daemon` isn't on `PATH`.
 
 Check status and stop:
 
