@@ -127,8 +127,32 @@ the [`pare-mitm-mcp` README](https://github.com/EdibleTuber/pare-mitm-mcp#config
 for the full list (also covers `PARE_MITM_MAX_FLOWS`, the ring-buffer
 retention cap).
 
-Open `http://127.0.0.1:8081` in a browser now — that's the mitmweb UI you'll
-watch alongside the PARE CLI.
+### Opening the mitmweb UI (the auth token)
+
+The mitmweb UI requires an auth token, so a bare `http://127.0.0.1:8081` will
+answer **403**. `/mitm up` prints the full URL with the token on its own line:
+
+```
+mitm daemon up (proxy :8080, ui :8081, control :8788, mitmweb: /home/…/mitmweb)
+ui: http://127.0.0.1:8081/?token=…
+```
+
+Open that URL — that's the mitmweb view you'll watch alongside the PARE CLI.
+
+**Lost the token?** Just run `/mitm up` again. It's idempotent, and the
+already-up path re-prints the same URL. The token is fixed (not regenerated
+per launch): it's persisted at `~/.local/state/pare-mitm/web_token` (mode
+0600) so the URL stays valid across restarts. Override it with
+`PARE_MITM_WEB_PASSWORD` if you'd rather choose your own.
+
+> mitmproxy logs a note that the token is stored as a plaintext password
+> rather than an argon2 hash. For a UI bound to `127.0.0.1` with the token
+> file at 0600, that's a proportionate trade — but you can set
+> `PARE_MITM_WEB_PASSWORD` to an argon2 hash if you prefer.
+
+Daemon output (previously discarded) is now captured at
+`~/.local/state/pare-mitm/daemon.log` — check there first if the daemon
+fails to come up.
 
 ### 2b. Smoke-test the stack with no device (2 minutes)
 

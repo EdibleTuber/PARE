@@ -19,7 +19,12 @@ class DaemonNotFound(Exception):
 
 
 async def _launch_daemon(subcommand: str) -> tuple[int, str]:
-    """Run `pare-mitm-daemon <subcommand>` and return (rc, last-output-line)."""
+    """Run `pare-mitm-daemon <subcommand>` and return (rc, full output).
+
+    The full output is relayed, not just the last line: `up` prints the
+    mitmweb UI URL (which carries the auth token) on its own line, and the
+    operator needs that to open the side-by-side view.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
             "pare-mitm-daemon", subcommand,
@@ -27,8 +32,7 @@ async def _launch_daemon(subcommand: str) -> tuple[int, str]:
     except FileNotFoundError:
         raise DaemonNotFound(_NOT_FOUND)
     out, _ = await proc.communicate()
-    text = (out or b"").decode().strip().splitlines()
-    return proc.returncode or 0, (text[-1] if text else "")
+    return proc.returncode or 0, (out or b"").decode().strip()
 
 
 def _result_text(result) -> str:
@@ -56,12 +60,12 @@ class Mitm(Command):
 
         if sub in ("up", "down"):
             try:
-                rc, line = await _launch_daemon(sub)
+                rc, output = await _launch_daemon(sub)
             except (DaemonNotFound, FileNotFoundError):
                 yield ResponseMessage(text=_NOT_FOUND)
                 return
             prefix = "" if rc == 0 else f"(exit {rc}) "
-            yield ResponseMessage(text=prefix + (line or f"started pare-mitm-daemon {sub}"))
+            yield ResponseMessage(text=prefix + (output or f"started pare-mitm-daemon {sub}"))
             return
 
         # status (default)
