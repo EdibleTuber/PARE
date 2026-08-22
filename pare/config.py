@@ -31,7 +31,6 @@ class PAREConfig(BaseConfig):
     # whose backend isn't running just hands the model a dead tool it reaches for
     # first and dead-ends on (connection refused).
     enable_apk_re_agents: bool = False
-    enable_mitm: bool = False        # mount the mitm HTTPS worker (env PARE_ENABLE_MITM)
     workers_yaml_path: str = "workers.yaml"
     audit_dir: Path = field(
         default_factory=lambda: Path.home() / ".local" / "share" / "pare" / "audit"

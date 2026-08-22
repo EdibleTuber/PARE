@@ -245,26 +245,7 @@ script, or a hand-written unpin hook) run *before* you drive traffic. See
 [`docs/frida-quickstart.md`](frida-quickstart.md) for attaching and hooking
 with PARE's `frida_*` tools.
 
-## 5. Enable the worker in PARE
-
-The `mitm` worker is declared in `workers.yaml` but filtered out of discovery
-unless opted in (`pare/agent.py`'s `setup()`, `pare/config.py`'s
-`enable_mitm`):
-
-```bash
-export PARE_ENABLE_MITM=1
-```
-
-Restart the daemon (`python -m pare`), then confirm from the CLI:
-
-```
-> What mitm tools do you have?
-```
-
-PARE should list `mitm_list_flows`, `mitm_get_flow`, `mitm_search_flows`,
-`mitm_capture_health`. If it doesn't, check Troubleshooting.
-
-## 6. A guided session
+## 5. A guided session
 
 With the daemon up (step 2), the device routed and CA-trusted (step 3), and
 pinning handled if needed (step 4):
@@ -312,7 +293,6 @@ live capture, just a different lens on it.
 | `/mitm up`/`down` replies `pare-mitm-daemon not found — install the worker into this venv: pip install -e ~/Projects/pare-mitm-mcp` | The worker isn't installed into whatever venv the PARE daemon process is running with `PATH` set from. Install it (step 1) and make sure the daemon's shell has that venv activated/on `PATH`. |
 | `/mitm up` prints `mitmweb not found — is mitmproxy installed in this env?` | Same root cause as above, but for the `mitmweb` binary specifically — confirm `.venv/bin/mitmweb --version` runs. |
 | `/mitm up` prints `mitm daemon did not come up within 5s — check the port isn't held (:8080/:8081/:8788)` | Another process already has one of the three ports. Free it, or move the daemon's ports with `PARE_MITM_PROXY_PORT` / `PARE_MITM_WEB_PORT` / `PARE_MITM_CONTROL_PORT` (and set the same values before starting the worker, so the two sides still agree). |
-| `/mitm status` says `mitm worker is disabled — set PARE_ENABLE_MITM=1 and restart to mount it, then /mitm up to start the daemon.` | Expected when `PARE_ENABLE_MITM` isn't set — the daemon-control half of `/mitm` works regardless, but `capture_health` needs the worker mounted. |
 
 ## A short security note
 

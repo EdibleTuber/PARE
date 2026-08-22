@@ -69,11 +69,6 @@ class Mitm(Command):
             return
 
         # status (default)
-        if not getattr(ctx.agent.config, "enable_mitm", False):
-            yield ResponseMessage(
-                text="mitm worker is disabled — set PARE_ENABLE_MITM=1 and restart "
-                     "to mount it, then `/mitm up` to start the daemon.")
-            return
         result = await ctx.agent.tool_pool.call_tool("mitm", "capture_health", {}, ctx=ctx)
         payload = json.loads(_result_text(result))
         yield ResponseMessage(text=payload.get("summary", "no status"))

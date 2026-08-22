@@ -60,6 +60,38 @@ def test_register_tools_runs_discover_and_register(tmp_path):
     assert hasattr(agent, "tool_pool")
 
 
+def test_setup_populates_worker_specs_from_all_declared_workers(tmp_path):
+    """setup() builds _worker_specs from every worker declared in
+    workers.yaml, unfiltered — e.g. mitm (formerly excluded behind a config
+    gate) now flows through like any other worker."""
+    wy = tmp_path / "workers.yaml"
+    wy.write_text(
+        "workers:\n"
+        "  stub:\n"
+        "    endpoint: http://127.0.0.1:1/mcp\n"
+        "    transport: streamable_http\n"
+        "    risk_default: low\n"
+        "  mitm:\n"
+        "    command: pare-mitm-mcp\n"
+        "    transport: stdio\n"
+        "    risk_default: low\n"
+    )
+    cfg = PAREConfig()
+    cfg.workers_yaml_path = str(wy)
+    cfg.audit_dir = tmp_path
+
+    agent = PareAgent()
+    agent.config = cfg
+    for attr in ("profile", "wisdom", "channels", "learning", "allowlist",
+                 "approval_registry", "tool_approval_registry", "inference",
+                 "retrieval", "websearch", "fetcher"):
+        setattr(agent, attr, MagicMock())
+
+    agent.setup()
+    names = {s.name for s in agent._worker_specs}
+    assert names == {"stub", "mitm"}
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 def test_static_analyze_gated_on_enable_flag(tmp_path, enabled):
     """static_analyze (and its apk_re_agents client) are registered only when

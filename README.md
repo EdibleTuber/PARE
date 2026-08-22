@@ -48,7 +48,6 @@ Key variables:
 - `PARE_VAULT_PATH` — PARE's own state dir (profile/wisdom/channels). PAL's research is read over RAG, not this path.
 - `PARE_COLLECTION_ID` — retrieval collection PARE searches (default `vault`); must match the collection the inference server indexes PAL's vault into
 - `PARE_AUDIT_DIR` — where the risk-gating audit log is written (default: `~/.local/share/pare/audit`, outside the vault)
-- `PARE_ENABLE_MITM` — mount the `mitm` HTTPS-traffic worker (`mitm_*` tools); off by default. See [`docs/mitm-quickstart.md`](docs/mitm-quickstart.md).
 
 See `.env.example` for the full list.
 
@@ -107,7 +106,7 @@ At dispatch, calls flow through a `RiskAwareToolPool`. For `high`/`critical` too
 
 `y` approves once, `n` denies, `j` approves with a justification (forced for `critical`), `a` approves every call to that tool for the rest of the session. Every dispatch — approved, denied, or auto — is appended to a JSONL audit log under `PARE_AUDIT_DIR` (default `~/.local/share/pare/audit`), which lives outside your vault.
 
-The `mitm` HTTPS-traffic worker is **off by default** behind `PARE_ENABLE_MITM`; when enabled it exposes four read-only `mitm_*` tools, all tier `low`, driven by the `/mitm` command. See [`docs/mitm-quickstart.md`](docs/mitm-quickstart.md).
+The `mitm` HTTPS-traffic worker exposes four read-only `mitm_*` tools, all tier `low`, driven by the `/mitm` command. See [`docs/mitm-quickstart.md`](docs/mitm-quickstart.md).
 
 ### Adding a worker
 

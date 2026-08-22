@@ -112,11 +112,6 @@ class PareAgent(Agent):
         )
         registry = WorkerRegistry.load(self.config.workers_yaml_path)
         specs = registry.all()
-        # mitm is a per-engagement worker: keep it (and its ~4 tool schemas) out of
-        # discovery/the pool/the risk gate unless the operator opts in. Gating the
-        # spec list here (not register_tools) hides it from all three at once.
-        if not self.config.enable_mitm:
-            specs = [s for s in specs if s.name != "mitm"]
         self._worker_specs = specs
         self.mcp_pool = MCPClientPool(specs)
         self._launch_ts = time.time()   # process start; per-launch refinement deferred (spec §11)

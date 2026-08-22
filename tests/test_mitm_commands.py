@@ -23,9 +23,8 @@ class _Pool:
 
 
 class _Agent:
-    def __init__(self, pool, enable_mitm=True):
+    def __init__(self, pool):
         self.tool_pool = pool
-        self.config = type("C", (), {"enable_mitm": enable_mitm})()
 
 
 class _Ctx:
@@ -43,13 +42,6 @@ async def test_status_calls_capture_health():
     msgs = await _run("status", agent)
     assert "3 flows" in msgs[-1].text
     assert ("mitm", "capture_health", {}) in agent.tool_pool.calls
-
-
-async def test_status_when_disabled_hints_flag():
-    agent = _Agent(_Pool({}), enable_mitm=False)
-    msgs = await _run("status", agent)
-    assert "PARE_ENABLE_MITM" in msgs[-1].text
-    assert agent.tool_pool.calls == []  # no worker call when disabled
 
 
 async def test_up_invokes_launcher(monkeypatch):
