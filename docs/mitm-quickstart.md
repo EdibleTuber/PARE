@@ -108,10 +108,13 @@ Check status and stop:
 /mitm down
 ```
 
-`/mitm status` works even when the worker isn't mounted in this PARE process
-— it calls the daemon directly. `/mitm down` in v1 does **not** kill the
-process (mitmweb is operator-launched in its own terminal/session); it prints
-the `pkill` invocation to run yourself.
+`/mitm status` reports the capture through the worker's `capture_health` tool
+(dispatched via the risk-gated pool, so it lands in the audit log): whether the
+proxy is reachable, how many flows are held, and how many were TLS failures.
+`/mitm up` and `/mitm down` instead shell out to the `pare-mitm-daemon` CLI, so
+they work regardless of the worker. `/mitm down` in v1 does **not** kill the
+process (mitmweb is operator-launched in its own session); it prints the
+`pkill` invocation to run yourself.
 
 **Bind split** (this is what makes the side-by-side model safe by default):
 
