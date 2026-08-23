@@ -32,6 +32,18 @@ workers:
     risk_default: low
     capability_tags: [static, apk, android]
 
+  # In-house HTTPS-traffic worker (pare-mitm-mcp). Four read-only tools over a
+  # localhost control API served by an operator-launched mitmproxy daemon. All
+  # wire tier low. Tools surface as mitm_*. Mounted unconditionally, like
+  # static/frida. Requires the worker installed into this venv (`pip install -e
+  # ~/Projects/pare-mitm-mcp`) and the daemon started via `/mitm up`. See
+  # docs/superpowers/ for the design + plan.
+  mitm:
+    command: /home/edible/Projects/PARE/.venv/bin/pare-mitm-mcp
+    transport: stdio
+    risk_default: low
+    capability_tags: [traffic, https, mitm, dynamic]
+
   # --- apk_re_agents (Streamable HTTP) — disabled until services run + discovery hardened ---
   # unpacker:
   #   endpoint: http://127.0.0.1:9000/mcp
