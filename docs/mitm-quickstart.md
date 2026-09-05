@@ -2,7 +2,7 @@
 
 Capture and inspect **HTTPS traffic** from a device/emulator through PARE:
 start a mitmproxy daemon, route the target app through it, and query the
-capture with four read-only tools — while mitmweb's own UI stays open
+capture with eleven `mitm_*` tools — while mitmweb's own UI stays open
 side-by-side for a human view of the same capture.
 
 This builds on the base [`QUICKSTART.md`](../QUICKSTART.md) (inference server,
@@ -14,10 +14,13 @@ Unlike `frida`, the mitm worker does **not** own the capture. An
 operator-launched `mitmweb -s <addon>` process is the daemon that runs the
 proxy, the mitmweb web UI, and a localhost control API. The MCP worker
 (`pare-mitm-mcp`) is a thin HTTP client of that control API — it can't start,
-stop, or configure the proxy, and it can't modify or replay traffic. It just
-exposes four **read-only**, tier-**low** tools over whatever the daemon has
-already captured, so mitmweb (browser) and PARE (REPL) can look at one live
-capture side-by-side.
+stop, or configure the proxy. It is **not read-only**: it exposes **eleven**
+tools over that API, and six of them mutate state. Four read the capture,
+`list_rules` reads the rule set, `delete_rule` and `clear_rules` change
+interception, `add_blocking_rule` / `add_modification_rule` / `replay_flow`
+rewrite or re-send traffic, and `inject_request` forges a new request
+outright. mitmweb (browser) and PARE (REPL) look at one live capture
+side-by-side.
 
 | Tool | Wire tier | What it does |
 |---|---|---|
@@ -25,10 +28,22 @@ capture side-by-side.
 | `get_flow` | low | Full detail for one flow id: request line + headers + body, response headers + body. JSON bodies pretty-printed; binary bodies shown as `<binary N bytes>`. |
 | `search_flows` | low | Regex/substring search across a scope (`url`, `headers`, `req-body`, `resp-body`, `all`); returns matching flow ids with a context snippet. Runs daemon-side. |
 | `capture_health` | low | Is the proxy reachable? Returns `{reachable, flows, tls_errors, last_flow_ts}` — the tool for disambiguating "daemon down" vs. "nothing triggered yet" vs. "pinning is breaking the handshake" (`tls_errors > 0`). |
+| `list_rules` | low | List all active interception rules. |
+| `delete_rule` | low | **Mutates.** Delete one interception rule by id. |
+| `clear_rules` | low | **Mutates.** Clear *all* interception rules. |
+| `add_blocking_rule` | high | Block traffic matching a regex on a scope (`host`/`path`/`url`/`headers`/`req_body`/`resp_body`). |
+| `add_modification_rule` | high | Rewrite request/response headers, bodies or status for matching traffic. |
+| `replay_flow` | high | Re-send a captured flow (subject to the active rules). |
+| `inject_request` | critical | Forge and send a new HTTP request through the proxy. |
 
-Tools surface to the model as `mitm_list_flows`, `mitm_get_flow`,
-`mitm_search_flows`, `mitm_capture_health`. All four auto-execute (still
-audited) — nothing in this worker prompts for operator approval.
+Tools surface to the model prefixed: `mitm_list_flows`, `mitm_inject_request`,
+and so on. Approval follows the wire tier — the `high` tools prompt, and
+`inject_request` (critical) forces a justification. Everything at tier `low`
+auto-executes (still audited), and note that **`delete_rule` and `clear_rules`
+are `low` even though they mutate interception state**, so they auto-execute:
+a model can tear down every rule you set without asking. No operator pins
+cover any of these, so that gating rests entirely on the worker's own wire
+metadata.
 
 ## 1. Prerequisites
 
@@ -160,7 +175,7 @@ fails to come up.
 ### 2b. Smoke-test the stack with no device (2 minutes)
 
 Do this **before** touching the emulator. It proves the proxy, the CA, the
-control API, and all four tools work, so that if the device later shows
+control API, and the capture tools work, so that if the device later shows
 nothing you know the problem is device-side. Verified end-to-end 2026-08-04.
 
 ```bash
