@@ -15,7 +15,7 @@
 # discovery-robustness fix lands. See docs/superpowers/plans for the follow-up.
 workers:
   frida:
-    command: /home/edible/Projects/PARE/.venv/bin/pare-frida-mcp
+    command: /mnt/secondary/projects/PARE/.venv/bin/pare-frida-mcp
     transport: stdio
     risk_default: low           # advertised per-tool tiers govern; reads auto-execute, dangerous tools gate (read_memory/java_hook/write_memory=high, execute_script=critical)
     capability_tags: [mobile, dynamic, android, frida]
@@ -27,7 +27,7 @@ workers:
   # external jadx binary on PATH (or JADX_PATH) for the Java decompile path (the
   # smali path works without jadx). See docs/superpowers/ for the design + plan.
   static:
-    command: /home/edible/Projects/PARE/.venv/bin/pare-static-mcp
+    command: /mnt/secondary/projects/PARE/.venv/bin/pare-static-mcp
     transport: stdio
     risk_default: low
     capability_tags: [static, apk, android]
@@ -39,7 +39,7 @@ workers:
   # ~/Projects/pare-mitm-mcp`) and the daemon started via `/mitm up`. See
   # docs/superpowers/ for the design + plan.
   mitm:
-    command: /home/edible/Projects/PARE/.venv/bin/pare-mitm-mcp
+    command: /mnt/secondary/projects/PARE/.venv/bin/pare-mitm-mcp
     transport: stdio
     risk_default: low
     capability_tags: [traffic, https, mitm, dynamic]
