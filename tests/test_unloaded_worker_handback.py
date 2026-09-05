@@ -77,6 +77,26 @@ async def test_three_distinct_unloaded_tools_hand_back_fast(monkeypatch):
         f"handback took {agent.inference.complete.await_count} rounds")
 
 
+async def test_handback_text_is_addressed_to_the_operator_not_self_referential(monkeypatch):
+    """agent_core's WorkerManager.unavailable_reason() is model-facing wording
+    ("... Ask the operator to run /worker load frida.") meant to be read BY
+    the model, e.g. as a tool result. The operator-facing handback message
+    built here is read directly by the human operator, so it must not repeat
+    that model-facing sentence verbatim -- an operator reading "Ask the
+    operator to run ..." is being told to ask themselves."""
+    script = [[_Call("frida_attach")], [_Call("frida_list_devices")]]
+    agent = _agent(script)
+    agent.worker_manager.unavailable_reason = lambda w: (
+        f"worker {w!r} is not loaded — its tools are unavailable this "
+        f"session. Ask the operator to run /worker load {w}."
+        if w == "frida" else None)
+    msgs, _conv = await _drive(agent, monkeypatch)
+    text = "\n".join(m.text for m in msgs if isinstance(m, ResponseMessage))
+    assert "ask the operator" not in text.lower(), (
+        f"handback text is self-referential: {text!r}")
+    assert "frida" in text and "/worker load frida" in text
+
+
 async def test_poll_tool_still_hands_back(monkeypatch):
     """frida_read_hook_events is in POLL_TOOLS, exempt from the spin handback —
     so without this trigger an unloaded frida would poll to the round cap."""

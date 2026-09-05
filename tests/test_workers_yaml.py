@@ -6,11 +6,15 @@ model_config, so pydantic's extra="ignore" means an agent_core older than
 v1.8.0 drops the key silently and autoloads the worker anyway — a fail-open.
 This test turns that into a loud failure.
 """
+from pathlib import Path
+
 from agent_core.workers.registry import WorkerRegistry
+
+_WORKERS_YAML = Path(__file__).resolve().parent.parent / "workers.yaml"
 
 
 def _reg():
-    return WorkerRegistry.load("workers.yaml")
+    return WorkerRegistry.load(_WORKERS_YAML)
 
 
 def test_hardware_is_declared_but_not_autoloaded():

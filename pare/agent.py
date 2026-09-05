@@ -183,12 +183,27 @@ class PareAgent(Agent):
                     "".join(f" | {r.name} FAILED: {r.error}" for r in bad))
 
     async def ashutdown(self) -> None:
-        """Close worker connections and project capture stores."""
-        if self.worker_manager is not None:
-            await self.worker_manager.close_all()
-        close = getattr(self._capture_stores, "close_all", None)
-        if close is not None:
-            close()
+        """Close worker connections and project capture stores.
+
+        The capture-store close runs in `finally` so it always happens, even
+        if worker_manager.close_all() lets a CancelledError through (it
+        suppresses plain Exception internally but must not swallow
+        cancellation). If astartup() never got as far as building
+        worker_manager (e.g. WorkerManager() rejected a misconfigured pool),
+        fall back to closing mcp_pool directly so its worker subprocesses
+        don't outlive the daemon.
+        """
+        try:
+            if self.worker_manager is not None:
+                await self.worker_manager.close_all()
+            else:
+                close_pool = getattr(self.mcp_pool, "close_all", None)
+                if close_pool is not None:
+                    await close_pool()
+        finally:
+            close = getattr(self._capture_stores, "close_all", None)
+            if close is not None:
+                close()
 
     def system_prompt(self, ctx: HandlerContext) -> str:
         from pathlib import Path
@@ -338,9 +353,24 @@ class PareAgent(Agent):
                             if why:
                                 unavailable_hits += 1
                                 if unavailable_hits >= UNAVAILABLE_HANDBACK_AFTER:
+                                    # `why` (agent_core's unavailable_reason) is
+                                    # MODEL-facing wording -- it tells the model
+                                    # to "ask the operator to run /worker load
+                                    # ...", which belongs in a tool result the
+                                    # model reads. This handback instead goes
+                                    # straight to the human operator (the model
+                                    # is cut out of this round), so it needs its
+                                    # own phrasing addressed to that reader --
+                                    # reusing `why` verbatim would have the
+                                    # assistant tell the operator to ask the
+                                    # operator.
                                     yield _settle_and_handback(
-                                        f"{why}\n\nTell me how to proceed without "
-                                        f"it, or load it and say when to retry.",
+                                        f"the {owner!r} worker is not loaded, "
+                                        f"so the assistant's last tool call "
+                                        f"didn't run. Run /worker load {owner} "
+                                        f"to bring it back, then continue — or "
+                                        f"tell me how you'd like to proceed "
+                                        f"without it.",
                                         done_ids)
                                     return
                         if tc.name in COMMIT_TOOLS:

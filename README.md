@@ -117,7 +117,7 @@ with no `__main__`.)
 .venv/bin/pytest tests/ -v
 ```
 
-The full suite passes (currently 44 passed, 3 skipped). The 3 skips are env-gated phase 1 / phase 3 smokes that need a running worker stack (set `PARE_PHASE1_SMOKE` / `PARE_PHASE3_SMOKE` to enable them). For an end-to-end check against the live stack, see [`QUICKSTART.md`](QUICKSTART.md).
+The full suite should be green (no failures) with 3 skips — those are env-gated phase 1 / phase 3 smokes that need a running worker stack (set `PARE_PHASE1_SMOKE` / `PARE_PHASE3_SMOKE` to enable them), not a sign of a broken install. For an end-to-end check against the live stack, see [`QUICKSTART.md`](QUICKSTART.md).
 
 Two scripts drive real components instead of stubs and need no inference server —
 re-run both after changing anything in the worker lifecycle, since a green

@@ -94,6 +94,15 @@ async def run_checks(cfg) -> bool:
                         predicate=lambda v: v.isdigit() and int(v) > 0)
         ok &= check("hardware unloaded", "unloaded" in lines.get("hardware", ""),
                     predicate=lambda v: v)
+        # Spec 9.1: "Tool counts are read live from status(), never
+        # hardcoded." Read static's live count here rather than baking in
+        # today's number, so an eleventh static tool doesn't fail this
+        # script spuriously (see sections 6 and 7 below, which check the
+        # *relationship* -- same count back out -- against this).
+        static_tool_count = lines.get("static", "").split()[2:3]
+        static_tool_count = static_tool_count[0] if static_tool_count else None
+        ok &= check("captured static's live tool count", static_tool_count,
+                    predicate=lambda v: v and v.isdigit())
 
         print("\n2. /health reports the same workers")
         r = await conn.command("health", "")
@@ -147,16 +156,37 @@ async def run_checks(cfg) -> bool:
         print("\n6. /worker load static restores it with the same tool count")
         r = await conn.command("worker", "load static")
         print(r.text)
-        ok &= check("load reports 10 tools", "10 tools" in r.text,
+        ok &= check(f"load reports {static_tool_count} tools",
+                    f"{static_tool_count} tools" in r.text if static_tool_count else False,
                     predicate=lambda v: v)
         r = await conn.command("worker", "list")
         static_row = next((ln for ln in r.text.splitlines() if ln.split()[:1] == ["static"]), "")
         print(static_row)
-        ok &= check("static loaded again with 10 tools",
-                    "loaded" in static_row and "10" in static_row.split(),
+        ok &= check(f"static loaded again with {static_tool_count} tools",
+                    "loaded" in static_row and static_tool_count in static_row.split()
+                    if static_tool_count else False,
                     predicate=lambda v: v)
 
-        print("\n7. /worker load hardware fails with spawn_failed, visible in /worker list")
+        print("\n7. /worker reload static respawns the process, keeps the "
+              "same tool count, and comes back loaded")
+        r = await conn.command("worker", "reload static")
+        print(r.text)
+        # reload's reported tool_count comes from a fresh listTools() against
+        # the newly-spawned process (WorkerManager._load_locked), so a match
+        # here is itself proof the reconnect actually completed and is
+        # live -- not just that /worker list still says "loaded".
+        ok &= check(f"reload reports the same tool count ({static_tool_count})",
+                    f"{static_tool_count} tools" in r.text if static_tool_count else False,
+                    predicate=lambda v: v)
+        r = await conn.command("worker", "list")
+        static_row = next((ln for ln in r.text.splitlines() if ln.split()[:1] == ["static"]), "")
+        print(static_row)
+        ok &= check("static loaded again after reload, same tool count",
+                    "loaded" in static_row and static_tool_count in static_row.split()
+                    if static_tool_count else False,
+                    predicate=lambda v: v)
+
+        print("\n8. /worker load hardware fails with spawn_failed, visible in /worker list")
         r = await conn.command("worker", "load hardware")
         print(r.text)
         ok &= check("reports spawn_failed", "spawn_failed" in r.text,

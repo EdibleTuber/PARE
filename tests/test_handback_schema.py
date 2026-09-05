@@ -18,9 +18,13 @@ declared by the static and frida contracts (no running worker needed — see
 tests/test_risk_overrides_coverage.py for the same pattern against the frida
 contract) and assert every handback constant resolves against a *real* tool.
 """
+from pathlib import Path
+
 import pytest
 
 from pare.handback import COMMIT_TOOLS, NAME_SEARCH_TOOLS, POLL_TOOLS
+
+_WORKERS_YAML = Path(__file__).resolve().parent.parent / "workers.yaml"
 
 
 def _registered_tool_specs() -> dict[str, object]:
@@ -101,7 +105,7 @@ def test_handback_tool_prefixes_name_declared_workers():
     runtime worker loading makes much easier to hit than it used to be."""
     from agent_core.workers.registry import WorkerRegistry
 
-    declared = {s.name for s in WorkerRegistry.load("workers.yaml").all()}
+    declared = {s.name for s in WorkerRegistry.load(_WORKERS_YAML).all()}
     for tool in COMMIT_TOOLS | NAME_SEARCH_TOOLS | POLL_TOOLS:
         prefix = tool.split("_", 1)[0]
         assert prefix in declared, (

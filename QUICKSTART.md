@@ -116,8 +116,8 @@ attaching, Java hooks, scripts, the capture store), see
 .venv/bin/pytest tests/ -q
 ```
 
-Expected: the suite passes (currently 44 passed, 3 skipped; the skips are
-env-gated worker smokes).
+Expected: the suite is green (no failures) with 3 skips — those are
+env-gated worker smokes, not a sign of a broken install.
 
 ## Troubleshooting
 

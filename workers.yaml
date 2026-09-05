@@ -21,8 +21,9 @@ workers:
     autoload: true
     capability_tags: [mobile, dynamic, android, frida]
 
-  # In-house static-analysis worker (pare-static-mcp). Seven read-only APK tools,
-  # all wire tier low → auto-execute + audited, none gated. Tools surface to the
+  # In-house static-analysis worker (pare-static-mcp). Read-only APK tools
+  # (current count and names: `/worker tools static`), all wire tier low →
+  # auto-execute + audited, none gated. Tools surface to the
   # model as static_* (agent_core prefixes by worker name). Requires the worker
   # installed into this venv: `pip install -e ~/Projects/pare-static-mcp`, plus an
   # external jadx binary on PATH (or JADX_PATH) for the Java decompile path (the
