@@ -165,6 +165,77 @@ assumed a `hardware` worker that plan 2 has not declared yet, and it asserted on
 `mtime`/`size` where the shipped fields are `command_mtime`/`command_size`. Worth
 recording, because it is what an unrun assumption looks like when it finally runs.
 
+
+## Phase 2 — final review outcome and the limits of what was verified
+
+The whole-branch review found **five Important defects and no path where a tool
+dispatches below its risk floor**. That negative result is the most useful line in this
+document: the reviewer went looking specifically for a tier downgrade — registry-gated
+loading, the floor and wire-tier ratchets surviving unload, pins snapshotted at
+`setup()` and never re-read, both executor-bypass sites guarded — and did not find one.
+
+The five, and what they have in common:
+
+| Defect | Note |
+|---|---|
+| A failed `/worker reload` destroyed live state but rendered via the *load* renderer, so the operator read "failed" as "unchanged" | reload has unload's semantics; the branch got load and unload right and missed the third path |
+| `worker_of` prefix-matched the **declarative** tool `static_analyze` to the `static` worker, producing a false handback about a tool that had just worked | spec §8.2 called this namespace overlap "latent"; a later task made it active in a way §8.2 did not anticipate |
+| `requires = ("worker_manager",)` was vacuous — a class-level default made `hasattr` always true — and `/worker` was the one consumer without a None-guard | a guarantee specified, built, then neutralised in the same file |
+| `docs/mitm-quickstart.md` still called mitm "four read-only tools" | the exact falsehood §8.8 was written to remove, in the doc the corrected README links to |
+| `CancelledError` passed through `except Exception`, so a client disconnect mid-dispatch left unsettled tool-call ids | pre-existing; this branch is what states the invariant |
+
+Two of the five are about **telling the operator something false**, which in a tool that
+hooks processes and writes memory is its own kind of unsafe.
+
+Fixes went in two waves rather than one of fifteen — the phase-1 lesson about fix-round
+size applied deliberately. Both waves were re-reviewed; the wave-1 re-review validated a
+deviation by proving executor membership and `_loaded` membership are mutated with no
+`await` between them on every path, so they cannot disagree.
+
+### What is verified, and how
+
+| Property | How |
+|---|---|
+| Risk gating holds across load/unload/reload | Whole-branch review, adversarial, plus `agent_core`'s own suite |
+| Worker lifecycle against a real binary | `scripts/live_worker_lifecycle.py` — real pids, real MCP handshake, real audit rows |
+| Operator surface against a real daemon | `scripts/smoke_worker_commands.py` — real socket, real protocol, no inference server |
+| Captures survive an unload | Unit test plus the executor-provenance argument |
+| **The model handing back instead of grinding** | **NOT live-verified — see below** |
+
+### The one thing that stayed unverified, and why
+
+The unloaded-worker handback trigger was driven against a real inference server twice
+and **could not be provoked**:
+
+- Probe 1 (unload `static`, ask for a static grep): the model made zero tool calls. It
+  noticed it had no static tool and asked how to proceed.
+- Probe 2 (seed the channel with a real `static_grep_smali` call *first*, then unload,
+  then ask for the same tool): it still did not reach for the removed tool.
+
+Both failed for the same reason: **the primary mechanism works.** Unloading removes the
+tools from `schemas()`, and the model does not call what it cannot see. The handback is
+defence-in-depth for stale-history reaching; it is unit-tested — including the
+`POLL_TOOLS` case that would otherwise burn the whole round budget — and remains
+verified-by-test only. Forcing the condition synthetically would only re-test what the
+unit tests cover.
+
+Two observations from those transcripts, both model behaviour rather than branch
+defects, both worth knowing for an RE agent:
+
+- Probe 1's model offered to "switch to dynamic enumeration" via frida — the
+  route-around-the-gap tendency `system.md`'s new paragraph exists to suppress. It
+  asked rather than acting, so the prompt is half-working.
+- Probe 2's model called `search_capture` and reported the *prior* result as though the
+  tool had just run again ("failed again with the same error"). It had not run.
+
+### An incidental validation
+
+The first probe crashed with `ConnectionRefusedError` against a socket whose *file*
+existed — exactly the `start_serving=False` behaviour the spec correction documents,
+observed from the client side rather than reasoned about. Retrying as a real client
+must, it connected after three refused attempts: `astartup` finished loading all three
+workers before the daemon accepted anything.
+
 ## 7. Status of related documents
 
 | Document | State |
