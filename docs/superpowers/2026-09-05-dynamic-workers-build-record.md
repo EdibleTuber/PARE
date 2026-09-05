@@ -169,9 +169,103 @@ recording, because it is what an unrun assumption looks like when it finally run
 
 | Document | State |
 |---|---|
-| `specs/2026-09-04-dynamic-worker-loading-design.md` | v2; §6/§7 implemented in `agent_core`, §8.1/§8.4/§9 pending in plan 2 |
+| `specs/2026-09-04-dynamic-worker-loading-design.md` | v2; §6/§7 implemented in `agent_core`, §8.1/§8.4/§9 now implemented in PARE (phase 2, below) |
 | `plans/2026-09-05-dynamic-workers-agent-core.md` | **Executed.** Deviations recorded in §5 above |
-| `plans/2026-09-05-dynamic-workers-pare-wiring.md` | Not started |
+| `plans/2026-09-05-dynamic-workers-pare-wiring.md` | **Executed.** Deviations and defects recorded in the phase-2 sections below |
 | `agent_core/CHANGELOG.md` | 1.8.0 entry written and verified against shipped code; 1.7.0–1.7.3 backfilled |
 | `agent_core/README.md` | Updated for the new surface |
-| PARE `README.md` | **Stale** — §"Adding a worker" still says "restart the daemon". Correct until plan 2 lands; updating it is a plan 2 task |
+| PARE `README.md` | Corrected in phase 2's Task 9 — "Adding a worker" no longer says "restart the daemon"; `/worker` is documented |
+
+---
+
+# Phase 2: PARE wiring (`feat/dynamic-worker-loading`)
+
+**Date:** 2026-09-05
+**Plan:** [`plans/2026-09-05-dynamic-workers-pare-wiring.md`](plans/2026-09-05-dynamic-workers-pare-wiring.md)
+**Ledger:** `.superpowers/sdd/2026-09-05-dynamic-workers-pare-wiring/progress.md` (scratch, gitignored — this section is the durable record of it)
+**Outcome:** PARE, branch `feat/dynamic-worker-loading` — 11 commits over 9 tasks,
+165 → 202 passed / 3 skipped (agent_core unaffected, holds at 852 passed / 2
+skipped throughout). Two new execution scripts (`scripts/live_worker_lifecycle.py`,
+`scripts/smoke_worker_commands.py`) exercise the real `WorkerManager` and the real
+operator surface with no inference server.
+
+This picks up where phase 1 left off: `agent_core` v1.8.0 shipped the library
+mechanism (§6/§7 of the spec); this phase wires it into PARE — the `/worker`
+command, the unloaded-worker handback, and the docs that describe both (§8.1,
+§8.4, §9 of the spec).
+
+## 8. How this phase was structured
+
+Same discipline as phase 1, scaled down: a pre-flight conflict scan across all
+nine tasks before any code was written (cross-task dependency pairs, per-task
+internal agreement, two rulings up front), then nine tasks each with a fresh
+implementer, a task-scoped review, and a fix loop where needed. No whole-branch
+review was run separately — the tasks are more sequential and lower-fan-out than
+phase 1's library change, so each task's review carried the cross-task check
+(e.g. Task 4's reviewer traced the implementer's `_render_unload` deviation
+against `manager.py`'s real teardown order rather than trusting the diff).
+
+## 9. Commit trail
+
+### PARE, branch `feat/dynamic-worker-loading`, `e589c3d` → `a7f6352`
+
+| # | Task | Commit | What |
+|---|---|---|---|
+| 1 | 1 | `e589c3d` | require `agent_core` v1.8.0, pin `mcp<2` |
+| 2 | 2 | `859f52f` | declare `hardware` as a catalog entry, add `autoload` keys |
+| 3 | 3 | `4fc24d6` | move worker discovery from `register_tools` to `astartup` |
+| 4 | 4 | `c00e998` | add `/worker` for runtime worker lifecycle |
+| 5 | 4 (fix) | `d012933` | surface the full `last_error`, not just `render_table`'s clip |
+| 6 | 5 | `eb9a860` | short-circuit fast-path commands' calls to an unloaded worker |
+| 7 | 6 | `3764273` | hand back to the operator on an unloaded-worker call |
+| 8 | 7 | `c7eada2` | tell the model and the operator about worker state (prompt, `/health`) |
+| 9 | 8 | `186b47c` | pin that unloading a worker keeps its captured findings |
+| 10 | 8 | `4a63a94` | add a non-interactive smoke script for `/worker` and `/health` |
+| 11 | 8 (fix) | `a7f6352` | tighten `/devices` discrimination, footer assertion, run-scoped audit dir |
+| — | 9 | (this change) | correct README, spec status/example, add this section |
+
+## 10. Defects found in phase 2, and what caught each
+
+Same point as phase 1's table: different stages catch structurally different
+defect classes. Phase 2's tasks are smaller and more sequential than phase 1's
+library rewrite, so most defects here were caught one task earlier in the
+pipeline — by the implementer noticing the brief's own sketch was wrong, or by
+task review executing the code rather than reading it.
+
+| Defect | Caught by |
+|---|---|
+| The brief's `_render_unload` sketch said "client disconnected" unconditionally, contradicting the `disconnect_timeout` WARNING printed right after it — wrong on the one path where the worker's process may still be running | Implementer (Task 4), reasoning from `WorkerManager.unload()`'s own contract, not the brief's sketch |
+| `/worker list`'s `last_error` column clipped a real `FileNotFoundError` to ~22 chars inside `render_table`'s 100-char budget across 8 columns — invisible on exactly the error §8.4 exists to surface | Task-scoped review (Task 4), by rendering it with the real configured path |
+| The controller's own premise — that distinct `frida_*` tool names mean `RepeatGuard` never fires, burning all 50 rounds — was wrong for the implementer's chosen scenario (the repeated tail still trips the guard, just with a generic message); right in general only for non-repeating calls, and the `POLL_TOOLS` case is the one that genuinely burns rounds | Implementer disclosure (Task 6), adjudicated by task review hand-tracing `RepeatGuard` against both scripts |
+| `/devices`-after-unload regression test asserted "non-empty and no literal 'error'" — `unavailable_reason`'s own message ("worker 'frida' is not loaded — …") satisfies both, so the test could not fail on the regression it was written to catch | Task-scoped review (Task 8), by unloading `frida` and calling `/devices` against the real assertion |
+| `scripts/live_worker_lifecycle.py` used a date-keyed audit scratch path, so same-day reruns accumulate rows and a count-based check can fail spuriously | Self-caught (controller's own script), fixed alongside Task 8's fix round rather than deferred |
+| Spec §9.1's `/worker unload` example showed only the success path, so as written it would print the self-contradicting "client disconnected" on a `disconnect_timeout` | Task 4's implementer, carried forward explicitly in the ledger to Task 9 (fixed here — see §12) |
+
+**The lesson repeats from phase 1:** three of these six were defects in the
+*brief's own sketch code* (the `_render_unload` text, the RepeatGuard reasoning,
+and the spec example it was copied from), not implementer error — confirming the
+phase-1 working rule that plan-supplied code carries the planner's misconceptions.
+
+## 11. Rulings
+
+| # | Ruling | Cost if wrong |
+|---|---|---|
+| 1 | Carry Task 6's brief-supplied stub test (`test_every_tool_call_id_is_settled`, a known-incomplete sketch flagged in the plan's own self-review) into the dispatch as a named defect the implementer must fix, not a spec to transcribe | An implementer transcribes a vacuous test, which task review should then catch |
+| 2 | Split Task 8's manual smoke test: the non-interactive half (daemon starts, workers autoload, `/worker` round-trips, a missing binary surfaces as `spawn_failed`) is scriptable and belongs to the implementer (`scripts/smoke_worker_commands.py`); the genuinely interactive half (asking the model something that needs an unloaded worker and watching it hand back) needs an inference server and a human reading the transcript, done separately after the branch was otherwise complete | The model-facing handback stays verified-by-unit-test only, not exercised end to end, until that interactive pass runs |
+| 3 | Run `scripts/live_worker_lifecycle.py` (phase 1's harness) as part of Task 8's verification, not pytest alone | A lifecycle regression that a toy-stub test suite cannot see (it never touched a real worker binary in phase 1 either) ships unnoticed |
+
+## 12. Corrections made to the spec during the build
+
+- **§9.1's `/worker unload` example** (fixed in this doc pass, Task 9). The
+  example showed only the success-path text ("client disconnected")
+  unconditionally. `WorkerManager.unload()` removes the worker's tools
+  *before* attempting the timeout-bounded disconnect, so on a
+  `disconnect_timeout` the disconnect did not complete and the process may
+  still be running — the implemented `_render_unload` (`pare/commands/worker.py`,
+  Task 4) branches on `res.ok` and only claims "client disconnected" when
+  true. Found by Task 4's implementer while building against the brief's
+  copy of the example; carried in the ledger to Task 9 rather than
+  silently fixed mid-task, and corrected here with an inline note, matching
+  the style of the existing `start_serving=False` correction in §6.7.
+- **Status header** (this doc pass, Task 9). §8.1/§8.4/§9 moved from
+  "pending in the PARE wiring plan" to implemented, dated to this branch.

@@ -119,6 +119,17 @@ with no `__main__`.)
 
 The full suite passes (currently 44 passed, 3 skipped). The 3 skips are env-gated phase 1 / phase 3 smokes that need a running worker stack (set `PARE_PHASE1_SMOKE` / `PARE_PHASE3_SMOKE` to enable them). For an end-to-end check against the live stack, see [`QUICKSTART.md`](QUICKSTART.md).
 
+Two scripts drive real components instead of stubs and need no inference server —
+re-run both after changing anything in the worker lifecycle, since a green
+`pytest` run does not prove a real worker still loads:
+
+- [`scripts/live_worker_lifecycle.py`](scripts/live_worker_lifecycle.py) — drives
+  the real `WorkerManager` against the real `pare-static-mcp` binary (load,
+  wire-tier resolution, unload, reload, a missing-binary failure, audit rows).
+- [`scripts/smoke_worker_commands.py`](scripts/smoke_worker_commands.py) — drives
+  the real operator surface (`/worker`, `/health`) against a real running
+  `pare-daemon` over its actual wire protocol.
+
 ## Workers & risk gating
 
 PARE reaches analysis tools through MCP workers declared in `workers.yaml`. Each entry maps to an `agent_core` `WorkerSpec`:
@@ -143,9 +154,45 @@ At dispatch, calls flow through a `RiskAwareToolPool`. For `high`/`critical` too
 
 The `mitm` HTTPS-traffic worker exposes eleven `mitm_*` tools, driven by the `/mitm` command. Most are read-only (tier `low`), but the worker can also modify traffic: `add_blocking_rule`, `add_modification_rule` and `replay_flow` advertise tier `high`, and `inject_request` advertises `critical`. Note `delete_rule` and `clear_rules` mutate interception state at tier `low`, so they auto-execute. See [`docs/mitm-quickstart.md`](docs/mitm-quickstart.md).
 
+### Runtime worker control: `/worker`
+
+Workers load and unload without a daemon restart. `/worker` controls the running
+pool:
+
+| Subcommand | Effect |
+|---|---|
+| `/worker` / `/worker list` | Table of every declared worker: state, tool count, transport, risk floor, boot mode, tags, last error |
+| `/worker tools <name>` | List the tools a loaded worker currently exposes |
+| `/worker load <name>` | Connect a declared-but-unloaded worker and register its tools |
+| `/worker unload <name>` | Disconnect a loaded worker and deregister its tools |
+| `/worker reload <name>` | Unload then load — e.g. to pick up a restarted worker process |
+
+Two consequences to know before you use it:
+
+- **Unloading drops live state.** `/worker unload frida` disconnects the client
+  and, for a stdio worker, ends its process — any live Frida attachments and
+  installed hooks for that worker are gone with it. There is no confirmation
+  prompt and no `--force`; the command's own output names what it just
+  destroyed.
+- **Any load or unload changes the tool list**, which changes the prompt
+  prefix the model sees — so the *next* turn reprocesses the whole
+  conversation from scratch, one noticeably slower reply. Without this note,
+  that delay reads as a hang.
+
+**What unload does *not* cost:** captured findings — flows, hook events, prior
+tool output — stay searchable through `search_capture` / `read_capture` after
+the worker that produced them is unloaded. Only *live* state (session ids, the
+ability to issue new calls against them) goes stale. This is what makes
+unloading a worker to reclaim context budget mid-investigation safe: you lose
+the ability to act through it, not the record of what you already found.
+
 ### Adding a worker
 
-Edit `workers.yaml` and restart the daemon. Streamable HTTP worker:
+`workers.yaml` remains the trust anchor: nothing is loadable, at any point in
+the daemon's life, that an operator has not declared there ahead of time with a
+`risk_default` — the floor tier every tool from that worker is gated at.
+Declaring a worker in `workers.yaml` is still the first step. Streamable HTTP
+worker:
 
 ```yaml
 workers:
@@ -154,6 +201,7 @@ workers:
     transport: streamable_http
     risk_default: low
     capability_tags: [static, apk]
+    autoload: true
 ```
 
 stdio worker (PARE launches the process). The in-house Frida server ships as the
@@ -167,7 +215,15 @@ workers:
     transport: stdio
     risk_default: high          # FLOOR; per-tool wire tiers + operator pins can escalate
     capability_tags: [mobile, dynamic, android, frida]
+    autoload: true
 ```
+
+What changed is the second step. `autoload` (default `true`) decides *when*
+that declared worker actually connects: `autoload: true` connects it during
+daemon startup like today; `autoload: false` declares it without connecting,
+and an operator brings it up later with `/worker load my_http_worker` — no
+restart required. Either way, the worker only ever exposes what `workers.yaml`
+declared, at no lower than its `risk_default`.
 
 Operator pins in `workers.yaml` can force a tool's tier up regardless of what the
 worker advertises (e.g. `frida_execute_script → critical`,
@@ -329,7 +385,9 @@ pare/
         system.md       system prompt — PARE identity + vault-usage guidance
     commands/
         hello.py         example Command
-        health.py        /health — daemon status + endpoints
+        health.py        /health — daemon status + endpoints (includes worker state)
+        mitm.py          /mitm — control the mitmproxy traffic-capture worker
+        worker.py        /worker — list/load/unload/reload MCP workers at runtime
     tools/
         static_analyze.py  optional apk_re_agents /jobs coordinator (off by default; static analysis now runs via the pare-static-mcp stdio worker)
         read_vault_doc.py  fetch a full vault note over RAG (pairs with the search_vault builtin)

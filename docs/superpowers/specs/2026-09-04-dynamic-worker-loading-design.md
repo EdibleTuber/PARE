@@ -2,7 +2,8 @@
 
 **Date:** 2026-09-04
 **Status:** v2 — sections 6 and 7 IMPLEMENTED in `agent_core` v1.8.0 (2026-09-05);
-sections 8.1, 8.4 and 9 pending in the PARE wiring plan.
+sections 8.1, 8.4 and 9 IMPLEMENTED in PARE (`feat/dynamic-worker-loading`,
+2026-09-05) — see the phase-2 section of the build record.
 Build record: [`../2026-09-05-dynamic-workers-build-record.md`](../2026-09-05-dynamic-workers-build-record.md)
 **Repos:** `agent_core` (v1.8.0), `PARE` (follow-on wiring)
 
@@ -876,11 +877,28 @@ manager already holds, and §11 makes the same view the model's catalog.
 
 ```
 unloaded frida — 19 tools removed, client disconnected.
-2 live sessions and their installed hooks are gone; captures remain searchable
-but session ids are stale.
+any live attachments, sessions and installed hooks for this worker are gone;
+captures of earlier results remain searchable, though session ids in them are
+now stale.
+note: the tool list changed, so the next turn reprocesses the conversation
+prefix — expect one slower reply.
 ```
 
 (Query `list_sessions` before the disconnect for the count.)
+
+**Correction (found during implementation, Task 4).** This example shows only the
+success path. `WorkerManager.unload()` removes the worker's tools from the
+executor and the pool **unconditionally, before** attempting the
+timeout-bounded disconnect — so the tools are gone whether or not the
+disconnect itself finishes in time. On the `disconnect_timeout` path the
+disconnect did **not** complete and the worker's process may still be
+running (e.g. still holding a device attachment), so claiming "client
+disconnected" there would contradict the WARNING printed right after it. The
+implemented `_render_unload` (`pare/commands/worker.py`) branches on
+`res.ok`: it prints "client disconnected" only when the disconnect actually
+completed, and otherwise prints "disconnect did not complete" followed by a
+`WARNING [<error_kind>]: <error>` line. The reprocess note applies on both
+paths, since the tool-list mutation that triggers it is unconditional.
 
 **Context-reprocessing warning.** §6.5's stable ordering prevents *gratuitous*
 prefix invalidation, but removing a worker's tools changes the prompt prefix by
