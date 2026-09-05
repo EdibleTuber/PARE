@@ -1,7 +1,9 @@
 # Dynamic worker loading — design
 
 **Date:** 2026-09-04
-**Status:** v2 — revised after review panel; pending implementation
+**Status:** v2 — sections 6 and 7 IMPLEMENTED in `agent_core` v1.8.0 (2026-09-05);
+sections 8.1, 8.4 and 9 pending in the PARE wiring plan.
+Build record: [`../2026-09-05-dynamic-workers-build-record.md`](../2026-09-05-dynamic-workers-build-record.md)
 **Repos:** `agent_core` (v1.8.0), `PARE` (follow-on wiring)
 
 > **v2 changes.** A four-reviewer panel found one blocker and three findings that

@@ -1,0 +1,155 @@
+# Dynamic worker loading — build record (phase 1: `agent_core` v1.8.0)
+
+**Date:** 2026-09-05
+**Spec:** [`specs/2026-09-04-dynamic-worker-loading-design.md`](specs/2026-09-04-dynamic-worker-loading-design.md)
+**Plan:** [`plans/2026-09-05-dynamic-workers-agent-core.md`](plans/2026-09-05-dynamic-workers-agent-core.md)
+**Carried follow-ups:** [`2026-09-05-agent-core-1.8.0-followups.md`](2026-09-05-agent-core-1.8.0-followups.md)
+**Outcome:** `agent_core` v1.8.0 — 17 commits, 852 passed / 2 skipped. PARE green against it at 165 / 3.
+
+This is the paper trail: what was decided, what was found, and what caught it.
+It exists to be read *after* the fact, so it records the failures and the reasoning,
+not a summary of the feature. For what the feature does, read the spec.
+
+---
+
+## 1. How the work was structured
+
+Design → review panel → spec → two plans → per-task execution with a review gate on
+each → one whole-branch review at the end.
+
+- **Design phase.** A four-reviewer panel (fact-check, security, framework API, PARE
+  integration) read the v1 spec. It returned one blocker and three findings that
+  changed mechanism rather than wording. The spec was rewritten as v2 (`af2e082`).
+- **Execution.** Nine tasks, each with a fresh implementer, a task-scoped review, and
+  a fix loop where needed. Six fix rounds ran across the branch.
+- **Final gate.** One whole-branch review, then one consolidated fix wave, then a
+  scoped re-review, then a residual pass.
+
+## 2. Commit trail
+
+### `agent_core`, branch `feat/dynamic-worker-lifecycle`, tag `v1.8.0` → `b62ee1a`
+
+| # | Commit | What |
+|---|---|---|
+| 1 | `0cc4d59` | pin `mcp<2` and `fastmcp<2.12` |
+| 2 | `0958adf` | own each MCP connection in a dedicated task |
+| 3 | `274b2d0` | close on cancelled connect, lock disconnect, normalize `CancelledError` |
+| 4 | `a4f107d` | stamp worker provenance on synthesized tools |
+| 5 | `fc3e570` | make `ToolExecutor` mutable at runtime |
+| 6 | `3c2d88b` | hold risk invariants across worker reloads |
+| 7 | `dfcc5b8` | close review Criticals in risk_pool lifecycle invariants |
+| 8 | `c78adb6` | stop high-water escalation bypassing the `external_mcp` floor |
+| 9 | `f0b0d33` | add `WorkerSpec.autoload`; stop swallowing cancellation |
+| 10 | `fec6240` | add `WorkerManager` for runtime load/unload/reload |
+| 11 | `c903bff` | manager rollback/atomicity + true cancellation propagation |
+| 12 | `3bee6a8` | shield `_reap`'s join, fix `_cancel_owner` cleanup leak |
+| 13 | `2cc11c8` | export `WorkerManager`, `WorkerRegistry`, `RiskAwareToolPool` |
+| 14 | `4c8c0b1` | add `astartup`/`ashutdown` hooks around `serve()` |
+| 15 | `3d8e6ec` | release 1.8.0 (incl. CHANGELOG backfill for 1.7.0–1.7.3) |
+| 16 | `dee8eb6` | close the final-review findings |
+| 17 | `b62ee1a` | bound `connect()`'s error-path reap, seed the floor ratchet, guard the kill |
+
+### PARE, branch `feat/dynamic-worker-loading`
+
+| # | Commit | What |
+|---|---|---|
+| 1 | `e874cd9` | v1 design |
+| 2 | `af2e082` | v2 design after the review panel |
+| 3 | `d7a7f75` | correct the mitm worker's tool count and risk profile |
+| 4 | `054d970` | pin mitm's traffic-altering tools, widen pin coverage |
+| 5 | `977c39b` | split the design into two plans |
+| 6 | `bf21926` | correct the `start_serving=False` socket claim |
+| 7 | `63d8b88` | widen `test_frida_wire_tier_e2e`'s inner-pool fake for 1.8.0 |
+| 8 | `41f82fe` | record carried follow-ups |
+
+## 3. Defects found, and what caught each
+
+Ordered by severity. The right-hand column is the point of this table: different
+review stages catch structurally different classes of defect.
+
+| Defect | Caught by |
+|---|---|
+| MCP client teardown is **task**-bound, not loop-bound — unload could not work, and swallowed its own `RuntimeError` while leaking the subprocess | Design-phase panel, reproduced empirically |
+| Reload could silently **lower** a tool's effective tier — `frida_read_memory`/`frida_java_hook` are protected only by the wire tier, and the floor is `low` | Design-phase panel (security lens) |
+| `close_all` used `or` instead of a set union, so once any worker reloaded, every never-reloaded worker kept its session approvals across a full teardown | Task review, by executing the code |
+| `_max_tier` hashed a possibly-unhashable advertised tier, raising inside the `list_tools` loop — a hostile worker ordering its listing dropped every later tool to the floor | Task review, by executing the code |
+| A cancelled load left a registered spec, an emptied tier table and a live published client — a tool needing approval dispatched at the floor with an honest-looking audit row | **Whole-branch review** (crosses three files) |
+| The spec-mandated hard-kill was never implemented, and `_reap` popped `_owners` before awaiting, so a timed-out unload left an unreachable orphan | **Whole-branch review** |
+| `close_all`'s reap was unbounded and was the only reaper for the orphans above | **Whole-branch review** |
+| The fix wave introduced a **worse** regression: `close_all` hung forever where it previously returned | Scoped re-review of the fix wave |
+| `RiskAwareToolPool`'s widened `inner` contract broke PARE's test double | **Running the consumer's suite in the release task** |
+| A vacuous test — baseline captured from an emptied `BUILTIN_TOOLS`, so `remove_worker` could have been `_tools.clear()` | Task review, prompted to look for that shape |
+
+**The lesson worth keeping:** eleven of these were defects in code the *plan* supplied,
+not implementer error. Tests specified in the same plan share its author, so a shared
+misconception passes both. This is now recorded as a global working rule.
+
+## 4. What each review stage was actually worth
+
+- **Task-scoped review** caught per-file correctness — and nothing that crossed files.
+- **Whole-branch review** caught all three Criticals, every one of them assembled from
+  behaviour that is defensible in each file and wrong across files. None was reachable
+  from a single task's diff.
+- **Scoped re-review of fixes** caught a regression worse than the bug being fixed.
+  Fix diffs need reviewing as much as feature diffs.
+- **The consumer's test suite** caught the one break the library's own 836 tests could
+  not, because it lived in the contract, not the code.
+- **Adversarial framing mattered.** Reviewers told to reason from the tests approved
+  code that reviewers told to construct attack sequences rejected. Several proved
+  findings by executing the code or reconstructing the pre-fix tree.
+
+## 5. Rulings
+
+Decisions taken during execution without checking in, with rationale and stated cost
+if wrong. Recorded in full so they can be second-guessed later.
+
+| # | Ruling | Cost if wrong |
+|---|---|---|
+| 1 | Branch in the checkout, not a worktree — the venv installs `agent_core` editable from that exact path | None; still isolated |
+| 2 | Batch Tasks 3+4 | Larger review surface |
+| 3 | **Split Task 8** — the plan had a circular dependency (Task 6 needs a field Task 8 adds; Task 8's exports need Task 6's module) | None; same code, compilable order |
+| 4 | Task 4 needs no `runtime.py` change | A dead change to flag |
+| 5 | Leave a weak `pytest.raises` tuple standing | Wouldn't notice a changed exception type |
+| 6 | Normalize `CancelledError` at source rather than compensating downstream | A caller wanting SDK cancellation sees `ConnectionError` |
+| 7 | **Elevate a Minor** the reviewer lacked context to weight | Larger fix diff |
+| 8 | **Park the externally-cancelled-owner leak** | *Wrong — see below* |
+| 9 | Bundle two Minors into an existing round | Larger re-review |
+| 10 | Manager uses public proxies, not `_pool._inner` | Two delegating methods |
+| 11 | **Elevate three Minors**, each contradicting a constraint the brief itself stated | Larger fix diff |
+| 12 | Batch 8b's exports into Task 7 | Reviewed beside a daemon change |
+| 13 | **Correct the spec**, not just the brief, on the AF_UNIX claim | None; verified twice |
+| 14 | Bundle a one-line assertion into the release task | Trivial |
+| 15 | **Stay 1.8.0, not 2.0.0**, for the `inner` contract tightening | A consumer with a custom inner pool hits `AttributeError` with only a CHANGELOG note |
+| 16 | Fix PARE's test double immediately so plan 2 starts green | A test edit lands early |
+| 17 | **Override "no second fix wave"** — we had introduced a shutdown deadlock worse than the bug it replaced | One extra review cycle |
+
+**Ruling 8 was wrong.** It parked a leak on the reasoning that `close_all` reaps
+orphans at shutdown. Both halves were false: after a disconnect timeout the owner is
+no longer in `_owners`, and the reap was unbounded regardless. It resurfaced as part
+of Critical 1 in the whole-branch review and was fixed in `dee8eb6`/`b62ee1a`.
+
+## 6. Corrections made to the spec during the build
+
+The spec is the binding authority, so factual errors in it were corrected rather than
+worked around:
+
+- **`start_serving=False` socket behaviour** (`bf21926`). §6.7 claimed a client
+  connecting during startup would queue in the listen backlog. False for AF_UNIX —
+  the socket has not been `listen()`ed, so the connect is refused. The decision stands
+  on the stale-inode argument; only the rationale was wrong. The refusal is now the
+  discriminator in `tests/test_daemon_startup.py`.
+- **mitm's tool count and risk profile** (`d7a7f75`, `054d970`). `workers.yaml` and the
+  README described mitm as "four read-only tools, all wire tier low". It advertises
+  eleven, six of which mutate state, with `inject_request` at `critical` — and no
+  operator pin covered any of them. Pins added.
+
+## 7. Status of related documents
+
+| Document | State |
+|---|---|
+| `specs/2026-09-04-dynamic-worker-loading-design.md` | v2; §6/§7 implemented in `agent_core`, §8.1/§8.4/§9 pending in plan 2 |
+| `plans/2026-09-05-dynamic-workers-agent-core.md` | **Executed.** Deviations recorded in §5 above |
+| `plans/2026-09-05-dynamic-workers-pare-wiring.md` | Not started |
+| `agent_core/CHANGELOG.md` | 1.8.0 entry written and verified against shipped code; 1.7.0–1.7.3 backfilled |
+| `agent_core/README.md` | Updated for the new surface |
+| PARE `README.md` | **Stale** — §"Adding a worker" still says "restart the daemon". Correct until plan 2 lands; updating it is a plan 2 task |

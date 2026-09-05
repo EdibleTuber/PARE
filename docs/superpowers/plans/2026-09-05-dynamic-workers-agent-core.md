@@ -12,6 +12,16 @@
 
 **Repo:** All work is in `/mnt/secondary/projects/agent_core`. Nothing in this plan touches PARE; that is plan 2.
 
+> **STATUS: EXECUTED** (2026-09-05) — shipped as `agent_core` v1.8.0, 17 commits,
+> 852 passed / 2 skipped. Execution deviated from this document in several places;
+> the deviations, the rulings behind them, and the defects this plan's own code
+> carried are recorded in
+> [`../2026-09-05-dynamic-workers-build-record.md`](../2026-09-05-dynamic-workers-build-record.md).
+> **Do not re-run this plan as written** — Task 2's and Task 5's code blocks contain
+> defects found in review (a subprocess leak on the failure path, a short-circuiting
+> `or` in `close_all`, and an unguarded hash of untrusted input). The shipped code is
+> the authority.
+
 ## Global Constraints
 
 - **Python** `>=3.12`. Target interpreter is 3.12.3.

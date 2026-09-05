@@ -1365,6 +1365,72 @@ proven in the repo where the store actually lives."
 
 ---
 
+---
+
+### Task 9: Update the user-facing documentation
+
+Docs are part of the deliverable, not a follow-up. `README.md:148` currently tells the
+operator to "Edit `workers.yaml` and restart the daemon" — which this plan makes false.
+
+**Files:**
+- Modify: `README.md` (the "Workers & risk gating" and "Adding a worker" sections, the
+  command table, and the extension-points table)
+- Modify: `docs/superpowers/specs/2026-09-04-dynamic-worker-loading-design.md` (status header)
+- Modify: `docs/superpowers/2026-09-05-dynamic-workers-build-record.md` (add a phase-2 section)
+
+- [ ] **Step 1: Correct "Adding a worker"**
+
+`README.md:146-175` says to edit `workers.yaml` and restart. Replace with: declare the
+worker in `workers.yaml` with an `autoload` value, then either restart (if `autoload:
+true`) or `/worker load <name>` at runtime. Keep the existing YAML examples and add
+`autoload:` to them. State plainly that `workers.yaml` remains the trust anchor —
+nothing is loadable that is not declared there with an operator-set `risk_default`.
+
+- [ ] **Step 2: Document the `/worker` command**
+
+Add it wherever `/mitm` is documented, with the same shape: the subcommands, and the
+two consequences an operator needs to know before using it — unloading `frida` drops
+live attachments and installed hooks, and any load/unload costs one slower turn while
+the conversation prefix is reprocessed.
+
+- [ ] **Step 3: Note what unload does NOT lose**
+
+Captured findings stay searchable via `search_capture` / `read_capture` after a worker
+is unloaded; live-state captures (session ids, hook events) go stale on reload. This is
+the property that makes context-budget unloading safe, and it belongs next to the
+command that makes it relevant.
+
+- [ ] **Step 4: Update the status header on the spec**
+
+Change §6/§7-implemented to note that §8.1, §8.4 and §9 are now implemented too.
+
+- [ ] **Step 5: Add a phase-2 section to the build record**
+
+Mirror the phase-1 structure: commit trail, defects found and what caught each,
+rulings with their cost-if-wrong, and any spec corrections made during the build.
+
+- [ ] **Step 6: Verify no stale claim survives**
+
+```bash
+grep -n "restart the daemon\|restart PARE" README.md docs/*.md
+```
+
+Expected: no hit that describes adding or changing a worker. A hit about restarting for
+an unrelated reason (a config change that is not worker-related) is fine.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add -A
+git commit -m "docs: document runtime worker loading
+
+README told operators to restart the daemon to add a worker, which
+/worker makes false. Documents the command, the two consequences an
+operator needs before using it (live frida attachments are dropped; the
+next turn reprocesses the conversation prefix), and the fact that
+captured findings survive an unload while live-state captures do not."
+```
+
 ## Self-Review
 
 **Spec coverage:**
@@ -1382,6 +1448,7 @@ proven in the repo where the store actually lives."
 | §9.4 handback constants | 7 |
 | §9.5 prompt, `/health` | 7 |
 | §10 PARE test table | 3, 4, 5, 6, 7, 8 |
+| Docs kept current with the change | 9 |
 
 **Placeholder scan:** one deliberate gap — `test_every_tool_call_id_is_settled` in Task 6 ships with a stub helper and an instruction to replace it against the real `conv.add_tool_result.call_args_list` shape. It is called out inline rather than left silent. Everything else contains runnable code.
 
