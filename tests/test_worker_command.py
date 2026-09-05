@@ -266,3 +266,61 @@ async def test_mitm_status_short_circuits_when_unloaded():
     out = "\n".join([m.text async for m in Mitm().run("status", MagicMock(agent=agent))])
     assert "not loaded" in out
     agent.tool_pool.call_tool.assert_not_awaited()
+
+async def test_failed_reload_says_the_worker_is_now_unloaded():
+    """reload = unload-then-load under one lock, and the unload half runs
+    FIRST, removing tools unconditionally (WorkerManager._unload_locked).
+    So when the LOAD half fails, the worker is gone — rendering that with
+    load's bare "reload frida failed [...]" reads as "nothing happened",
+    which is the opposite of the truth: 19 tools and every live attachment
+    just died with the process."""
+    mgr = MagicMock()
+    mgr.is_loaded.return_value = True
+    mgr.tools_of.return_value = ["frida_attach"] * 19
+    mgr.reload = AsyncMock(return_value=WorkerOpResult(
+        "reload", "frida", False, error="No such file or directory",
+        error_kind="spawn_failed"))
+    out = await _run(Worker(), "reload frida", _ctx(mgr))
+    assert "spawn_failed" in out and "No such file" in out
+    assert "unloaded" in out.lower(), (
+        "a failed reload leaves the worker UNLOADED — say so")
+    assert "attach" in out.lower() or "hook" in out.lower(), (
+        "the unload half already killed live attachments and hooks")
+    assert "19" in out, "name how many tools went away"
+    assert "slower" in out.lower() or "reprocess" in out.lower(), (
+        "the tool list changed, so the next turn does reprocess")
+
+
+async def test_failed_reload_unload_half_does_not_claim_a_clean_teardown():
+    """The other failure direction: the unload half itself timed out, so the
+    load half never ran. Tools are still gone (removal precedes the
+    disconnect await), but the process may still be running — the output
+    must not imply a clean teardown, and must not imply the load was tried."""
+    mgr = MagicMock()
+    mgr.is_loaded.return_value = True
+    mgr.tools_of.return_value = ["frida_attach"] * 19
+    mgr.reload = AsyncMock(return_value=WorkerOpResult(
+        "reload", "frida", False,
+        error="unload half failed: worker 'frida' did not shut down within 5.0s",
+        error_kind="disconnect_timeout"))
+    out = await _run(Worker(), "reload frida", _ctx(mgr))
+    assert "disconnect_timeout" in out
+    assert "unloaded" in out.lower()
+    assert "may still be running" in out.lower(), (
+        "the unload half's disconnect timed out — do not imply the process died")
+    assert "slower" in out.lower() or "reprocess" in out.lower()
+
+
+async def test_failed_reload_of_an_unloaded_worker_claims_no_destruction():
+    """The converse guard: reloading a worker that was NOT loaded destroys
+    nothing (the unload half is a no-op), so the destruction warning and the
+    reprocess note must both stay away."""
+    mgr = MagicMock()
+    mgr.is_loaded.return_value = False
+    mgr.tools_of.return_value = []
+    mgr.reload = AsyncMock(return_value=WorkerOpResult(
+        "reload", "hardware", False, error="boom", error_kind="spawn_failed"))
+    out = await _run(Worker(), "reload hardware", _ctx(mgr))
+    assert "boom" in out
+    assert "attach" not in out.lower() and "hook" not in out.lower()
+    assert "slower" not in out.lower() and "reprocess" not in out.lower()

@@ -10,6 +10,9 @@ Any load or unload also changes the tool list, which changes the prompt
 prefix, so the next turn reprocesses the conversation from scratch — one
 noticeably slower reply. Both operations say so, because without a note an
 operator would reasonably read that delay as a hang.
+
+`reload` is unload-then-load under one lock, so a FAILED reload has already
+destroyed everything an unload destroys — see `_render_reload`.
 """
 from __future__ import annotations
 
@@ -25,6 +28,14 @@ _SUBCOMMANDS = ("list", "tools", "load", "unload", "reload")
 _REPROCESS_NOTE = (
     "note: the tool list changed, so the next turn reprocesses the "
     "conversation prefix — expect one slower reply.")
+
+# What an unload destroys. Shared by /worker unload and by a FAILED /worker
+# reload, because reload's unload half runs first and unconditionally — see
+# Worker._render_reload.
+_DESTRUCTION_BODY = (
+    "any live attachments, sessions and installed hooks for this worker "
+    "are gone; captures of earlier results remain searchable, though "
+    "session ids in them are now stale.")
 
 
 class Worker(Command):
@@ -59,7 +70,14 @@ class Worker(Command):
         elif sub == "unload":
             yield ResponseMessage(text=self._render_unload(await mgr.unload(target)))
         else:
-            yield ResponseMessage(text=self._render_load(await mgr.reload(target)))
+            # Snapshot what is about to be destroyed BEFORE the call: reload's
+            # unload half runs first and removes the tools unconditionally, but
+            # a failed reload's WorkerOpResult carries only the load half's
+            # (zero) counts, so the result alone cannot say what went away.
+            was_loaded = bool(mgr.is_loaded(target))
+            doomed = len(mgr.tools_of(target) or [])
+            yield ResponseMessage(
+                text=self._render_reload(await mgr.reload(target), was_loaded, doomed))
 
     @staticmethod
     def _render_list(mgr) -> str:
@@ -110,10 +128,44 @@ class Worker(Command):
         # after it, which says the process may still be running.
         disconnect_state = "client disconnected" if res.ok else "disconnect did not complete"
         head = f"unloaded {res.name} — {res.tool_count} tools removed, {disconnect_state}."
-        body = ("any live attachments, sessions and installed hooks for this worker "
-                "are gone; captures of earlier results remain searchable, though "
-                "session ids in them are now stale.")
         # The tool-list mutation above is unconditional, so the reprocess note
         # applies regardless of whether the disconnect itself succeeded.
         tail = _REPROCESS_NOTE if res.ok else f"WARNING [{res.error_kind}]: {res.error}\n{_REPROCESS_NOTE}"
-        return f"{head}\n{body}\n{tail}"
+        return f"{head}\n{_DESTRUCTION_BODY}\n{tail}"
+
+    @staticmethod
+    def _render_reload(res, was_loaded: bool, doomed: int) -> str:
+        """A failed reload has UNLOAD's consequences and LOAD's shape.
+
+        WorkerManager.reload runs _unload_locked FIRST, and that removes the
+        tools and the pool spec unconditionally before either half can fail.
+        So rendering a failed reload through _render_load — a bare
+        "reload frida failed [spawn_failed]: ..." — invites the operator to
+        read "failed" as "unchanged", when in fact the tools are gone, every
+        live attachment died with the process, and the next turn reprocesses.
+        Say what actually happened, and distinguish the two failure
+        directions: WorkerOpResult.error carries an "unload half failed:"
+        prefix when the load half was never reached.
+        """
+        if res.ok:
+            return (f"{res.op}ed {res.name} — {res.tool_count} tools available.\n"
+                    f"{_REPROCESS_NOTE}")
+        head = f"{res.op} {res.name} failed [{res.error_kind}]: {res.error}"
+        if not was_loaded:
+            # The unload half was a no-op, so this is a plain failed load: it
+            # destroyed nothing and the tool list never changed. No warning,
+            # and no reprocess note (see
+            # test_failed_load_does_not_claim_a_reprocess_is_coming).
+            return (f"{head}\n{res.name} was not loaded before this reload, "
+                    f"so nothing was destroyed.")
+        if str(res.error or "").startswith("unload half failed:"):
+            state = (f"WARNING: the unload half removed {res.name}'s {doomed} tools "
+                     f"before its disconnect was attempted, and the load half never "
+                     f"ran — {res.name} is now unloaded, but its process may still "
+                     f"be running.")
+        else:
+            state = (f"WARNING: the unload half had already completed, so {res.name} "
+                     f"is now UNLOADED — its {doomed} tools are gone and the load "
+                     f"half did not bring them back. Fix the cause above, then "
+                     f"/worker load {res.name}.")
+        return f"{head}\n{state}\n{_DESTRUCTION_BODY}\n{_REPROCESS_NOTE}"
