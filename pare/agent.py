@@ -11,6 +11,7 @@ Extension points:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -291,16 +292,20 @@ class PareAgent(Agent):
                 unavailable_hits = 0
                 UNAVAILABLE_HANDBACK_AFTER = 2
 
-                def _settle_and_handback(question: str, done_ids: set[str]) -> ResponseMessage:
+                def _settle(marker: str, done_ids: set[str]) -> None:
                     """Fill a synthetic tool result for every tool_call id in this
-                    round that hasn't been answered yet, then append the handback
-                    question as the assistant turn. A dangling tool_call id with no
-                    matching tool result makes the NEXT turn's API request invalid,
-                    so every id in the batch must be settled before we return."""
+                    round that hasn't been answered yet. A dangling tool_call id
+                    with no matching tool result makes the NEXT turn's API request
+                    invalid, so every id in the batch must be settled before this
+                    round can be abandoned by any route."""
                     for tc in tool_calls:
                         if tc.id not in done_ids:
-                            conv.add_tool_result(
-                                tc.id, "[handed back to operator — call not executed]")
+                            conv.add_tool_result(tc.id, marker)
+
+                def _settle_and_handback(question: str, done_ids: set[str]) -> ResponseMessage:
+                    """Settle the round, then append the handback question as the
+                    assistant turn."""
+                    _settle("[handed back to operator — call not executed]", done_ids)
                     conv.add_assistant(question)
                     return ResponseMessage(text=question)
 
@@ -349,7 +354,22 @@ class PareAgent(Agent):
                                     return
                         yield ToolProgressMessage(tool=tc.name, arguments=tc.arguments)
                         if guard.should_run(tc.name, tc.arguments):
-                            result = await self.tool_executor.run(tc.name, tc.arguments, ctx)
+                            try:
+                                result = await self.tool_executor.run(
+                                    tc.name, tc.arguments, ctx)
+                            except asyncio.CancelledError:
+                                # The daemon cancels a handler task the moment its
+                                # client disconnects, and this await is where a turn
+                                # spends most of its time. ToolExecutor.run re-raises
+                                # CancelledError — a BaseException — so the `except
+                                # Exception` below never sees it, and without this the
+                                # round's add_assistant_tool_calls entry would keep
+                                # ids that no tool result ever answers, invalidating
+                                # this channel's NEXT request. Settle them, then
+                                # re-raise: cancellation must still propagate, and is
+                                # never swallowed.
+                                _settle("[interrupted — call not completed]", done_ids)
+                                raise
                             result = guard.record(tc.name, tc.arguments, result)
                             if tc.name in NAME_SEARCH_TOOLS:
                                 pat = str((tc.arguments or {}).get("pattern", ""))

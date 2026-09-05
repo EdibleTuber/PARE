@@ -135,3 +135,31 @@ async def test_declarative_tool_is_not_attributed_to_a_worker(monkeypatch):
         "static_analyze is a live, registered, non-worker tool — no handback")
     assert agent.tool_executor.run.await_count >= 2, (
         "it must actually keep dispatching, not be short-circuited")
+
+
+async def test_cancellation_settles_outstanding_tool_call_ids(monkeypatch):
+    """The daemon cancels a handler task the moment its client disconnects.
+    ToolExecutor.run re-raises asyncio.CancelledError (a BaseException), so
+    handle_chat's `except Exception` never sees it — and the conversation was
+    left holding the round's add_assistant_tool_calls entry with unanswered
+    ids, which makes the channel's NEXT request invalid. Settle them, then let
+    the cancellation propagate; it must never be swallowed."""
+    import asyncio
+    import contextlib
+    batch = [_Call("frida_attach", id_="a"), _Call("frida_detach", id_="b")]
+    agent = _agent([batch])
+    agent.worker_manager = None       # keep the unloaded-worker trigger out of it
+    agent.tool_executor.run = AsyncMock(side_effect=asyncio.CancelledError())
+    conv = MagicMock()
+    conv.get_messages_for_api.return_value = []
+    ctx = MagicMock(conversation=conv, channel_id="t", cwd=None)
+    agent.inference.complete = AsyncMock(side_effect=[_Completion(batch)])
+    monkeypatch.setattr(agent, "_bind_store", lambda c: contextlib.nullcontext())
+
+    with pytest.raises(asyncio.CancelledError):
+        [m async for m in agent.handle_chat(ChatMessage(text="go"), ctx)]
+
+    settled = {call.args[0] for call in conv.add_tool_result.call_args_list}
+    assert settled == {"a", "b"}, (
+        "every tool_call id in the round must be settled before the "
+        "cancellation propagates")
