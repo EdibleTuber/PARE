@@ -12,7 +12,7 @@ runs anywhere the venv is installed.
 Exits non-zero if any check fails. Run it after changing anything in the worker
 lifecycle — a green pytest run does not prove a real worker still loads.
 """
-import asyncio, os, sys
+import asyncio, os, shutil, sys, tempfile
 
 import agent_core.tools.executor as executor_mod
 executor_mod.BUILTIN_TOOLS = []          # scratch harness: no agent to satisfy `requires`
@@ -25,7 +25,13 @@ from agent_core.workers.risk import RiskGate
 from agent_core.workers.tool_approval import ToolApprovalRegistry
 
 WORKERS_YAML = "/mnt/secondary/projects/PARE/workers.yaml"
-AUDIT = "/tmp/claude-1000/-mnt-secondary-projects-PARE/46646470-62b2-43cb-a234-01e80f0ed501/scratchpad/live-audit"
+# Run-scoped, not a fixed path: AuditLog names its file by calendar date, so a
+# fixed directory accumulates rows across same-day reruns and step 10's
+# count-based checks (worker_loaded rows == 3) fail spuriously against
+# leftover rows from an earlier run rather than anything this run did. A
+# fresh tempdir per invocation makes the script idempotent; main() removes it
+# on the way out, pass or fail.
+AUDIT = tempfile.mkdtemp(prefix="pare-live-lifecycle-audit-")
 
 
 class _Agent:
@@ -157,4 +163,9 @@ async def main():
     return 0 if ok else 1
 
 
-sys.exit(asyncio.run(main()))
+rc = 1
+try:
+    rc = asyncio.run(main())
+finally:
+    shutil.rmtree(AUDIT, ignore_errors=True)
+sys.exit(rc)

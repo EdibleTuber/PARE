@@ -33,9 +33,16 @@ import tempfile
 import time
 
 from agent_core.client import DaemonConnection
+from agent_core.workers.registry import WorkerRegistry
 from pare.config import load_config
 
 SOCKET_WAIT_TIMEOUT = 15.0
+
+# Phrases _frida.call() and WorkerManager.unavailable_reason() actually use on
+# a failed dispatch. A /devices check that doesn't scan for these can't tell
+# "frida still works" from "frida silently became unavailable" -- see section
+# 5 below.
+_FRIDA_FAILURE_PHRASES = ("not loaded", "call failed", "invalid json")
 
 
 def check(label: str, got, want=None, *, predicate=None) -> bool:
@@ -117,9 +124,24 @@ async def run_checks(cfg) -> bool:
               "did not disturb frida")
         r = await conn.command("devices", "")
         print(r.text)
-        ok &= check("devices table non-empty", bool(r.text.strip()),
+        lines = r.text.splitlines()
+        header = lines[0].split() if lines else []
+        # Positive: the response must actually have the shape render_table
+        # produces for /devices — a header naming its columns, plus at least
+        # one data row (header + separator + >=1 row == 3 lines).
+        ok &= check("devices header has id/name/type columns",
+                    {"id", "name", "type"} <= set(header), predicate=lambda v: v)
+        ok &= check("devices has at least one data row", len(lines) >= 3,
                     predicate=lambda v: v)
-        ok &= check("devices did not fail", "error" not in r.text.lower(),
+        # Negative: none of _frida.call()'s / unavailable_reason()'s actual
+        # failure phrasings appear. "error" alone doesn't discriminate --
+        # every one of those failure strings passes a bare "not empty, no
+        # 'error' substring" check, which is exactly how this section's
+        # original assertions missed a silently-unavailable frida (see the
+        # discrimination proof below and the fix-round report).
+        lower = r.text.lower()
+        ok &= check("devices carries no known failure phrase",
+                    not any(p in lower for p in _FRIDA_FAILURE_PHRASES),
                     predicate=lambda v: v)
 
         print("\n6. /worker load static restores it with the same tool count")
@@ -142,9 +164,17 @@ async def run_checks(cfg) -> bool:
         r = await conn.command("worker", "list")
         print(r.text)
         hw_row = next((ln for ln in r.text.splitlines() if ln.split()[:1] == ["hardware"]), "")
-        ok &= check("hardware row shows an error", bool(hw_row.strip().splitlines()) and
-                    len(hw_row.split()) > 6, predicate=lambda v: v)
         ok &= check("hardware still unloaded", "unloaded" in hw_row, predicate=lambda v: v)
+        # The table cell alone clips a realistic spawn_failed message down to
+        # the error's class (see worker.py's _render_list comment) -- the
+        # Task 4 footer below the table is the only place the actual binary
+        # path an operator needs to fix surfaces, so assert on that, not on
+        # the row's raw width.
+        hw_spec = WorkerRegistry.load(cfg.workers_yaml_path).get("hardware")
+        footer_line = next((ln for ln in r.text.splitlines()
+                             if ln.startswith("hardware:")), "")
+        ok &= check("hardware footer names the missing binary",
+                    hw_spec.command in footer_line, predicate=lambda v: v)
     finally:
         await conn.close()
     return ok
