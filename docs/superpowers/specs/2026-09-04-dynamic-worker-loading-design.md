@@ -507,7 +507,7 @@ the obvious one is the worst:
 |---|---|
 | Top of `serve()` (before `daemon.py:52` unlink) | A stale socket from the previous run stays on disk for the whole load window; `pare-cli` connects to a dead inode |
 | After unlink, before `start_unix_server` (`:54`) | No socket during load → CLI gets `FileNotFoundError`, reads as "daemon not running" |
-| **`start_serving=False`, await `astartup()`, then serve** | Socket exists immediately, client connects queue in the listen backlog, no request dispatched against a half-populated executor |
+| **`start_serving=False`, await `astartup()`, then serve** | Socket file exists immediately, so no stale-inode confusion; a client connecting during startup gets `ConnectionRefusedError` and can retry; no request is dispatched against a half-populated executor |
 
 ```python
 server = await asyncio.start_unix_server(..., start_serving=False)
@@ -519,6 +519,16 @@ async with server:
 The trap in the naive version: `start_unix_server` defaults to
 `start_serving=True`, so "bind, then astartup" **already accepts connections** and
 spawns `_handle_connection` tasks during startup — a chat turn can land mid-load.
+
+**Correction (found during implementation).** An earlier draft of this table claimed a
+client would *queue in the listen backlog* during the `start_serving=False` window.
+That is false for AF_UNIX: the socket has not been `listen()`ed yet, so a connect
+attempt is refused outright with `ConnectionRefusedError`. The choice still stands —
+the socket path exists, so there is no stale-inode ambiguity and a retry succeeds the
+moment startup completes — but the operator-visible difference from "no socket file at
+all" is the errno (`ECONNREFUSED` rather than `ENOENT`), not queuing. The refusal is
+what makes the ordering testable at all: it is the discriminator in
+`tests/test_daemon_startup.py`.
 
 `ashutdown()` is not optional politeness. `pare/agent.py:162` is the only
 `close_all()` call site in PARE, and D5 deletes the block containing it; without a
