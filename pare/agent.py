@@ -11,7 +11,6 @@ Extension points:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -31,7 +30,7 @@ from agent_core.protocol import (
 )
 
 from agent_core.agent import Agent, HandlerContext
-from agent_core.workers import MCPClientPool, discover_and_register
+from agent_core.workers import MCPClientPool, WorkerManager
 from agent_core.workers.registry import WorkerRegistry
 from agent_core.workers.risk import RiskGate
 from agent_core.workers.risk_pool import RiskAwareToolPool
@@ -111,9 +110,17 @@ class PareAgent(Agent):
             if self.config.enable_apk_re_agents else None
         )
         registry = WorkerRegistry.load(self.config.workers_yaml_path)
-        specs = registry.all()
-        self._worker_specs = specs
-        self.mcp_pool = MCPClientPool(specs)
+        self.worker_registry = registry
+        # Empty, deliberately. The pool holds LOADED specs, not declared ones:
+        # if it were seeded with every declaration, the first dispatch after an
+        # unload would lazily reconnect the worker just unloaded, silently
+        # undoing it. WorkerManager owns all population.
+        self.mcp_pool = MCPClientPool([])
+        # Sentinel so the /worker command's requires=("worker_manager",) check
+        # passes in _attach_registries, which runs BEFORE astartup. Same pattern
+        # the framework uses for command_registry (agent_core/runtime.py:55-58).
+        # The real manager is built in astartup(), once tool_executor exists.
+        self.worker_manager = None
         self._launch_ts = time.time()   # process start; per-launch refinement deferred (spec §11)
         self._capture_stores = CaptureStoreManager(
             marker=self.config.project_marker,
@@ -128,7 +135,7 @@ class PareAgent(Agent):
         )
         self.tool_pool = RiskAwareToolPool(
             inner=self.mcp_pool,
-            specs={s.name: s for s in specs},
+            specs={},
             risk_gate=RiskGate(overrides=registry.risk_overrides()),
             approval_registry=self.tool_approval_registry,
             audit_log=AuditLog(self.config.audit_dir),
@@ -142,34 +149,37 @@ class PareAgent(Agent):
         self._disambig_resolved: dict[str, set[frozenset[str]]] = {}
 
     def register_tools(self):
-        """Discover MCP-direct workers and return their tools, wired to dispatch
-        through the RiskAwareToolPool (so calls are risk-gated + audited).
+        """Declarative tools only. Worker tools are registered by astartup().
 
-        Called by agent_core's runtime after setup(). The returned list is
-        unioned with the class-level `tools` ClassVar (StaticAnalyze). Bridges
-        async discovery to the sync hook via asyncio.run.
-
-        Discovery lazy-connects each worker in THIS throwaway asyncio.run loop
-        (MCPClientPool caches the client on first list_tools). We close the pool
-        before returning so those connections don't leak into the daemon's
-        separate serving loop — a stdio worker's streams are bound to the loop
-        that opened them, so a reused-across-loops client dies on the first
-        dispatched call with ClosedResourceError. The serving loop reconnects
-        lazily on first call_tool, in its own loop.
+        Discovery used to run here inside a throwaway asyncio.run loop, which
+        forced a close_all() afterwards because the connections were bound to
+        that dead loop. astartup() runs in the serving loop instead, so that
+        whole dance is gone.
         """
-        async def _discover():
-            classes = await discover_and_register(self._worker_specs, self.tool_pool)
-            await self.tool_pool.close_all()
-            return classes
+        return [StaticAnalyze] if self.config.enable_apk_re_agents else []
 
-        classes = asyncio.run(_discover())
-        # apk_re_agents' static_analyze is advertised only when explicitly enabled
-        # (default off). The coordinator isn't part of every deployment, and an
-        # always-registered tool the model reaches for first only dead-ends on a
-        # connection-refused. Gate keeps the Phase-1 integration one config flag away.
-        if self.config.enable_apk_re_agents:
-            classes = [*classes, StaticAnalyze]
-        return classes
+    async def astartup(self) -> None:
+        """Build the worker manager and connect every autoload worker.
+
+        Runs after _attach_registries (so tool_executor exists) and before the
+        daemon accepts a connection.
+        """
+        self.worker_manager = WorkerManager(
+            self.worker_registry, self.tool_pool, self.tool_executor)
+        results = await self.worker_manager.load_autoload()
+        ok = [r for r in results if r.ok]
+        bad = [r for r in results if not r.ok]
+        logger.info("workers loaded: %s%s",
+                    ", ".join(f"{r.name}({r.tool_count})" for r in ok) or "none",
+                    "".join(f" | {r.name} FAILED: {r.error}" for r in bad))
+
+    async def ashutdown(self) -> None:
+        """Close worker connections and project capture stores."""
+        if self.worker_manager is not None:
+            await self.worker_manager.close_all()
+        close = getattr(self._capture_stores, "close_all", None)
+        if close is not None:
+            close()
 
     def system_prompt(self, ctx: HandlerContext) -> str:
         from pathlib import Path
