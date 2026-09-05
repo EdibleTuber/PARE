@@ -106,3 +106,32 @@ async def test_loaded_worker_is_unaffected(monkeypatch):
     msgs, conv = await _drive(agent, monkeypatch)
     text = "\n".join(m.text for m in msgs if isinstance(m, ResponseMessage))
     assert "not loaded" not in text
+
+
+async def test_declarative_tool_is_not_attributed_to_a_worker(monkeypatch):
+    """`static_analyze` is a DECLARATIVE PARE tool (pare/tools/static_analyze.py,
+    mounted when config.enable_apk_re_agents is set), not a worker tool. But
+    worker_of() matches on the `static_` name prefix, so with the `static`
+    worker unloaded the tool was false-attributed to that worker: round 1 it
+    dispatches fine (hit 1), round 2 it dispatches fine again (hit 2) and the
+    turn hands back claiming "worker 'static' is not loaded" — a remedy that
+    does not apply, about a tool that just worked.
+
+    Provenance, not the name, decides: a tool that is registered in the
+    executor is dispatchable now, so it can never be the unloaded-worker case.
+    """
+    script = [[_Call("static_analyze")], [_Call("static_analyze")],
+              [_Call("static_analyze")]]
+    agent = _agent(script)
+    agent.worker_manager.unavailable_reason = lambda w: (
+        f"worker {w!r} is not loaded — run /worker load {w}."
+        if w == "static" else None)
+    # The declarative tool is registered and dispatching normally.
+    agent.tool_executor.__contains__.return_value = True
+    agent.tool_executor.run = AsyncMock(return_value="analysed: 3 findings")
+    msgs, _conv = await _drive(agent, monkeypatch)
+    text = "\n".join(m.text for m in msgs if isinstance(m, ResponseMessage))
+    assert "not loaded" not in text, (
+        "static_analyze is a live, registered, non-worker tool — no handback")
+    assert agent.tool_executor.run.await_count >= 2, (
+        "it must actually keep dispatching, not be short-circuited")

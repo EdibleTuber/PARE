@@ -312,7 +312,21 @@ class PareAgent(Agent):
                     done_ids: set[str] = set()
                     for tc in tool_calls:
                         mgr = self.worker_manager
-                        if mgr is not None:
+                        # Presence in the executor IS the provenance test here.
+                        # A registered tool is dispatchable right now, so it is
+                        # never the unloaded-worker case: it is either a
+                        # declarative PARE tool (no `worker` provenance at all)
+                        # or a synthesized tool whose worker is loaded — and
+                        # unload/rollback both remove a worker's tools before
+                        # anything else. Only an ABSENT name can belong to an
+                        # unloaded worker, and worker_of()'s name-prefix match
+                        # is the only signal left for it. Without this gate the
+                        # prefix false-attributes the declarative
+                        # `static_analyze` (pare/tools/static_analyze.py) to a
+                        # worker named `static`, handing the turn back about a
+                        # tool that just executed fine (spec 8.2's namespace
+                        # overlap, made active).
+                        if mgr is not None and tc.name not in self.tool_executor:
                             owner = mgr.worker_of(tc.name)
                             why = mgr.unavailable_reason(owner) if owner else None
                             if why:
