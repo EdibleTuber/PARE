@@ -96,3 +96,10 @@ workers:
 risk_overrides:
   - ["frida_execute_script", "critical"]
   - ["frida_write_memory", "high"]
+  # mitm is not read-only: these four mutate or forge traffic. Pinned so their
+  # gating does not rest solely on what the worker advertises over the wire —
+  # which a half-wired dev build may not advertise at all.
+  - ["mitm_inject_request", "critical"]
+  - ["mitm_add_blocking_rule", "high"]
+  - ["mitm_add_modification_rule", "high"]
+  - ["mitm_replay_flow", "high"]

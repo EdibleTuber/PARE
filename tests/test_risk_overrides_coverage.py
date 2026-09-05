@@ -4,32 +4,72 @@ The pins in workers.yaml are hand-maintained strings matched by fnmatch against
 f"{worker}_{tool}". A typo (e.g. "frida_execute_scrpt") matches no tool and
 silently yields no protection — RiskGate only validates the tier, not that the
 pattern hits anything. These tests assert every pin matches a real tool and that
-the dangerous frida tools resolve to their intended gated tiers against the real
-worker contract. (Security-review finding, 2026-05-30.)
+the dangerous tools resolve to their intended gated tiers against the real worker
+contracts. (Security-review finding, 2026-05-30.)
+
+Coverage spans every worker whose contract package is installed, not just frida:
+a pin typo in the mitm namespace disables protection exactly as silently as one
+in frida's. Pins naming a worker that isn't installed here are reported rather
+than failed, so a partial checkout doesn't turn into a red suite.
 """
 import fnmatch
+import importlib
+import warnings
 
 import pytest
 
 from agent_core.workers.registry import WorkerRegistry
 from agent_core.workers.risk import RiskGate, resolve_declared_tier
 
+# worker name (workers.yaml key, and therefore the tool prefix) -> contract module
+_CONTRACT_MODULES = {
+    "frida": "pare_frida_mcp.contract",
+    "static": "pare_static_mcp.contract",
+    "mitm": "pare_mitm_mcp.contract",
+}
 
-def _frida_tool_targets():
-    contract = pytest.importorskip("pare_frida_mcp.contract")
-    return {f"frida_{spec.name}" for spec in contract.TOOL_SPECS}
+
+def _tool_targets() -> tuple[set[str], set[str]]:
+    """Return (all f"{worker}_{tool}" targets, worker names actually installed)."""
+    targets: set[str] = set()
+    installed: set[str] = set()
+    for worker, module in _CONTRACT_MODULES.items():
+        try:
+            contract = importlib.import_module(module)
+        except ImportError:
+            continue
+        installed.add(worker)
+        targets |= {f"{worker}_{spec.name}" for spec in contract.TOOL_SPECS}
+    return targets, installed
 
 
 def test_every_pin_matches_at_least_one_real_tool():
     reg = WorkerRegistry.load("workers.yaml")
     overrides = reg.risk_overrides()
     assert overrides, "expected at least the mandatory frida pins"
-    targets = _frida_tool_targets()
+    targets, installed = _tool_targets()
+    assert installed, "no worker contract packages installed — cannot validate pins"
+
+    unchecked = []
     for pattern, tier in overrides:
+        owner = next((w for w in installed if pattern.startswith(f"{w}_")), None)
+        if owner is None:
+            unchecked.append(pattern)
+            continue
         matched = [t for t in targets if fnmatch.fnmatchcase(t, pattern)]
         assert matched, (
             f"risk_overrides pin {pattern!r} matches no known tool — likely a "
-            f"typo that silently disables protection. Known frida targets: {sorted(targets)}"
+            f"typo that silently disables protection. Known {owner} targets: "
+            f"{sorted(t for t in targets if t.startswith(f'{owner}_'))}"
+        )
+    if unchecked:
+        # Warn rather than skip: the pins we *could* check were genuinely
+        # verified, and skipping would discard that result.
+        warnings.warn(
+            "risk_overrides pins not validated (worker contract not installed "
+            f"here): {sorted(unchecked)}",
+            UserWarning,
+            stacklevel=2,
         )
 
 
@@ -41,6 +81,20 @@ def test_dangerous_frida_tools_resolve_to_pinned_tiers():
                          declared_tier="low").effective_tier == "critical"
     assert gate.evaluate(worker="frida", tool="write_memory",
                          declared_tier="low").effective_tier == "high"
+
+
+def test_dangerous_mitm_tools_resolve_to_pinned_tiers():
+    """mitm is not read-only: inject_request forges traffic, and the rule/replay
+    tools alter what the target sees. The pins hold even if a half-wired dev
+    build advertises them low (or advertises nothing at all)."""
+    pytest.importorskip("pare_mitm_mcp.contract")
+    reg = WorkerRegistry.load("workers.yaml")
+    gate = RiskGate(overrides=reg.risk_overrides())
+    assert gate.evaluate(worker="mitm", tool="inject_request",
+                         declared_tier="low").effective_tier == "critical"
+    for tool in ("add_blocking_rule", "add_modification_rule", "replay_flow"):
+        assert gate.evaluate(worker="mitm", tool=tool,
+                             declared_tier="low").effective_tier == "high", tool
 
 
 def test_frida_floor_is_low():
