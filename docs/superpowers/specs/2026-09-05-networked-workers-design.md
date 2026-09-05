@@ -89,11 +89,27 @@ ships, not after.
 
 **D6 (REVERSED from v2) — the serving helper goes in a new `pare-worker-kit`, not in
 `agent_core`.** v2 argued the workers "already import `agent_core.workers.risk`" so the
-dependency was free. Measured, it is not: that import loads **21 agent_core modules**,
+dependency was free. Measured, it is not. That import loads **21 agent_core modules**,
 including `MCPClientPool`, `WorkerManager`, `RiskAwareToolPool` and the daemon's shell
-tool, to obtain one string. Declaring `agent_core` in each worker's `pyproject.toml`
-would additionally install `trafilatura`, `markitdown[pdf,docx,pptx,xlsx]`, `rich` and
-`prompt-toolkit` — on a Raspberry Pi, for a constant and a forty-line wrapper.
+tool, to obtain one string.
+
+The install cost was then measured directly, by resolving each dependency into its own
+clean virtualenv on Python 3.12:
+
+| Installed | Packages | On disk |
+|---|---:|---:|
+| `pare-worker-kit` (what ships to the worker) | 30 | 57 MB |
+| `agent_core @ v1.8.0` (what v2 proposed) | 76 | 412 MB |
+| **difference** | **+46** | **+355 MB** |
+
+The 46 extra packages include `onnxruntime`, `numpy`, `pandas`, `protobuf`, `magika`,
+`pillow` and `pypdfium2` — a machine-learning runtime and a dataframe library, on a
+Raspberry Pi, to obtain a constant and reach a forty-line wrapper.
+
+They would, however, *install*: every one of those has an aarch64 wheel
+(`manylinux_2_28_aarch64`, and Pi OS bookworm ships glibc 2.36). The objection is
+weight, not feasibility — an earlier check that suggested otherwise was a false
+negative from pinning the wrong manylinux tag.
 
 The direction was also backwards. `agent_core/workers/__init__.py` states its own
 boundary as the *client* side: transport, enforcement, lifecycle. `run_worker` is the
