@@ -32,9 +32,13 @@ workers:
     risk_default: low
     capability_tags: [static, apk, android]
 
-  # In-house HTTPS-traffic worker (pare-mitm-mcp). Four read-only tools over a
-  # localhost control API served by an operator-launched mitmproxy daemon. All
-  # wire tier low. Tools surface as mitm_*. Mounted unconditionally, like
+  # In-house HTTPS-traffic worker (pare-mitm-mcp). ELEVEN tools over a localhost
+  # control API served by an operator-launched mitmproxy daemon — NOT read-only:
+  # five reads plus list_rules are wire tier low, but delete_rule/clear_rules are
+  # also low (they mutate), add_blocking_rule/add_modification_rule/replay_flow
+  # are high, and inject_request is critical. No operator pins cover any of them,
+  # so that gating rests entirely on wire metadata. Tools surface as mitm_*.
+  # Mounted unconditionally, like
   # static/frida. Requires the worker installed into this venv (`pip install -e
   # ~/Projects/pare-mitm-mcp`) and the daemon started via `/mitm up`. See
   # docs/superpowers/ for the design + plan.

@@ -799,6 +799,37 @@ suite."
 modules behind — `pip uninstall` then reinstall, or you get import errors that
 name modules the installed version never had.)
 
+### 8.8 `mitm` is neither four tools nor read-only, and has no operator pins
+
+`workers.yaml:35-37` and `README.md:144` both describe the mitm worker as "four
+read-only tools… all wire tier low." The installed contract advertises **eleven**,
+and six of them mutate state:
+
+| Advertised tier | Tools |
+|---|---|
+| `critical` | `mitm_inject_request` |
+| `high` | `mitm_add_blocking_rule`, `mitm_add_modification_rule`, `mitm_replay_flow` |
+| `low` | `mitm_list_flows`, `mitm_get_flow`, `mitm_search_flows`, `mitm_capture_health`, `mitm_list_rules`, **`mitm_delete_rule`**, **`mitm_clear_rules`** |
+
+Two consequences, both pre-existing and both sharpened by this design:
+
+1. **No operator pins cover mitm.** `risk_overrides` (`workers.yaml:92-94`) pins
+   only `frida_execute_script` and `frida_write_memory`. So the gating of
+   `mitm_inject_request` (critical) and the three `high` tools rests *entirely* on
+   the worker's wire metadata, with `risk_default: low` (`workers.yaml:44`) as the
+   floor beneath it. This is §6.4.1's exposure in its purest form: a mitm reload
+   against a build that advertises nothing drops request injection from `critical`
+   to `low` and it auto-executes. frida at least has two pins; mitm has none.
+2. **`delete_rule` and `clear_rules` are advertised `low`**, so they auto-execute
+   today. Clearing every interception rule mid-investigation is a state mutation
+   the operator never sees.
+
+The §11 precondition-1 check — warn when a worker advertises above its
+`risk_default` with no covering pin — would fire on four mitm tools the moment it
+exists. **Recommended (operator's call, not this design's):** mirror the frida
+precedent with pins for `mitm_inject_request` → critical and the three `high`
+tools, and correct both the `workers.yaml` comment and `README.md:144`.
+
 ## 9. PARE changes
 
 ### 9.1 The `/worker` command
@@ -815,6 +846,9 @@ sentinel fails at boot rather than at first invocation.
 /worker unload <name>
 /worker reload <name>
 ```
+
+(Tool counts are read live from `status()`, never hardcoded — §8.8 is what
+happens when a count is written down and then drifts.)
 
 `/worker list` renders through `render_table` (`pare/commands/_snapshot_render.py:14`),
 the house renderer used by `/devices`, `/ps`, `/apps`, `/sessions`, `/snapshot` — it
@@ -1020,9 +1054,9 @@ regression test.
 ### Worker-side churn: none
 
 No wire fields change, no conformance changes. `pare-frida-mcp` (19 tools),
-`pare-static-mcp` (10) and `pare-mitm-mcp` need no edits; `pare-hardware-mcp` only
-has to be a normal worker. (`pare-mitm-mcp` has no checkout on this machine, so
-this is asserted from its README, not verified.)
+`pare-static-mcp` (10) and `pare-mitm-mcp` (11) need no edits; `pare-hardware-mcp`
+only has to be a normal worker. All four counts verified against the installed
+contracts.
 
 ## 11. Groundwork for model-initiated loading
 
