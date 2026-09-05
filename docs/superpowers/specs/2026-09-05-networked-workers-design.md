@@ -1,24 +1,23 @@
 # Networked MCP workers — design
 
 **Date:** 2026-09-05
-**Status:** v2 — revised after the trust-boundary decision; pending review
-**Repos:** `agent_core`, `pare-frida-mcp`, `pare-static-mcp`, `pare-mitm-mcp`, `PARE`
+**Status:** v3 — revised after a four-lens review panel; pending review
+**Repos:** `agent_core`, a new `pare-worker-kit`, the three existing workers, `PARE`
 **Follows:** [`2026-09-04-dynamic-worker-loading-design.md`](2026-09-04-dynamic-worker-loading-design.md)
-**Unblocks:** `pare-hardware-mcp` (a Tigard worker on a Raspberry Pi), and the
-ArcticBase interaction surface its autonomous mode depends on.
+**Related decision:** [`../2026-09-05-approval-channel-decision.md`](../2026-09-05-approval-channel-decision.md)
+**Unblocks:** `pare-hardware-mcp` (a Tigard worker on a Raspberry Pi)
 
-> **v2 changes.** v1 required a bearer token on every networked worker. That is
-> dropped. The operator runs a Tailscale node and does not intend to reach this
-> deployment from outside the LAN, and ArcticBase — already part of this ecosystem —
-> is explicitly "single-user, no auth, designed for LAN / Tailscale". Inventing a
-> second, stricter posture for workers would have been inconsistent without being
-> meaningfully safer. §6 now records the boundary, what it costs, and what would make
-> it wrong.
+> **v3 changes.** A panel (fact-check, security, framework API, operations) reviewed v2.
+> The security lens **endorsed** the no-auth decision, for a better reason than v2 gave,
+> and found that two of v2's four "controls transfer intact" claims are false. Three
+> code defects block implementation. One decision — putting the serving helper in
+> `agent_core` — was wrong and is reversed. Several v2 claims about existing behaviour
+> were inaccurate and are corrected in place. Every finding below was verified against
+> running code, not inferred.
 
 ## 1. Why
 
-PARE's daemon now runs on a headless inference server. The hardware it needs to reach
-does not:
+PARE's daemon runs on a headless inference server. The hardware it must reach does not:
 
 | Where | What lives there | Why it stays there |
 |---|---|---|
@@ -28,134 +27,193 @@ does not:
 
 Every worker today is `transport: stdio` — a subprocess the daemon spawns. **A daemon
 cannot spawn a subprocess on another machine**, so the Pi worker is impossible as
-designed, and the emulator is reachable only by tunnelling adb and frida back to the
-server.
+designed, and the emulator is reachable only by tunnelling adb (unauthenticated over
+TCP) or `frida-server` back to the server. Running each worker on the machine that owns
+its hardware solves all of it with one mechanism.
 
-The alternative is to run each worker on the machine that owns its hardware and have
-the daemon connect over the network. PARE's side is already built for this:
-`WorkerSpec` accepts `transport: streamable_http` with an `endpoint`,
-`MCPClient.from_spec` dispatches on it, and `agent_core` has a live Streamable-HTTP
-conformance fixture. The eight commented-out `apk_re_agents` entries in `workers.yaml`
-are exactly this shape. What is missing is worker-side serving.
-
-### The tunnel alternative, and why it loses
-
-The frida worker could stay on the server and reach the emulator by forwarding adb
-(5037) or `frida-server` (27042). It works, but adb over TCP is unauthenticated, it
-needs a tunnel per machine per protocol, and it does nothing for the Pi — which still
-cannot host a stdio worker. Running the worker next to its hardware solves all three
-with one mechanism.
+PARE's side is already built for this: `WorkerSpec` accepts `transport:
+streamable_http` with an `endpoint`, `MCPClient.from_spec` dispatches on it, and
+`agent_core` has a live Streamable-HTTP conformance fixture. What is missing is
+worker-side serving, three bug fixes, and an honest account of what a remote worker
+changes.
 
 ## 2. Goals
 
-1. A worker serves over Streamable HTTP or stdio, chosen at launch, with no change to
-   the tools it exposes.
-2. The trust boundary is **stated explicitly** and is the same one the rest of this
-   ecosystem already uses.
-3. `workers.yaml` gains networked entries without becoming a place secrets live.
-4. Moving `pare-frida-mcp` to the laptop is the proof, and removes the adb-tunnel
-   question entirely.
-5. The risk model is unchanged in meaning and unweakened in practice by the worker
-   being remote.
+1. A worker serves over Streamable HTTP or stdio, chosen at launch, without its tool
+   code changing.
+2. The trust boundary is stated explicitly and matches the rest of this ecosystem.
+3. A worker on a small machine installs a small dependency set.
+4. When a networked worker is unreachable, the operator can tell **which machine** and
+   **why** from `/worker list`.
+5. `loaded` means *connected*, not *was connected once*.
+6. Moving `pare-frida-mcp` to the laptop is the proof.
 
 ## 3. Non-goals
 
-- **Application-level authentication.** See §6. The network is the boundary, matching
-  ArcticBase's stated posture for the same deployment.
-- **TLS between daemon and worker.** Same reasoning; the tailnet already provides
-  transport encryption between nodes.
-- **Service discovery.** Endpoints are declared in `workers.yaml` by hand, like
-  everything else.
-- **A runtime-re-readable catalog.** Changing a worker's transport requires a daemon
-  restart — see §5.4. Deliberately out of scope.
-- **Making stdio workers remote.** stdio is unchanged and stays the default. `static`
-  has no reason to leave the server.
+- **Application-level authentication.** See §6.
+- **TLS between daemon and worker.** The tailnet provides transport encryption.
+- **Service discovery.** Endpoints are declared by hand.
+- **A runtime-re-readable catalog.** Changing a transport requires a daemon restart (§5.5).
+- **Making stdio workers remote.** stdio stays the default; `static` stays on the server.
+- **Solving large-payload transfer.** Flash dumps are the hardware spec's problem, but
+  §7.3 records why it cannot be assumed solved.
 
 ## 4. Decisions
 
 **D1 — The worker chooses its transport at launch; the daemon learns it from
-`workers.yaml`.** One binary serves either way. A worker can run as stdio for local
-development and HTTP in deployment without the code paths diverging.
+`workers.yaml`.** One binary serves either way.
 
-**D2 — The network is the trust boundary.** No bearer tokens, no TLS between daemon
-and worker. The deployment sits on a Tailscale tailnet and a LAN the operator
-controls, and ArcticBase — already in this ecosystem, already holding approval
-documents — makes the same assumption explicitly. A second, stricter posture for
-workers alone would add token management without changing who can actually reach the
-port. §6 records what this costs and what would invalidate it.
+**D2 — The network is the trust boundary.** No tokens, no TLS between daemon and
+worker. The deployment sits on a Tailscale tailnet the operator controls, and
+ArcticBase — already in this ecosystem, already holding approval documents — states the
+same posture. §6 records what this costs and what would invalidate it.
 
-**D3 — Bind to a specific interface, never `0.0.0.0`.** With no application auth, the
-bind address *is* the access control, which makes it more important rather than less.
-`run_worker` defaults to `127.0.0.1`; reaching a worker from another host requires the
-operator to name an interface — the tailnet address, typically — as a deliberate act.
-A worker must never default to every interface it has.
+**D3 — Bind to a named interface, never a wildcard.** With no application auth the bind
+address is the access control. Checked with `ipaddress.ip_address(host).is_unspecified`,
+**not** a string comparison against `"0.0.0.0"` — verified on this host, `'0'`, `'0x0'`,
+`'00.0.0.0'`, `'::'` and `'::0'` all resolve to a wildcard bind, and
+`net.ipv6.bindv6only=0` means `::` accepts IPv4 too. `PARE_WORKER_HOST` additionally
+accepts an **interface name** (`tailscale0`), resolved at startup, because a container
+or a freshly-booted Pi genuinely cannot name its address in a unit file. That removes
+the only honest reason to want a wildcard, which is what makes the refusal defensible
+rather than stubborn.
 
 **D4 — Networked in-house workers stay `kind: internal`.** They advertise per-tool wire
-tiers and those escalate above the floor, exactly as for a stdio worker.
-`external_mcp` (floor-only) is for third-party workers and would discard tier
-information we control.
+tiers that escalate above the floor. `external_mcp` is for third-party workers.
 
-**D5 — Destructive tools on networked workers get operator pins, from day one.** The
-tier a worker self-reports is exactly what a tampered worker would misreport, and pins
-in `workers.yaml` are the only link in that chain not under the worker's control. This
-matters more, not less, without app auth. It is the same conclusion the mitm audit
-reached the hard way.
+**D5 — Destructive tools get operator pins, from day one.** The tier a worker
+self-reports is what a tampered worker would misreport; pins are the only link not
+under its control. **Currently unmet:** `workers.yaml` declares `hardware` with
+`risk_default: medium` and *zero* pins. That must be fixed before the hardware worker
+ships, not after.
 
-**D6 — A shared serving helper in `agent_core`, not four copies.** All four workers'
-`main()` functions are already near-identical, and all four already import
-`agent_core.workers.risk`. One helper standardises the environment-variable names and
-the bind default, so a new worker cannot inherit a bad posture by copying an old one
-carelessly.
+**D6 (REVERSED from v2) — the serving helper goes in a new `pare-worker-kit`, not in
+`agent_core`.** v2 argued the workers "already import `agent_core.workers.risk`" so the
+dependency was free. Measured, it is not: that import loads **21 agent_core modules**,
+including `MCPClientPool`, `WorkerManager`, `RiskAwareToolPool` and the daemon's shell
+tool, to obtain one string. Declaring `agent_core` in each worker's `pyproject.toml`
+would additionally install `trafilatura`, `markitdown[pdf,docx,pptx,xlsx]`, `rich` and
+`prompt-toolkit` — on a Raspberry Pi, for a constant and a forty-line wrapper.
+
+The direction was also backwards. `agent_core/workers/__init__.py` states its own
+boundary as the *client* side: transport, enforcement, lifecycle. `run_worker` is the
+*server* side. Putting it there means the machine being protected from the worker ships
+the code the worker runs.
+
+`pare-worker-kit` depends on `mcp` alone and exports `RISK_TIER_META_KEY` and
+`run_worker`. `agent_core` re-exports the constant from it, so the daemon side is
+unchanged and the constant keeps one definition.
+
+**D7 — Liveness is checked, not assumed.** `loaded` currently means "load succeeded and
+nothing has told us otherwise" — there is no heartbeat anywhere in
+`agent_core/workers/`, `is_loaded()` is pure bookkeeping, and `unavailable_reason()`
+returns `None` whenever it is true. That was free under stdio, where the daemon owned
+the process. It is not free now: a sleeping laptop leaves `/worker list` reporting
+`loaded` with a stale tool count indefinitely. Networked workers get a periodic cheap
+probe and a distinguishable `unreachable` state.
+
+**D8 — The bench screen is a peer approval channel.** Recorded separately in
+[`../2026-09-05-approval-channel-decision.md`](../2026-09-05-approval-channel-decision.md).
+It binds D1 of the ArcticBase spec, not this one, but it is why that spec is a
+prerequisite for the hardware worker rather than an enhancement.
 
 ## 5. Architecture
 
-### 5.1 `agent_core` — client side
+### 5.1 `agent_core` — three defects that block implementation
 
-`MCPClient.connect()` currently calls `streamablehttp_client(self.endpoint)`. The
-underlying function accepts `headers`, `timeout`, `sse_read_timeout` and `auth`; none
-are passed. Only one is needed now:
+All three were found by driving the real code against an unreachable endpoint.
+
+**(a) `MCPClient.close()` leaks on the HTTP failure path** — `client.py:110-116`. If
+`_session.__aexit__` raises, `_transport_ctx.__aexit__` never runs. For HTTP,
+`connect()` never touches the network (the client is lazy), so an unreachable endpoint
+raises inside `initialize()`, and the `httpx.AsyncClient` is never closed; the transport
+asyncgen is finalised later by the GC in an arbitrary task. Measured: three failed
+loads, three leaked clients, each with a `RuntimeError: Attempted to exit cancel scope
+in a different task` from GC finalisation.
+
+Note the trap: that message is the signature of the owner-task bug the lifecycle work
+fixed, and here it has a completely different cause. Anyone debugging it will look in
+the wrong place.
+
+This is exactly the path `autoload: false` makes routine. Fix is `try/finally` so the
+transport context always exits, plus a regression test asserting no live
+`httpx.AsyncClient` remains after a failed connect.
+
+**(b) One timeout field cannot bound what v2 claimed.** Verified:
+`streamablehttp_client` builds `httpx.Timeout(timeout, read=sse_read_timeout)`. So
+`timeout` covers connect/write/pool while the **response read** is governed by
+`sse_read_timeout`, default **300s**. v2's §8 assertion — "a slow worker produces a
+bounded failure rather than a hang" — cannot pass as written.
+
+`WorkerSpec` therefore gains **two** fields, not one:
 
 ```python
-request_timeout: float | None = None   # new WorkerSpec field
-"""Per-request timeout for HTTP transports. A worker across a network link needs a
-bound that a local subprocess does not. None uses the SDK default."""
+connect_timeout: float | None = None   # -> the pool's per-connect bound
+read_timeout: float | None = None      # -> sse_read_timeout
 ```
 
-`connect()` passes it through. The `headers` parameter stays unused — if the boundary
-assumption ever changes (§6), adding an `Authorization` header is a three-line change
-against a parameter the SDK already accepts, not a redesign.
+Both are per-spec so a tailnet worker can have a longer bound than `static`. v2's single
+`request_timeout: 30` example was also dead configuration: the pool's hard-coded
+`DEFAULT_CONNECT_TIMEOUT = 10.0` fires first and the operator's 30 is silently ignored.
+`WorkerManager._load_body` passes `spec.connect_timeout or self._connect_timeout`.
 
-### 5.2 `agent_core` — worker-side serving helper
+**Migration note:** `streamablehttp_client` is `@deprecated` in mcp 1.29.1; the
+replacement `streamable_http_client` takes an `httpx.AsyncClient` instead of
+`timeout`/`headers`/`auth`. Constructing the client in `MCPClient.connect()` and calling
+the new entry point makes the timeout split, and any future header change, local and
+version-stable — and should be done in the same pass rather than twice.
 
-New module `agent_core/workers/serve.py`:
+**(c) An unreachable worker reports `spawn_failed` and a memory address.** Measured
+`last_error`:
+
+```
+ConnectionError: connecting to worker 'frida' failed
+  (cancelled internally: CancelledError('Cancelled via cancel scope 0x7e671b0f3a70'))
+```
+
+The endpoint never appears; the real `httpcore.ConnectError` is buried in a collapsed
+`BaseExceptionGroup`; and `manager.py:249-251` classifies anything without "version" in
+its text as `spawn_failed` — for a worker that was never spawned. Fix: add
+`ErrorKind = "unreachable"`, carry `self.endpoint` into the error message, and unwrap
+`ExceptionGroup` to surface the innermost cause. `/worker list`'s error footer already
+prints the full text, so a good message reaches the operator unchanged.
+
+### 5.2 `pare-worker-kit` — a new, deliberately tiny package
+
+Dependencies: `mcp` only.
 
 ```python
-def run_worker(server, *, default_transport: str = "stdio") -> None:
+RISK_TIER_META_KEY = "agent_core/risk_tier"   # single definition; agent_core re-exports
+
+def run_worker(server, *, default_transport="stdio", env_prefix="AGENT_WORKER_") -> None:
     """Serve a FastMCP worker over stdio or Streamable HTTP.
 
-    Transport and binding come from the environment, so one binary works both ways:
-        PARE_WORKER_TRANSPORT   stdio | http   (default: stdio)
-        PARE_WORKER_HOST        bind address   (default: 127.0.0.1)
-        PARE_WORKER_PORT        port           (default: 9100)
-
-    The host default is loopback deliberately: with no application-level auth, the
-    bind address is the access control. Binding to a routable interface must be an
-    explicit act, and `0.0.0.0` is rejected rather than merely discouraged.
+        {prefix}TRANSPORT   stdio | http     (default: stdio)
+        {prefix}HOST        interface name or address (default: 127.0.0.1)
+        {prefix}PORT        port             (required when http)
     """
 ```
 
-Each worker's `main()` becomes `run_worker(build_server())`. Default stays stdio, so
-every existing deployment is unaffected.
+Four implementation details the review surfaced, each of which would otherwise be found
+the hard way:
 
-**Rejecting `0.0.0.0` outright** is a judgement call worth stating: it is the value
-someone reaches for when a tunnel is not working, and under D2 it is the difference
-between "reachable from the tailnet" and "reachable from the coffee shop". If an
-operator genuinely needs every interface they can bind the specific addresses.
-
-**An undeclared dependency to fix while here:** `pare-static-mcp`, `pare-frida-mcp` and
-`pare-mitm-mcp` all import `agent_core.workers.risk` at runtime, and none declares
-`agent_core` in its `pyproject.toml`. They work today only because the venv happens to
-have it. This design leans on that import harder, so it should be declared.
+- **The transport strings differ.** `WorkerSpec.transport` is `streamable_http`
+  (underscore); `FastMCP.run()` wants `streamable-http` (hyphen). `run_worker` must
+  translate or raise `ValueError: Unknown transport`.
+- **There are two different `FastMCP` classes.** The workers use
+  `mcp.server.fastmcp.FastMCP`, whose `run()` takes host/port only from the constructor
+  — so `run_worker` must set `server.settings.host`/`.port` before calling it. The
+  conformance fixture uses the standalone `fastmcp` package, whose `run()` accepts them
+  as kwargs. Branch deliberately; do not let fixture and production diverge.
+- **Port has no safe default.** v2 defaulted to 9100 while its own example used 9101.
+  Two workers on one laptop would both take 9100 and the second dies inside uvicorn, not
+  with a `run_worker` message. Port is required in http mode.
+- **DNS-rebinding protection is off by default.** The MCP SDK ships
+  `TransportSecurityMiddleware` and disables it when no settings are passed, which is
+  what FastMCP does. `run_worker` is already computing host and port, so passing
+  `TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=[...])`
+  is one line. Defence in depth rather than a hole being patched — and exactly the kind
+  of posture D6's shared-helper argument exists to standardise.
 
 ### 5.3 `PARE` — declaration
 
@@ -163,165 +221,243 @@ have it. This design leans on that import harder, so it should be declared.
   frida:
     endpoint: http://100.x.y.z:9101/mcp     # laptop's tailnet address
     transport: streamable_http
-    request_timeout: 30
+    connect_timeout: 20
+    read_timeout: 60
     risk_default: low
-    autoload: false        # the laptop is not always up
+    autoload: false        # REQUIRED for networked workers, see below
     capability_tags: [mobile, dynamic, android, frida]
 ```
 
-`autoload: false` matters here: a networked worker's host is not always powered on, and
-`/worker load frida` when you sit down at the emulator is the right ergonomic. A dark
-laptop then costs one visible `last_error` line rather than a boot delay.
+`autoload: false` is **required**, not ergonomic, until the connect bound is per-spec
+everywhere: a sleeping laptop does not refuse a connection, it silently drops the SYN,
+so every autoloading networked worker costs its full connect timeout at every daemon
+boot.
 
-### 5.4 Switching a worker between transports
+### 5.4 What v2 said does not change, and does
 
-**At launch: supported.** Set `PARE_WORKER_TRANSPORT` and start the worker either way.
+v2's §5.5 claimed the audit log is unaffected. It is not:
 
-**At runtime on a live daemon: not supported, deliberately.** Changing a declared
-worker's transport means editing `workers.yaml`, and the catalog is fixed at boot. The
-reason is specific and load-bearing: re-reading the YAML would flow new specs into the
-pool while `RiskGate`'s operator pins stayed frozen at boot values — so an edited
-`risk_default` would take effect while an added *pin* silently would not. That is a
-fail-open on the trust anchor, and re-reading therefore requires rebuilding `RiskGate`
-in the same operation.
+- **`_artifact_args` is stdio-gated** (`manager.py:44-50`). For an HTTP worker the
+  `worker_loaded` row records `resolved_command`, `command_mtime` and `command_size` as
+  `None`. The artifact-swap attestation — the dynamic-loading branch's own stated
+  central threat — silently does not exist for exactly the workers this design creates.
+  Partial fix, cheap: `_own` already calls `initialize()` and discards the result;
+  capture `serverInfo.name`/`.version` and record them. Not equivalent to an mtime, but
+  it turns nothing into a value that changes when the remote build changes.
+- **`worker_contract_version=1` is hardcoded** into every audit row
+  (`risk_pool.py:257,471`) rather than read from the connected worker, so version skew
+  is invisible at connect time *and* unrecoverable afterwards. The same
+  `initialize()` result should populate it.
+- **v2's "every call audited before and after" overstates it.** There is one terminal
+  audit row per call, whatever the outcome, including cancellation. The guarantee — no
+  silent unaudited dispatch — holds; the mechanism is one row, not two.
 
-So: change transport, restart the daemon. `/worker reload` re-execs a worker; it does
-not re-read its declaration.
+### 5.5 Switching a worker between transports
 
-**Declaring the same worker twice** (`frida_local` stdio, `frida_laptop` HTTP) is not a
-workaround. The worker name is the tool prefix, so tools would become
-`frida_laptop_java_hook` — breaking `pare/handback.py`'s hardcoded `frida_*` constants
-and showing the model two competing frida toolsets.
+**At launch: supported.** **At runtime: no, deliberately.** The catalog is fixed at
+boot. Re-reading `workers.yaml` would flow new specs into the pool while `RiskGate`'s
+operator pins stayed frozen at boot values — an edited `risk_default` would take effect
+while an added *pin* silently would not. That is a fail-open on the trust anchor, and
+`registry.py`'s own module docstring documents the live-registry behaviour that makes it
+so. Change transport, restart the daemon.
 
-### 5.5 What does not change
+**Declaring the same worker twice is not a workaround.** The worker name is the tool
+prefix, so `frida_laptop` yields `frida_laptop_java_hook`, breaking
+`pare/handback.py`'s hardcoded `frida_*` constants and showing the model two competing
+frida toolsets.
 
-Tool code, tier advertisement, the capture layer, the audit log, `WorkerManager`, and
-the entire `/worker` command surface. A networked worker is a `WorkerSpec` with a
-different transport; everything above `MCPClient` is already transport-agnostic.
+### 5.6 `/worker reload` means something different for HTTP — and the copy is now wrong
+
+For stdio, reload re-execs the worker; that is the worker-development loop it is
+described as. For HTTP it is a client-side disconnect and reconnect that does **not**
+restart the remote process — code changes on the laptop still need a manual restart
+there.
+
+The security consequences survive: `remove_spec`/`add_spec` still bump the generation,
+so approvals still evict and the high-water mark still holds. But two operator-facing
+strings become false and both are safety-relevant, because they claim state was
+destroyed when it was not:
+
+- `/worker unload`'s "any live attachments, sessions and installed hooks for this worker
+  are gone" — false for HTTP; the remote frida session survives the disconnect.
+- `disconnect_timeout`'s "its process may still be running" — sends the operator hunting
+  for a process on the wrong machine.
+
+Both must become transport-aware.
 
 ## 6. The trust boundary
 
 **The boundary is the tailnet and the operator's LAN.** Anything that can route to a
-worker's port can call any tool it exposes, including tools that write flash or drive
-JTAG. There is no application-level authentication and no transport encryption between
-daemon and worker beyond what the tailnet provides.
+worker's port can call any tool it exposes. No application authentication, no
+daemon-to-worker TLS beyond what the tailnet provides. This matches ArcticBase, which
+holds approval documents under the same assumption.
 
-This is a deliberate choice, and it is the same one ArcticBase already makes for the
-same deployment — it holds approval documents and states plainly that it is
-"single-user, no auth, designed for LAN / Tailscale". Adding tokens to workers alone
-would have produced two postures to maintain and one to get wrong, without changing who
-can reach the port.
+### Why this holds, more precisely than v2 argued
 
-### What still defends what
+The security review's endorsement rests on something v2 did not say: **the risk gate
+never derived authority from the worker.** `resolve_declared_tier` takes the worker's
+word only to *escalate*; `RiskGate.evaluate` is override-up only; the floor and the pins
+come from `workers.yaml`, which the worker cannot touch. A tampered worker and a
+wire-tampering attacker are the same adversary to that code, and moving the wire from a
+pipe to a socket does not change it.
 
-App auth would have protected against an *unauthorised caller*. Nothing here does. The
-remaining controls address a different threat — a worker that is reachable but
-**untrustworthy** — and they are unchanged by this design:
+### Two of v2's four "controls transfer intact" claims were false
 
-| Threat | Defence |
-|---|---|
-| A tampered worker under-reports a tool's tier | Operator pins (D5), which the worker cannot influence |
-| A worker re-advertises a lower tier after a reload | Session tier high-water mark, never evicted |
-| A restarted worker inherits a standing approval | Approvals are generation-keyed; a reconnect bumps the generation |
-| A dispatch happens without a record | Every call audited before and after, including cancellation |
+**Generation-keyed approvals are a property of local process ownership.** `_bump` has
+exactly three call sites, all driven by `WorkerManager` — the *daemon* acting. Under
+stdio the kernel enforces the invariant: the daemon spawned the child and holds its
+pipe, so the process cannot be replaced without a reload. Over HTTP a Pi can reboot or a
+worker be restarted by hand, and the daemon never learns. A `scope: session` approval
+then survives onto a **different process**, dispatching with no prompt and an audit row
+reading `hitl_approved / session-approved`.
 
-Those exist because the dynamic-loading work assumed a binary could be swapped between
-unload and reload. A networked worker is the same threat with a longer wire, so the
-controls transfer intact.
+*Required:* bump the generation on any transport error for non-stdio workers — fail
+closed on link loss; record `serverInfo` at load and treat a change as a generation
+boundary; and forbid FastMCP's `stateless_http`, which removes the session ids that are
+currently the only thing surfacing a swap.
 
-### What this costs, stated plainly
+**The audit log stops being complete** — a third threat class, neither "unauthorised
+caller" nor "untrustworthy worker". Under stdio, PARE's log was a total record of
+everything that worker did, because PARE's pipe was its only input. Over HTTP it records
+only what *this daemon* dispatched. After a bricked target, the operator cannot
+establish whether PARE did it — the question an audit log exists to answer.
 
-- Anything on the tailnet can drive the hardware worker — including writing flash.
-- Anything on the tailnet can read tool arguments and results in transit within a
-  node, which for the hardware worker means flash contents.
-- A compromised device on the tailnet is a compromised lab. There is no second layer.
+*Required:* worker-side request logging in `run_worker` (peer address, tool, timestamp,
+argument hash). Cheap, worker-local, restores the property.
 
-### What would make this decision wrong
+### One threat that is new because the worker is remote
 
-Recorded so it is revisitable rather than forgotten. Any of these should trigger a
-re-read of this section:
+Tool **names, descriptions and schemas** cross the wire and land in the model's context.
+Whoever holds a worker's port does not merely gain the tools that worker exposes — they
+gain an authoring channel into an agent that also holds `frida_execute_script` (pinned
+`critical`) and `mitm_inject_request` on workers they cannot reach. That is lateral
+movement via the model, and under stdio it did not exist, because descriptions came from
+a binary the daemon resolved and stat'd.
 
-1. **The Pi leaves the trusted network** — taken to a bench on someone else's wifi, or
-   onto a client site, while wired to a target.
-2. **Another person or device joins the tailnet**, so "single user" stops being true.
-3. **A worker gains a tool that can damage something irreplaceable** — a target that
-   cannot be re-flashed, or a device that is not yours.
-4. **The daemon becomes reachable from outside the LAN**, whether deliberately or by a
-   misconfigured exit node.
+Pinning worker identity across generations (above) is the same mechanism that addresses
+this.
 
-The re-entry cost is deliberately low: `streamablehttp_client` already accepts
-`headers`, FastMCP already ships a `BearerAuthProvider`, and `WorkerSpec` would need
-one field naming an environment variable. That is an afternoon, not a redesign — which
-is precisely why deferring it now is reasonable rather than negligent.
+### What this costs, and what would make it wrong
 
-### One consequence for the ArcticBase work
+Anything on the tailnet can drive the hardware worker, read tool arguments and results
+in transit within a node, and there is no second layer. Revisit if: a **worker port**
+becomes reachable beyond the tailnet (`tailscale serve`/`funnel`, an exit node, subnet
+routing, UPnP on a bench router — note v2 named the daemon here, which is the *safest*
+node); a worker is left bound to a routable address after debugging; another person or
+device joins the tailnet; a tool gains the ability to damage something irreplaceable; or
+a second daemon starts sharing a worker, since `_session_approved` and `_tier_highwater`
+are per-process and a later daemon starts with an empty high-water table.
 
-If HITL approvals are later routed through ArcticBase, the approval channel inherits
-this boundary: anything that can POST to ArcticBase can approve a `critical` operation.
-Under D2 that is consistent rather than a hole — the same devices are trusted either
-way. It is recorded here so the ArcticBase spec makes that inheritance a stated choice
-rather than an accident.
+Note also that the exfiltration surface is broader than v2's "flash contents": `mitm`
+holds intercepted session cookies and bearer tokens, `frida` reads process memory.
 
-There is also a simpler option worth carrying into that spec, on plumbing grounds
-rather than security: let ArcticBase **render** the decision document — target, offset,
-byte count, pre-image — and let the answer come back over the daemon's own socket. PARE
-then never has to poll ArcticBase for a response.
+**The cheaper control that fits this deployment better than tokens:** Tailscale ACLs
+restricting worker ports to the daemon node's tag, plus a startup check that Funnel is
+off. No token management, and it makes D2 rest on something enforced rather than on a
+bind string.
 
-## 7. Failure modes and operations
+## 7. Operations
 
-Most of this already exists from the dynamic-loading work:
+### 7.1 Who starts the workers
 
-- **Host down / port closed.** `connect()` fails, `load()` returns `ok=False` with an
-  `error_kind`, and `/worker list` shows the endpoint and the error. The per-worker
-  connect bound means one dark host does not delay the others; the cascade fix means it
-  does not cancel their discovery either.
-- **Link drops mid-dispatch.** Surfaces through the existing error path and is audited.
-  A dropped link during a *hardware write* is the genuinely dangerous case, and is a
-  reason the hardware worker's write tools must verify after writing rather than
-  assuming success — that belongs to the hardware spec, but it is motivated here.
-- **Latency.** Every call now crosses a network hop. Frida hook-event polling is the
-  sensitive one; the capture layer already buffers worker-side, so the cost is per-poll
-  rather than per-event.
-- **Wrong bind address.** The most likely misconfiguration is a worker bound to
-  loopback on the Pi while the daemon dials its tailnet address. It presents as a clean
-  connection refusal with the endpoint in `last_error`, which is the right failure.
+Nothing in v2 answered this. Each networked worker needs a systemd unit on its host
+(`Restart=on-failure`, `After=tailscaled.service`), and the Pi's needs to survive a
+power cycle. The unit is part of this design's deliverable, not an exercise for the
+operator.
+
+### 7.2 The `POLL_TOOLS` trap
+
+The sharpest finding in the review, and it is invisible from either side alone.
+
+`pare/handback.py:18` puts `frida_read_hook_events` in `POLL_TOOLS`, and
+`pare/agent.py:412` reads `if tc.name not in POLL_TOOLS and guard.tripped(...)` — a
+deliberate, correct exemption of that tool from the spin handback, because polling is
+supposed to repeat. Meanwhile `client_pool.py:440` awaits `client.call_tool()` with no
+bound, and `ClientSession` is constructed without `read_timeout_seconds` (verified:
+default `None`), so the only backstop is the SDK's 300s `sse_read_timeout`.
+
+So the one tool the system prompt tells the model to hammer becomes the one where a
+degraded link is invisible for up to five minutes per call, **and** the one tool whose
+handback is switched off. Slow polling becomes a silently wedged session.
+
+*Required before frida moves:* the `read_timeout` field from §5.1(b), set low for this
+worker, **and** a handback trigger that fires on N consecutive timeouts or errors on a
+`POLL_TOOL` — distinct from N consecutive empty-but-successful polls, which are normal.
+
+### 7.3 Large payloads are not solved, and must not be assumed solved
+
+v2 said "the capture layer already buffers worker-side". **That is wrong.**
+`CaptureLayer` runs *daemon-side* and substitutes a stub for oversized results
+(`maybe_substitute`, called after the result has already crossed the network). The
+worker-side buffering that makes frida polling cheap is `pare-frida-mcp`'s own
+`SessionManager.read_events()` (`since_seq`/`limit`/`buffered_remaining`). Right
+conclusion, wrong component — an implementer tuning latency would read the wrong file.
+
+For the hardware worker this matters: a multi-megabyte flash dump is one
+`CallToolResult` over one HTTP response, and no chunking or streaming story exists.
+Suggestively, `pare-frida-mcp/config.py` defines `capture_dir`, `blob_threshold` and
+`max_disk_per_session` that are **read nowhere** — someone anticipated this and stopped.
+The hardware spec must decide whether large artifacts spool worker-side (and how the
+operator reaches them, given the daemon's capture store is on the server) or are chunked
+over MCP. This spec's job is only to refuse to let that be assumed.
+
+### 7.4 Diagnosis
+
+Beyond §5.1(c): `WorkerStatus` carries `transport` but not `endpoint`, so for a healthy
+networked worker there is no way to see which host you are talking to without reading
+`workers.yaml`. And `/health` — the command an operator reflexively types first — is
+strictly less informative than `/worker list`: no `last_error`, no transport, no
+endpoint. Both are small additions and both matter more once three machines are
+involved.
+
+### 7.5 The bench workflow
+
+`pare-cli` talks over a **Unix domain socket** — local IPC only. The operator at the Pi
+cannot talk to PARE from the Pi; they SSH into the inference server and run `pare-cli`
+there. The Pi hosts a *worker* and (per D8) an *approval surface*; it is not where the
+conversation happens. v2's deployment table implied otherwise and should not.
 
 ## 8. Testing
 
-`agent_core` already has the fixtures: `streamable_http_stub.py` (a FastMCP worker
-served with uvicorn) and `test_conformance_streamable_http.py`. New:
-
-- `run_worker` serves stdio when told to and HTTP when told to, from one server object.
-- `run_worker` **rejects `0.0.0.0`** — the security-relevant assertion in this design,
-  and it must fail loudly rather than warn.
-- The bind default is loopback when `PARE_WORKER_HOST` is unset.
-- `WorkerSpec.request_timeout` reaches `streamablehttp_client`, and a slow worker
-  produces a bounded failure rather than a hang.
-- End to end: `WorkerManager.load()` against a real HTTP worker on loopback — load,
-  list tools, dispatch, unload — extending `scripts/live_worker_lifecycle.py`, which
-  currently covers only the stdio path.
+- `run_worker` serves stdio and http from one server object; **rejects any wildcard
+  bind** via `is_unspecified`, including `::` and `0`; resolves an interface name.
+- After a **failed** HTTP connect, no live `httpx.AsyncClient` remains and
+  `_transport_ctx is None` — §5.1(a)'s regression test.
+- `read_timeout` genuinely bounds a slow tool call; `connect_timeout` genuinely bounds a
+  dial to a black hole. Two separate tests, because they are two parameters.
+- An unreachable endpoint yields `error_kind="unreachable"` and a `last_error`
+  containing the endpoint.
+- A generation bump occurs on transport error for a non-stdio worker.
+- Liveness: a worker whose host vanishes transitions out of `loaded` without a dispatch.
+- End to end against a real HTTP worker on loopback. **Note:**
+  `scripts/live_worker_lifecycle.py` lives in **PARE**, not `agent_core`, and asserts on
+  `_owner_pid` and process reaping — meaningless for HTTP. Its extension is step 3 work
+  and needs transport-branched assertions, not an appended case.
 
 ## 9. Sequencing
 
-1. **`agent_core`** — `request_timeout` plumbed through the client, `serve.py`, tests.
-   Ships as v1.9.0; additive.
-2. **The three existing workers** — adopt `run_worker`, declare the `agent_core`
-   dependency. No behaviour change while they stay stdio.
-3. **Move `frida` to the laptop** — the proof. It runs there over HTTP on the tailnet;
-   `workers.yaml` gains the endpoint and `autoload: false`; the adb tunnel disappears.
-   Verified by a real attach driven from the server.
-4. **`pare-hardware-mcp`** then has a transport to be born into, and its own spec.
+1. **`agent_core` bug fixes** — §5.1(a) close leak, (b) timeout split and the
+   `streamable_http_client` migration, (c) `unreachable` error kind. Plus the §6
+   generation-on-transport-error rule, `serverInfo` capture, and the §5.4 audit
+   corrections. Ships as v1.9.0.
+2. **`pare-worker-kit`** — new package; `agent_core` re-exports the constant.
+3. **The three existing workers** — adopt `run_worker`, depend on the kit rather than
+   `agent_core`. No behaviour change while they stay stdio.
+4. **Liveness (D7) and the operator-facing corrections** — §5.6 transport-aware copy,
+   §7.4 endpoint column, §7.2's poll-tool handback trigger.
+5. **Move `frida` to the laptop** — the proof, with a systemd unit. Verified by a real
+   attach driven from the server, and by measuring whether hook-event polling over the
+   tailnet is usable.
+6. **`pare-hardware-mcp`** then has a transport, a liveness story, and a resolved
+   large-payload question to be born into.
 
 ## 10. Risks
 
-- **Frida over a network hop may be too slow** for high-frequency hook events. Unknown
-  until measured. If it is a problem the answer is worker-side batching, which the
-  capture layer already does — but this design does not assume that is enough, and step
-  3 exists partly to find out.
-- **The boundary decision ages.** §6 lists four triggers precisely because this is the
-  kind of assumption that stays true until one day it quietly does not. The cheap
-  re-entry path is documented so revisiting it is a small task rather than an argument.
-- **`0.0.0.0` rejection will annoy someone at some point**, most likely while debugging
-  a tunnel at a bench. That is the moment it is protecting against, so it stays — but
-  it should fail with a message that names the tailnet address as the thing to bind
-  instead, rather than just refusing.
+- **Frida over a network hop may be too slow** for hook-event polling. Genuinely
+  unknown; step 5 measures it. §7.2 is what stops "too slow" becoming "silently stuck".
+- **The boundary decision ages.** §6 lists the triggers because this is an assumption
+  that stays true until it quietly does not.
+- **A new package is a new thing to version.** `pare-worker-kit` is justified by the Pi's
+  install weight, but it adds a release to keep in step with `agent_core`'s constant.
+- **Wildcard rejection will annoy someone at a bench.** That is the moment it protects
+  against. The interface-name path (D3) is what keeps it from being merely obstructive.
