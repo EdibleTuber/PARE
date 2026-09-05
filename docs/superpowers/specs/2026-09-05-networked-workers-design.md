@@ -101,8 +101,30 @@ boundary as the *client* side: transport, enforcement, lifecycle. `run_worker` i
 the code the worker runs.
 
 `pare-worker-kit` depends on `mcp` alone and exports `RISK_TIER_META_KEY` and
-`run_worker`. `agent_core` re-exports the constant from it, so the daemon side is
-unchanged and the constant keeps one definition.
+`run_worker`.
+
+**Amended during implementation:** v3 said `agent_core` would *re-export* the
+constant from the kit, "so the constant keeps one definition". That does not
+survive contact with the deployment. `agent_core` declares its dependencies as
+git URLs, so re-exporting would make the generic framework depend on a
+PARE-named package and impose a publish ordering on every release — and more
+importantly, the daemon and the Pi worker are separately installed packages on
+**different machines** that never share a Python environment. A shared import
+cannot guarantee agreement across that gap; version skew between two installed
+packages is exactly as possible with a re-export as with two literals.
+
+`RISK_TIER_META_KEY` is a **wire** constant, so both sides state it and a
+**bidirectional guard test** enforces agreement: each package's suite asserts
+the other's literal matches, skipping when the other is not installed. Neither
+package depends on the other. Note the failure mode this guards is silent and
+safe-directioned — if the strings drift, advertised tiers stop being read and
+every tool resolves at its floor — which is precisely why it needs a test
+rather than trust.
+
+Note also that the three workers already imported `agent_core.workers.risk`
+**without declaring `agent_core` as a dependency at all**; they worked only
+because they shared PARE's venv. The split fixes an undeclared dependency as
+well as a heavy one.
 
 **D7 — Liveness is checked, not assumed.** `loaded` currently means "load succeeded and
 nothing has told us otherwise" — there is no heartbeat anywhere in
@@ -183,7 +205,7 @@ prints the full text, so a good message reaches the operator unchanged.
 Dependencies: `mcp` only.
 
 ```python
-RISK_TIER_META_KEY = "agent_core/risk_tier"   # single definition; agent_core re-exports
+RISK_TIER_META_KEY = "agent_core/risk_tier"   # wire constant; guard-tested both ways
 
 def run_worker(server, *, default_transport="stdio", env_prefix="AGENT_WORKER_") -> None:
     """Serve a FastMCP worker over stdio or Streamable HTTP.
@@ -440,7 +462,7 @@ conversation happens. v2's deployment table implied otherwise and should not.
    `streamable_http_client` migration, (c) `unreachable` error kind. Plus the §6
    generation-on-transport-error rule, `serverInfo` capture, and the §5.4 audit
    corrections. Ships as v1.9.0.
-2. **`pare-worker-kit`** — new package; `agent_core` re-exports the constant.
+2. **`pare-worker-kit`** — new package; bidirectional guard test on the constant.
 3. **The three existing workers** — adopt `run_worker`, depend on the kit rather than
    `agent_core`. No behaviour change while they stay stdio.
 4. **Liveness (D7) and the operator-facing corrections** — §5.6 transport-aware copy,
@@ -458,6 +480,8 @@ conversation happens. v2's deployment table implied otherwise and should not.
 - **The boundary decision ages.** §6 lists the triggers because this is an assumption
   that stays true until it quietly does not.
 - **A new package is a new thing to version.** `pare-worker-kit` is justified by the Pi's
-  install weight, but it adds a release to keep in step with `agent_core`'s constant.
+  install weight, but it adds a release to keep in step, and the guard test only
+  fires in an environment where both packages are installed — which the Pi is
+  not. CI must run at least one job with both.
 - **Wildcard rejection will annoy someone at a bench.** That is the moment it protects
   against. The interface-name path (D3) is what keeps it from being merely obstructive.
