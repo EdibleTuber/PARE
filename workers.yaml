@@ -18,6 +18,7 @@ workers:
     command: /mnt/secondary/projects/PARE/.venv/bin/pare-frida-mcp
     transport: stdio
     risk_default: low           # advertised per-tool tiers govern; reads auto-execute, dangerous tools gate (read_memory/java_hook/write_memory=high, execute_script=critical)
+    autoload: true
     capability_tags: [mobile, dynamic, android, frida]
 
   # In-house static-analysis worker (pare-static-mcp). Seven read-only APK tools,
@@ -30,6 +31,7 @@ workers:
     command: /mnt/secondary/projects/PARE/.venv/bin/pare-static-mcp
     transport: stdio
     risk_default: low
+    autoload: true
     capability_tags: [static, apk, android]
 
   # In-house HTTPS-traffic worker (pare-mitm-mcp). ELEVEN tools over a localhost
@@ -46,7 +48,21 @@ workers:
     command: /mnt/secondary/projects/PARE/.venv/bin/pare-mitm-mcp
     transport: stdio
     risk_default: low
+    autoload: true
     capability_tags: [traffic, https, mitm, dynamic]
+
+  # Declared but NOT connected at boot: hardware work is occasional, and its
+  # tool schemas cost context in every turn that isn't doing it. Load it when a
+  # target actually has hardware in play:  /worker load hardware
+  # The worker itself is still being built (../pare-hardware-mcp), so a load
+  # today reports spawn_failed — which is the honest answer, and visible in
+  # /worker list rather than a silently absent worker.
+  hardware:
+    command: /mnt/secondary/projects/PARE/.venv/bin/pare-hardware-mcp
+    transport: stdio
+    risk_default: medium        # FLOOR; per-tool wire tiers and pins escalate
+    autoload: false
+    capability_tags: [hardware, uart, jtag, glitch]
 
   # --- apk_re_agents (Streamable HTTP) — disabled until services run + discovery hardened ---
   # unpacker:
