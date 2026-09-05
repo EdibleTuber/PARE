@@ -211,3 +211,58 @@ async def test_list_has_no_error_footer_when_the_fleet_is_healthy():
     assert out == render_table(expected_rows), (
         "with no last_error on any worker, /worker list must be exactly the "
         "table — no footer appended")
+
+
+async def test_frida_fast_path_short_circuits_when_unloaded():
+    """No approval prompt for a call that cannot succeed."""
+    from pare.commands import _frida
+
+    agent = MagicMock()
+    agent.worker_manager.unavailable_reason.return_value = (
+        "worker 'frida' is not loaded — Ask the operator to run /worker load frida.")
+    agent.tool_pool.call_tool = AsyncMock()
+    ctx = MagicMock(agent=agent)
+
+    data = await _frida.call(ctx, "list_devices")
+    assert data["error"] is True
+    assert "not loaded" in data["summary"]
+    agent.tool_pool.call_tool.assert_not_awaited(), "must not reach the risk pool"
+
+
+async def test_frida_fast_path_works_without_a_manager():
+    """The four fast-path test files build agents with only tool_pool; an
+    unguarded attribute access would break ~22 existing cases."""
+    from pare.commands import _frida
+
+    result = MagicMock(isError=False)
+    result.content = [MagicMock(type="text", text='{"devices": []}')]
+    agent = type("A", (), {"tool_pool": MagicMock(call_tool=AsyncMock(return_value=result))})()
+    data = await _frida.call(MagicMock(agent=agent), "list_devices")
+    assert data == {"devices": []}
+
+
+async def test_mitm_status_handles_an_error_result():
+    """Pre-existing bug, independent of unload: mitm.py json.loads()es the
+    result with no isError check, so any failure — including the mitm daemon
+    simply being down — raises JSONDecodeError out of the command."""
+    from pare.commands.mitm import Mitm
+
+    err = MagicMock(isError=True)
+    err.content = [MagicMock(type="text", text="mitm.capture_health call failed: boom")]
+    agent = MagicMock()
+    agent.worker_manager.unavailable_reason.return_value = None
+    agent.tool_pool.call_tool = AsyncMock(return_value=err)
+
+    out = "\n".join([m.text async for m in Mitm().run("status", MagicMock(agent=agent))])
+    assert "call failed" in out or "unavailable" in out.lower()
+
+
+async def test_mitm_status_short_circuits_when_unloaded():
+    from pare.commands.mitm import Mitm
+
+    agent = MagicMock()
+    agent.worker_manager.unavailable_reason.return_value = "worker 'mitm' is not loaded"
+    agent.tool_pool.call_tool = AsyncMock()
+    out = "\n".join([m.text async for m in Mitm().run("status", MagicMock(agent=agent))])
+    assert "not loaded" in out
+    agent.tool_pool.call_tool.assert_not_awaited()
