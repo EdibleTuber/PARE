@@ -172,3 +172,42 @@ async def test_tools_of_unloaded_worker_points_at_worker_list():
     mgr.tools_of.return_value = []
     out = await _run(Worker(), "tools hardware", _ctx(mgr))
     assert "worker list" in out
+
+
+async def test_list_shows_the_full_last_error_not_just_the_clipped_column():
+    """render_table clips each column to fit an 8-column, 100-char-wide row —
+    a realistic last_error (a full spawn_failed path from a stale workers.yaml
+    entry, per spec 8.4) is 114 chars on its own, so the table cell alone
+    shows only the error class, not the path an operator needs to fix it.
+    The command output is the only place this shows up, so the full string
+    must appear somewhere in it even though the table cell is clipped."""
+    long_error = (
+        "FileNotFoundError: [Errno 2] No such file or directory: "
+        "'/mnt/secondary/projects/PARE/.venv/bin/pare-hardware-mcp'")
+    mgr = MagicMock()
+    mgr.status.return_value = [
+        _status("frida", True, 19),
+        _status("hardware", False, 0, err=long_error, autoload=False),
+    ]
+    out = await _run(Worker(), "list", _ctx(mgr))
+    assert long_error in out, (
+        "the full last_error string must appear in the output somewhere "
+        "(e.g. a footer), even though the table column itself is clipped")
+
+
+async def test_list_has_no_error_footer_when_the_fleet_is_healthy():
+    """A healthy fleet (no worker has a last_error) must print exactly the
+    table — no trailing footer lines — so the common case stays clean."""
+    from pare.commands._snapshot_render import render_table
+
+    mgr = MagicMock()
+    mgr.status.return_value = [_status("frida", True, 19)]
+    out = await _run(Worker(), "list", _ctx(mgr))
+    expected_rows = [{
+        "worker": "frida", "state": "loaded", "tools": "19",
+        "transport": "stdio", "floor": "low", "boot": "auto",
+        "tags": "a, b", "last error": "",
+    }]
+    assert out == render_table(expected_rows), (
+        "with no last_error on any worker, /worker list must be exactly the "
+        "table — no footer appended")

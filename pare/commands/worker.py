@@ -63,8 +63,9 @@ class Worker(Command):
 
     @staticmethod
     def _render_list(mgr) -> str:
+        statuses = mgr.status()
         rows = []
-        for s in mgr.status():
+        for s in statuses:
             rows.append({
                 "worker": s.name,
                 "state": "loaded" if s.loaded else "unloaded",
@@ -75,7 +76,20 @@ class Worker(Command):
                 "tags": ", ".join(s.capability_tags),
                 "last error": s.last_error or "",
             })
-        return render_table(rows)
+        table = render_table(rows)
+        # Eight columns competing for render_table's 100-char budget clip
+        # `last error` down to the error's class — a realistic spawn_failed
+        # message (a stale `command:` path in workers.yaml, spec 8.4) is well
+        # over 100 chars on its own, so the table cell alone never shows the
+        # path an operator needs to fix it. This is the only place that path
+        # surfaces, so append it in full below the table — only when at least
+        # one worker actually has an error, so a healthy fleet stays a clean
+        # table.
+        errors = [(s.name, s.last_error) for s in statuses if s.last_error]
+        if not errors:
+            return table
+        footer = "\n".join(f"{name}: {err}" for name, err in errors)
+        return f"{table}\n\n{footer}"
 
     @staticmethod
     def _render_load(res) -> str:
