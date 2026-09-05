@@ -236,6 +236,43 @@ observed from the client side rather than reasoned about. Retrying as a real cli
 must, it connected after three refused attempts: `astartup` finished loading all three
 workers before the daemon accepted anything.
 
+
+## Phase 2 — rulings
+
+Decisions taken during execution without checking in, with the cost if wrong.
+
+| # | Ruling | Cost if wrong |
+|---|---|---|
+| 1 | Carry Task 6's deliberately-stubbed test into the dispatch as a **named defect to fix**, not code to transcribe | An implementer ships a vacuous test the review must catch |
+| 2 | Split Task 8's smoke test — script the non-interactive half, reserve the model-driven half | The model-facing handback stays verified-by-test. **This is what happened** |
+| 3 | Make `scripts/live_worker_lifecycle.py` a standing verification step, not just pytest | None; it caught a real script defect |
+| 4 | Split the final fixes into two waves rather than one of fifteen, applying the phase-1 fix-round cap | One extra scoped re-review |
+
+Ruling 2 is the one that bit, and usefully: the reserved check ran and came back
+inconclusive twice. Recorded as inconclusive rather than dressed up as a pass.
+
+## Open decisions deliberately left to the operator
+
+These are choices the build surfaced but did not make. Each is documented honestly
+where an operator will meet it, so it is a live choice rather than an inherited default.
+
+- **`mitm_delete_rule` and `mitm_clear_rules` remain unpinned at wire tier `low`**, so
+  they auto-execute without approval. They mutate *interception* state, not target
+  state, which is the argument for leaving them — but clearing every rule mid-capture
+  is invisible to the operator. `workers.yaml` and `README.md` now say so plainly.
+  Pinning them is a one-line change to `risk_overrides` if the trade looks wrong in use.
+- **`hardware` is declared but unbuilt.** `../pare-hardware-mcp` is an empty directory,
+  so `/worker load hardware` reports `spawn_failed` with the path. That is deliberate:
+  it exercises the catalog and the failure path honestly, rather than hiding an entry
+  until the worker exists.
+- **`enable_apk_re_agents` stays default-off.** The `static_analyze` namespace overlap
+  with the `static` worker (spec §8.2) is handled — the handback trigger now keys on
+  executor presence rather than the name prefix — but the flag was already off and this
+  build gave no reason to turn it on.
+- **The `agent_core` v1.8.0 tag was re-pointed once**, from `3d8e6ec` to `b62ee1a`,
+  before it was ever pushed. The remote has only held `b62ee1a`. Recorded because a
+  moved release tag is normally a real hazard; here the timeline makes it a non-event.
+
 ## 7. Status of related documents
 
 | Document | State |
