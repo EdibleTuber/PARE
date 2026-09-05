@@ -86,6 +86,11 @@ class PareAgent(Agent):
         "cat", "head", "tail", "ls", "grep", "find", "read_lines",
     })
 
+    worker_manager = None   # replaced in astartup(); same sentinel setup() sets,
+                             # kept as a class default so a bare PareAgent() (as
+                             # built by tests that predate worker wiring) reads
+                             # None instead of raising AttributeError.
+
     @property
     def capture_store(self) -> CaptureStore | None:
         return _current_store.get()
@@ -274,8 +279,16 @@ class PareAgent(Agent):
                 # the rest of the turn; resolved remembers which candidate groups
                 # this channel has already been asked about (persists across turns
                 # via self._disambig_resolved so an answered question isn't re-asked).
+                #   Trigger 3 (unloaded worker): a tool whose worker was
+                #     unloaded mid-session. Needs its own trigger because
+                #     neither of the above fires — distinct frida_* tools are
+                #     distinct RepeatGuard signatures, and POLL_TOOLS exempts
+                #     frida_read_hook_events from the spin handback by design
+                #     (system.md tells the model to poll it repeatedly).
                 name_searches: dict[str, set[str]] = {}
                 resolved = self._disambig_resolved.setdefault(ctx.channel_id, set())
+                unavailable_hits = 0
+                UNAVAILABLE_HANDBACK_AFTER = 2
 
                 def _settle_and_handback(question: str, done_ids: set[str]) -> ResponseMessage:
                     """Fill a synthetic tool result for every tool_call id in this
@@ -298,6 +311,18 @@ class PareAgent(Agent):
                     ])
                     done_ids: set[str] = set()
                     for tc in tool_calls:
+                        mgr = self.worker_manager
+                        if mgr is not None:
+                            owner = mgr.worker_of(tc.name)
+                            why = mgr.unavailable_reason(owner) if owner else None
+                            if why:
+                                unavailable_hits += 1
+                                if unavailable_hits >= UNAVAILABLE_HANDBACK_AFTER:
+                                    yield _settle_and_handback(
+                                        f"{why}\n\nTell me how to proceed without "
+                                        f"it, or load it and say when to retry.",
+                                        done_ids)
+                                    return
                         if tc.name in COMMIT_TOOLS:
                             cls = normalize_class(str((tc.arguments or {}).get("cls", "")))
                             for pat, cands in name_searches.items():
