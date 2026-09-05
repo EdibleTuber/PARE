@@ -143,6 +143,28 @@ worked around:
   eleven, six of which mutate state, with `inject_request` at `critical` — and no
   operator pin covered any of them. Pins added.
 
+## 6b. Verified by use, not only by test
+
+The suite exercises the lifecycle against a toy stub. Before starting phase 2 the
+whole thing was also run against the real `pare-static-mcp` binary via
+[`scripts/live_worker_lifecycle.py`](../../scripts/live_worker_lifecycle.py) —
+no inference server required, since the lifecycle never touches the model.
+
+All ten sections passed: the constructor's duck-type guard rejects a bare
+`MCPClientPool`; a real load registers 10 prefixed tools and spawns a live pid; wire
+tiers resolve through the gate; `status()` matches reality; unload removes the tools
+and reaps the process; the spec is gone so a dispatch cannot resurrect it; reload
+yields a genuinely fresh pid twice over; a missing binary fails with
+`spawn_failed`, surfaces in `last_error`, and leaves no residue; `close_all` reaps
+everything; and the audit log carries `worker_loaded`/`worker_unloaded` rows with
+`action`, `resolved_command`, `command_mtime` and `command_size` — so a reload is
+distinguishable from an unload plus a load, and an artifact swap is visible.
+
+Two failures surfaced during the run, both in the harness rather than the code: it
+assumed a `hardware` worker that plan 2 has not declared yet, and it asserted on
+`mtime`/`size` where the shipped fields are `command_mtime`/`command_size`. Worth
+recording, because it is what an unrun assumption looks like when it finally runs.
+
 ## 7. Status of related documents
 
 | Document | State |
