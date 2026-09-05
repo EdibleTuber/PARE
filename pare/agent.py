@@ -86,11 +86,6 @@ class PareAgent(Agent):
         "cat", "head", "tail", "ls", "grep", "find", "read_lines",
     })
 
-    worker_manager = None   # replaced in astartup(); same sentinel setup() sets,
-                             # kept as a class default so a bare PareAgent() (as
-                             # built by tests that predate worker wiring) reads
-                             # None instead of raising AttributeError.
-
     @property
     def capture_store(self) -> CaptureStore | None:
         return _current_store.get()
@@ -127,6 +122,12 @@ class PareAgent(Agent):
         # passes in _attach_registries, which runs BEFORE astartup. Same pattern
         # the framework uses for command_registry (agent_core/runtime.py:55-58).
         # The real manager is built in astartup(), once tool_executor exists.
+        #
+        # INSTANCE attribute, deliberately: `requires` is a hasattr() check, so
+        # a class-level `worker_manager = None` would satisfy it on every
+        # instance and deleting this line would no longer fail boot — the check
+        # spec 9.1 asked for would silently protect nothing. Unit tests that
+        # build a bare PareAgent() without setup() stub it themselves.
         self.worker_manager = None
         self._launch_ts = time.time()   # process start; per-launch refinement deferred (spec §11)
         self._capture_stores = CaptureStoreManager(

@@ -324,3 +324,38 @@ async def test_failed_reload_of_an_unloaded_worker_claims_no_destruction():
     assert "boom" in out
     assert "attach" not in out.lower() and "hook" not in out.lower()
     assert "slower" not in out.lower() and "reprocess" not in out.lower()
+
+
+async def test_worker_reports_a_missing_manager_instead_of_raising():
+    """Defence in depth. health.py and _frida.py both guard `if mgr is not
+    None`; worker.py did not, so `/worker` with an unbound manager died on
+    `mgr.status()` with an AttributeError instead of saying what was wrong."""
+    agent = MagicMock()
+    agent.worker_manager = None
+    out = await _run(Worker(), "list", MagicMock(agent=agent))
+    assert "not available" in out.lower()
+    assert "starting" in out.lower(), "point at the likely cause"
+
+
+def test_requires_is_not_disarmed_by_a_class_level_default():
+    """`requires` is a hasattr() check (CommandRegistry.build). A CLASS-level
+    `worker_manager = None` on PareAgent satisfies it on every instance, so
+    deleting the sentinel from setup() would not fail boot and the check would
+    protect nothing — exactly what spec 9.1 asked it to prevent."""
+    from pare.agent import PareAgent
+    assert not hasattr(PareAgent, "worker_manager"), (
+        "the sentinel must be an INSTANCE attribute set by setup(), or "
+        "requires=('worker_manager',) is vacuous")
+
+
+def test_forgetting_the_sentinel_fails_at_boot():
+    """The guarantee spec 9.1 actually asked for."""
+    from agent_core.commands.builtin import BUILTIN_COMMANDS
+    from agent_core.commands.registry import CommandRegistry
+    from pare.agent import PareAgent
+    agent = PareAgent()          # setup() never run: the sentinel is missing
+    for cmd in BUILTIN_COMMANDS:  # satisfy the builtins so only Worker can fail
+        for attr in cmd.requires:
+            setattr(agent, attr, MagicMock())
+    with pytest.raises(RuntimeError, match="worker_manager"):
+        CommandRegistry.build(agent, [Worker])

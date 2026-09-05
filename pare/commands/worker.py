@@ -48,7 +48,19 @@ class Worker(Command):
         parts = raw_args.split()
         sub = parts[0] if parts else "list"
         target = parts[1] if len(parts) > 1 else None
-        mgr = ctx.agent.worker_manager
+        mgr = getattr(ctx.agent, "worker_manager", None)
+
+        if mgr is None:
+            # requires=("worker_manager",) only proves the attribute exists at
+            # boot; setup() binds it to None and astartup() replaces it with the
+            # real manager. Not reachable today (the daemon binds with
+            # start_serving=False and awaits astartup() before accepting), but
+            # health.py and _frida.py both guard this and an AttributeError out
+            # of mgr.status() would tell the operator nothing.
+            yield ResponseMessage(
+                text="the worker manager is not available — the daemon may "
+                     "still be starting. Try /worker again in a moment.")
+            return
 
         if sub not in _SUBCOMMANDS:
             yield ResponseMessage(
