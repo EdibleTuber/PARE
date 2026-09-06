@@ -1,7 +1,7 @@
 # Networked MCP workers — design
 
 **Date:** 2026-09-05
-**Status:** v3 — revised after a four-lens review panel; pending review
+**Status:** v3 — steps 1-5 implemented and verified on real hardware (2026-09-06)
 **Repos:** `agent_core`, a new `pare-worker-kit`, the three existing workers, `PARE`
 **Follows:** [`2026-09-04-dynamic-worker-loading-design.md`](2026-09-04-dynamic-worker-loading-design.md)
 **Related decision:** [`../2026-09-05-approval-channel-decision.md`](../2026-09-05-approval-channel-decision.md)
@@ -504,16 +504,37 @@ conversation happens. v2's deployment table implied otherwise and should not.
    subprocesses: identical tool sets, every risk tier intact in `_meta`.
 4. **Liveness (D7) and the operator-facing corrections** — §5.6 transport-aware copy,
    §7.4 endpoint column, §7.2's poll-tool handback trigger.
-5. **Move `frida` to the laptop** — the proof, with a systemd unit. Verified by a real
-   attach driven from the server, and by measuring whether hook-event polling over the
-   tailnet is usable.
+5. ~~**Move `frida` to the laptop**~~ — **DONE, 2026-09-06.** Running under systemd on
+   the laptop's tailnet address, driven from the inference server:
+   `scripts/smoke_networked_frida.py` passed every check — handshake and 19 tools,
+   worker-reported identity (not the SDK's version), risk tiers intact across the wire,
+   a real device enumerated from a machine that cannot see it, poll latency measured
+   (see §10), liveness observed, and on a broken link the probe reporting unreachable,
+   `last_error` naming the machine, and a held `scope: session` approval evicted.
+   Procedure: [`../2026-09-06-networked-frida-smoke-test.md`](../2026-09-06-networked-frida-smoke-test.md).
 6. **`pare-hardware-mcp`** then has a transport, a liveness story, and a resolved
    large-payload question to be born into.
 
 ## 10. Risks
 
-- **Frida over a network hop may be too slow** for hook-event polling. Genuinely
-  unknown; step 5 measures it. §7.2 is what stops "too slow" becoming "silently stuck".
+- ~~**Frida over a network hop may be too slow** for hook-event polling.~~ **MEASURED,
+  2026-09-06 — not a risk.** `pare-frida-mcp` on a laptop, driven from the inference
+  server over a Tailscale tailnet, 20 samples:
+
+  | | median | p95 | min | max | errors |
+  |---|---:|---:|---:|---:|---:|
+  | loopback baseline (same host) | 4.7 ms | 4.9 ms | 4.2 ms | 5.5 ms | 0 |
+  | over the tailnet | 8.4 ms | 11.4 ms | 7.9 ms | 12.6 ms | 0 |
+
+  The hop costs **~3.7 ms** at the median. p95 is 1.36x the median, so the link is
+  stable rather than merely fast on average — which is the distinction that matters,
+  because an unstable link makes the co-pilot loop feel broken without ever failing a
+  call. §7.2's handback remains the guard for a link that degrades LATER; it is not
+  needed for the steady state.
+
+  Note this is a laptop on the operator's own LAN. A Raspberry Pi at a bench, possibly
+  on wifi, is a longer hop and should be re-measured rather than assumed — but the
+  mechanism is not the bottleneck, which is what step 5 existed to find out.
 - **The boundary decision ages.** §6 lists the triggers because this is an assumption
   that stays true until it quietly does not.
 - **A new package is a new thing to version.** `pare-worker-kit` is justified by the Pi's
