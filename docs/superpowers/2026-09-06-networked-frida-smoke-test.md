@@ -89,8 +89,33 @@ strand the worker.
 
 ### 1.5 The unit
 
-```ini
-# /etc/systemd/system/pare-frida-mcp.service
+**Generate it; do not paste it.** An earlier version of this doc gave a template with
+`User=<you>` and `ExecStart=/full/path/to/venv/bin/pare-frida-mcp`, and the placeholders
+survived into a real unit file. systemd reported:
+
+```
+Process: ExecStart=/full/path/to/venv/bin/pare-frida-mcp (code=exited, status=217/USER)
+```
+
+`217/USER` means it could not resolve the `User=` line. It never got as far as the
+binary, which would then have failed `203/EXEC` for the same reason. A placeholder that
+looks fillable is a placeholder that gets shipped, so substitute the values instead.
+
+**With the venv active**, check what you are about to write:
+
+```bash
+echo "user:    $(whoami)"
+echo "binary:  $(command -v pare-frida-mcp)"
+echo "host if: tailscale0 -> $(ip -4 -o addr show tailscale0 | awk '{print $4}')"
+```
+
+All three must be non-empty. An empty `binary` means the venv is not active or
+`pip install -e .` has not run; an empty `host if` means tailscaled is not up yet.
+
+Then write the unit from those values:
+
+```bash
+sudo tee /etc/systemd/system/pare-frida-mcp.service > /dev/null <<EOF
 [Unit]
 Description=PARE frida worker
 After=network-online.target tailscaled.service
@@ -98,17 +123,30 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=<you>
+User=$(whoami)
 Environment=AGENT_WORKER_TRANSPORT=http
 Environment=AGENT_WORKER_HOST=tailscale0
 Environment=AGENT_WORKER_PORT=9101
-ExecStart=/full/path/to/venv/bin/pare-frida-mcp
+ExecStart=$(command -v pare-frida-mcp)
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+EOF
 ```
+
+Note the **unquoted** `<<EOF`: the shell expands `$(whoami)` and `$(command -v ...)` as it
+writes. Quoting it (`<<'EOF'`) would put the literal `$(...)` in the file and reproduce
+exactly the failure this replaces.
+
+Read back what landed before enabling anything:
+
+```bash
+grep -E '^(User|ExecStart)=' /etc/systemd/system/pare-frida-mcp.service
+```
+
+Neither line may contain `<`, `>` or `$`. Then:
 
 ```bash
 sudo systemctl daemon-reload
@@ -118,6 +156,15 @@ sudo ss -tlnp | grep 9101        # MUST show the tailnet IP, never 0.0.0.0
 ```
 
 That last line is the one worth actually reading.
+
+**If it still will not start**, the exit code names the cause:
+
+| Code | Means | Usually |
+|---|---|---|
+| `217/USER` | `User=` unresolvable | placeholder left in, or a typo'd username |
+| `203/EXEC` | `ExecStart=` not executable | wrong path, or the venv moved |
+| `1` with a wildcard message | the worker refused the bind | `AGENT_WORKER_HOST` resolved to `0.0.0.0` — this is the refusal working |
+| `1`, no output | look at `journalctl -u pare-frida-mcp -n 50` | usually a missing dependency from a skipped `pip install` |
 
 ### 1.6 The emulator
 
