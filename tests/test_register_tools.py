@@ -100,3 +100,18 @@ async def test_astartup_survives_a_worker_that_cannot_spawn(tmp_path):
     assert statuses["stub"].loaded is False
     assert statuses["stub"].last_error
     assert statuses["later"].loaded is False, "autoload: false must be skipped"
+
+
+async def test_astartup_starts_liveness_and_ashutdown_stops_it(tmp_path):
+    """A probe loop nobody starts is not a liveness story, and one nobody
+    stops logs spurious 'unreachable' warnings for a shutdown the operator
+    asked for."""
+    agent = _agent(tmp_path)
+    agent.setup()
+    agent.tool_executor = MagicMock()
+    agent.tool_executor.add_all = MagicMock()
+    await agent.astartup()
+    assert agent.worker_manager._liveness_task is not None or \
+        agent.worker_manager._liveness_interval <= 0
+    await agent.ashutdown()
+    assert agent.worker_manager._liveness_task is None

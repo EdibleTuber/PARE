@@ -21,6 +21,10 @@ pytestmark = pytest.mark.asyncio
 async def test_ashutdown_closes_capture_stores_even_if_worker_close_raises_cancelled():
     agent = PareAgent()
     agent.worker_manager = MagicMock()
+    # ashutdown stops the liveness probe before closing connections, so a
+    # probe cannot fire against a worker being torn down and log a spurious
+    # "unreachable" for a shutdown the operator asked for.
+    agent.worker_manager.stop_liveness = AsyncMock()
     agent.worker_manager.close_all = AsyncMock(side_effect=asyncio.CancelledError())
     agent._capture_stores = MagicMock()
 
