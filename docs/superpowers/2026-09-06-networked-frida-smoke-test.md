@@ -1,0 +1,190 @@
+# Smoke test: moving `frida` to the laptop
+
+**Date:** 2026-09-06
+**Spec:** [`specs/2026-09-05-networked-workers-design.md`](specs/2026-09-05-networked-workers-design.md) §9 step 5
+**Why this is the proof:** every claim in that spec has so far been checked against
+loopback, a killed subprocess, or a discard port. This is the first time a worker runs
+on a machine the daemon does not own, over a network hop that can genuinely degrade.
+
+## What this actually tests, and what it does not
+
+It answers three questions, in order of how likely they are to bite:
+
+1. **Does it work at all** — handshake, tool registration, a real attach driven from a
+   machine that cannot see the emulator.
+2. **Is hook-event polling usable over a tailnet hop.** Genuinely unknown. This is the
+   risk the spec flags, and the reason step 5 exists before the hardware worker.
+3. **Do the failure paths behave on a real degraded link** rather than on a process
+   somebody killed. Killing a process is not the same event as a laptop sleeping: one
+   closes the socket, the other drops the SYN.
+
+It does **not** test large payloads (§7.3 is still open), and it does not test the
+bench approval channel (that is D1, ArcticBase).
+
+---
+
+## Part 1 — On the laptop
+
+### 1.1 `git pull` is not enough
+
+Pulling gets the code. It does **not** install the new dependency, and this branch added
+one:
+
+```
+pare-worker-kit @ git+https://github.com/EdibleTuber/pare-worker-kit.git@v0.1.1
+```
+
+So:
+
+```bash
+cd ~/path/to/pare-frida-mcp
+git pull
+pip install -e ".[dev]"        # <-- the part git pull does not do
+```
+
+Two things to know about that install:
+
+- It pulls `pare-worker-kit` from GitHub. **It does not install `agent_core`**, and that
+  is deliberate — the daemon side stays on the server. Some tests skip without it; that
+  is correct, not a failure.
+- If it fails with *"cannot be a direct reference"*, the checkout predates
+  `allow-direct-references = true` in `pyproject.toml`. Pull again.
+
+### 1.2 Confirm the worker can serve HTTP before involving the network
+
+```bash
+AGENT_WORKER_TRANSPORT=http AGENT_WORKER_HOST=127.0.0.1 AGENT_WORKER_PORT=9101 \
+  pare-frida-mcp
+```
+
+Expect uvicorn to start. Then in another shell:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9101/mcp
+```
+
+Any HTTP status proves it is listening; the MCP handshake is the daemon's job. Stop it.
+
+### 1.3 Check the refusal that protects an unauthenticated worker
+
+```bash
+AGENT_WORKER_TRANSPORT=http AGENT_WORKER_HOST=0.0.0.0 AGENT_WORKER_PORT=9101 \
+  pare-frida-mcp; echo "exit=$?"
+```
+
+**Expect a non-zero exit** and a message naming the wildcard. This worker has no
+authentication — the bind address is the access control — so a wildcard bind would
+expose every frida tool to every network the laptop is on, including whatever coffee-shop
+wifi it joins next. If this *succeeds*, stop and say so; something is wrong.
+
+### 1.4 Find the tailnet address
+
+```bash
+tailscale ip -4
+ip -4 addr show tailscale0 | grep inet
+```
+
+Use the **interface name**, not the address, so a tailnet re-address does not silently
+strand the worker.
+
+### 1.5 The unit
+
+```ini
+# /etc/systemd/system/pare-frida-mcp.service
+[Unit]
+Description=PARE frida worker
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<you>
+Environment=AGENT_WORKER_TRANSPORT=http
+Environment=AGENT_WORKER_HOST=tailscale0
+Environment=AGENT_WORKER_PORT=9101
+ExecStart=/full/path/to/venv/bin/pare-frida-mcp
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now pare-frida-mcp
+systemctl status pare-frida-mcp
+sudo ss -tlnp | grep 9101        # MUST show the tailnet IP, never 0.0.0.0
+```
+
+That last line is the one worth actually reading.
+
+### 1.6 The emulator
+
+`frida-server` must be running on the device and `adb devices` must show it **on the
+laptop**. The worker talks to frida locally; only PARE crosses the network.
+
+---
+
+## Part 2 — On the inference server
+
+### 2.1 Point `workers.yaml` at the laptop
+
+```yaml
+  frida:
+    endpoint: http://100.x.y.z:9101/mcp     # the laptop's tailnet address
+    transport: streamable_http
+    connect_timeout: 20
+    read_timeout: 60
+    risk_default: low
+    autoload: false        # REQUIRED — see below
+    capability_tags: [mobile, dynamic, android, frida]
+```
+
+Keep the existing `risk_overrides` pins. They are the only tier link not under the
+worker's control, and a worker you now reach over a network is exactly the one that
+needs them.
+
+`autoload: false` is not ergonomics. A sleeping laptop does not refuse a connection, it
+drops the SYN, so an autoloading networked worker costs its full connect timeout at
+every daemon boot.
+
+### 2.2 Run the harness
+
+```bash
+python scripts/smoke_networked_frida.py http://100.x.y.z:9101/mcp
+```
+
+It needs no inference server and no PARE daemon — it drives `agent_core` directly, so a
+failure is the worker or the link, never the model.
+
+---
+
+## Part 3 — What to look for
+
+| Check | Pass looks like |
+|---|---|
+| Handshake | tools listed, count matches the local build |
+| Identity | `server_version` is **frida's** version, not `1.29.1` |
+| Risk tiers | every tool carries a tier in `_meta` |
+| Attach | a real session id, from a server that cannot see the emulator |
+| **Poll latency** | the number that decides whether this is usable |
+| Liveness | `reachable` goes False after the laptop is unplugged |
+| Approvals | a held `scope: session` approval is gone after link loss |
+
+### The one that matters
+
+**Hook-event polling latency.** If a poll round-trip is comparable to loopback, this
+design works. If it is hundreds of milliseconds, the co-pilot loop gets sluggish and the
+hardware worker inherits that. The harness prints a distribution, not an average — a
+p95 that is ten times the median means an unusable link that *looks* fine on average.
+
+### Deliberately unplugging the laptop
+
+Do this at the end. Turn off wifi, or `sudo systemctl stop pare-frida-mcp`. They are
+different events and both are worth seeing: stopping the service closes the socket,
+turning off wifi drops the SYN, and only the second resembles a sleeping laptop.
+
+Within ~30s (the probe interval) `/worker list` should show **UNREACHABLE** with the
+endpoint. Then `/worker unload frida` must say the remote process keeps running and
+its attachments survive — because they do.
