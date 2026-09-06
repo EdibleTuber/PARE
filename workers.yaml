@@ -14,11 +14,19 @@
 # frida). Re-enable them once (a) those services are up AND (b) the agent_core
 # discovery-robustness fix lands. See docs/superpowers/plans for the follow-up.
 workers:
+  #  frida:
+  #    command: /mnt/secondary/projects/PARE/.venv/bin/pare-frida-mcp
+  #    transport: stdio
+  #    risk_default: low           # advertised per-tool tiers govern; reads auto-execute, dangerous tools gate (read_memory/java_hook/write_memory=high, execute_script=critical)
+  #    autoload: true
+  #   capability_tags: [mobile, dynamic, android, frida]
   frida:
-    command: /mnt/secondary/projects/PARE/.venv/bin/pare-frida-mcp
-    transport: stdio
-    risk_default: low           # advertised per-tool tiers govern; reads auto-execute, dangerous tools gate (read_memory/java_hook/write_memory=high, execute_script=critical)
-    autoload: true
+    endpoint: http://100.68.47.23:9101/mcp     # the laptop's tailnet address
+    transport: streamable_http
+    connect_timeout: 20
+    read_timeout: 60
+    risk_default: low
+    autoload: false        # REQUIRED — see below
     capability_tags: [mobile, dynamic, android, frida]
 
   # In-house static-analysis worker (pare-static-mcp). Read-only APK tools
