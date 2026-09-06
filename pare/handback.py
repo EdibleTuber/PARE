@@ -17,6 +17,65 @@ COMMIT_TOOLS = frozenset({"static_list_methods", "static_decompile_method", "fri
 NAME_SEARCH_TOOLS = frozenset({"static_grep_smali"})
 POLL_TOOLS = frozenset({"frida_read_hook_events", "frida_list_sessions"})
 
+POLL_FAILURE_LIMIT = 3
+"""Consecutive FAILED polls before handing back.
+
+Polling is meant to repeat, which is exactly why POLL_TOOLS is exempted from
+the spin guard in the chat loop -- an empty-but-successful poll is normal and
+may repeat all turn. A poll that keeps ERRORING is a different animal: the
+link is degraded or the worker is gone, and every further round buys nothing
+while burning inference.
+
+Three rather than one, because a single failed poll is routine on a network
+(a reconnect, a momentary drop). Three consecutive failures with nothing
+succeeding in between is a pattern, not a blip.
+"""
+
+# The two shapes agent_core's synthesized worker tools produce on failure --
+# see make_tool_class._run in agent_core/workers/tool_factory.py, which
+# returns f"{prefixed} call failed: {exc}" for a transport/protocol error and
+# f"{prefixed} returned an error: ..." when the worker sets isError.
+#
+# Matching on text is not ideal; a structured signal would be better. It is
+# pinned by a test that builds a REAL dynamic tool against a failing pool and
+# asserts these predicates catch its output, so a wording change in agent_core
+# fails loudly here instead of silently disabling the handback.
+_FAILURE_MARKERS = (" call failed:", " returned an error:")
+
+
+def is_worker_failure(result: str | None) -> bool:
+    """Did a worker tool call fail, as opposed to return an empty answer?
+
+    The distinction is the whole point: N empty polls are normal, N failed
+    polls mean the operator should look at the link.
+    """
+    if not result:
+        # An empty string is a poll that returned nothing, not one that
+        # failed. Treating it as failure would hand back on the normal case.
+        return False
+    return any(marker in result for marker in _FAILURE_MARKERS)
+
+
+def poll_failure_question(tool: str, count: int, last_result: str) -> str:
+    """What to tell the operator when polling keeps failing.
+
+    Names the worker and the command that diagnoses it, because the useful
+    next action is checking whether the machine hosting that worker is still
+    answering -- not retrying the poll.
+    """
+    worker = tool.split("_", 1)[0]
+    tail = (last_result or "").strip().splitlines()
+    detail = tail[-1][:200] if tail else "(no detail)"
+    return (
+        f"I've stopped polling: `{tool}` failed {count} times in a row.\n\n"
+        f"Last error: {detail}\n\n"
+        f"That usually means the `{worker}` worker's link is degraded or its "
+        f"host has stopped answering, not that there is nothing to report. "
+        f"`/worker list` shows whether `{worker}` is still reachable and which "
+        f"endpoint it is on; `/worker reload {worker}` reconnects it.\n\n"
+        f"How do you want to proceed?"
+    )
+
 
 def normalize_class(name: str) -> str:
     """smali `Lsg/vp/Foo$Bar;` -> dotted `sg.vp.Foo$Bar`; dotted passes through."""

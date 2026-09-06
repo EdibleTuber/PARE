@@ -48,6 +48,7 @@ from agent_core.capture import CaptureLayer, CaptureStore, SearchCapture, ReadCa
 from pare.capture_store import CaptureStoreManager
 from pare.handback import (
     COMMIT_TOOLS, NAME_SEARCH_TOOLS, POLL_TOOLS,
+    POLL_FAILURE_LIMIT, is_worker_failure, poll_failure_question,
     candidate_classes, near_duplicate, normalize_class,
     disambig_question, spin_question,
 )
@@ -181,6 +182,11 @@ class PareAgent(Agent):
         logger.info("workers loaded: %s%s",
                     ", ".join(f"{r.name}({r.tool_count})" for r in ok) or "none",
                     "".join(f" | {r.name} FAILED: {r.error}" for r in bad))
+        # Started here rather than in WorkerManager's constructor: it creates a
+        # task, and a task needs a running loop that will outlive this call.
+        # astartup runs inside the serving loop, which is the one that will.
+        # No-ops for an all-stdio fleet -- nothing gets probed.
+        self.worker_manager.start_liveness()
 
     async def ashutdown(self) -> None:
         """Close worker connections and project capture stores.
@@ -195,6 +201,10 @@ class PareAgent(Agent):
         """
         try:
             if self.worker_manager is not None:
+                # Before close_all: a probe firing against a worker being torn
+                # down would log a spurious "unreachable" for a shutdown the
+                # operator asked for.
+                await self.worker_manager.stop_liveness()
                 await self.worker_manager.close_all()
             else:
                 close_pool = getattr(self.mcp_pool, "close_all", None)
@@ -251,6 +261,11 @@ class PareAgent(Agent):
             # MAX_TOOL_ROUNDS stays only as a coarse final backstop — with the
             # guard doing the real stopping, hitting it should be rare.
             guard = RepeatGuard()
+            # Consecutive FAILED polls per tool. The spin guard deliberately
+            # exempts POLL_TOOLS -- polling is supposed to repeat -- which
+            # left the one tool the prompt tells the model to hammer as the
+            # one tool with no backstop at all when its link degrades.
+            poll_failures: dict[str, int] = {}
             MAX_TOOL_ROUNDS = 50
             MAX_TOKENS = 4096                        # runaway-loop stopgap (matches PAL)
 
@@ -400,7 +415,32 @@ class PareAgent(Agent):
                                 # never swallowed.
                                 _settle("[interrupted — call not completed]", done_ids)
                                 raise
+                            # Judged and reported on the RAW result, before
+                            # guard.record replaces a repeat with its own
+                            # "[repeat-guard] ..." wrapper. Reading the wrapper
+                            # instead handed the operator the guard's message
+                            # where the ConnectError should have been -- the
+                            # one line they need to tell a dead host from a
+                            # quiet one.
+                            raw_result = result
                             result = guard.record(tc.name, tc.arguments, result)
+                            if tc.name in POLL_TOOLS:
+                                if is_worker_failure(raw_result):
+                                    poll_failures[tc.name] = poll_failures.get(tc.name, 0) + 1
+                                    if poll_failures[tc.name] >= POLL_FAILURE_LIMIT:
+                                        conv.add_tool_result(tc.id, result)
+                                        done_ids.add(tc.id)
+                                        yield _settle_and_handback(
+                                            poll_failure_question(
+                                                tc.name, poll_failures[tc.name],
+                                                raw_result),
+                                            done_ids)
+                                        return
+                                else:
+                                    # Any success resets it: the trigger is
+                                    # CONSECUTIVE failure, so a poll that comes
+                                    # back empty-but-fine clears the count.
+                                    poll_failures[tc.name] = 0
                             if tc.name in NAME_SEARCH_TOOLS:
                                 pat = str((tc.arguments or {}).get("pattern", ""))
                                 if pat:

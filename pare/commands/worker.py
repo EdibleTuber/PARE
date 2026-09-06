@@ -32,10 +32,62 @@ _REPROCESS_NOTE = (
 # What an unload destroys. Shared by /worker unload and by a FAILED /worker
 # reload, because reload's unload half runs first and unconditionally — see
 # Worker._render_reload.
-_DESTRUCTION_BODY = (
+_DESTRUCTION_BODY_STDIO = (
     "any live attachments, sessions and installed hooks for this worker "
     "are gone; captures of earlier results remain searchable, though "
     "session ids in them are now stale.")
+
+# The same sentence is FALSE for a networked worker, and dangerously so: it
+# claims state was destroyed when it was not. Unloading an HTTP worker is a
+# client-side disconnect. The remote process keeps running, and a frida
+# session it holds keeps holding whatever it was attached to -- so an operator
+# told "attachments are gone" may walk away from a live hook on a target.
+_DESTRUCTION_BODY_REMOTE = (
+    "this daemon disconnected, but the worker process is REMOTE and keeps "
+    "running: any live attachments, sessions and installed hooks survive on "
+    "that host and must be cleaned up there. Captures of earlier results "
+    "remain searchable, and their session ids may still be live.")
+
+
+def _destruction_body(transport: str | None) -> str:
+    """What an unload actually destroys, which depends on who owns the process.
+
+    Unknown transports get the remote wording: over-warning about state that
+    might survive is recoverable, under-warning about a live attachment is not.
+    """
+    return (_DESTRUCTION_BODY_STDIO if transport == "stdio"
+            else _DESTRUCTION_BODY_REMOTE)
+
+
+def _state_of(s) -> str:
+    """loaded / unloaded, plus the state that did not exist before liveness.
+
+    A networked worker whose host has gone away is still `loaded` -- the
+    daemon registered its tools and has not been told otherwise -- so
+    reporting only that reads as healthy. UNREACHABLE is shouted because it is
+    the one row an operator scanning this table needs to stop on.
+    """
+    if not s.loaded:
+        return "unloaded"
+    if getattr(s, "reachable", None) is False:
+        return "UNREACHABLE"
+    return "loaded"
+
+
+def _where_of(s) -> str:
+    """The transport column, carrying the host for networked workers.
+
+    Folded in rather than added as a ninth column: eight already compete for
+    render_table's 100-char budget (see _render_list), and "which machine" is
+    a strictly more useful answer than the word "streamable_http" repeated
+    down the column. The full endpoint still appears in /health and in the
+    error footer below the table.
+    """
+    endpoint = getattr(s, "endpoint", None)
+    if not endpoint:
+        return s.transport
+    host = endpoint.split("://", 1)[-1].split("/", 1)[0]
+    return f"http {host}"
 
 
 class Worker(Command):
@@ -80,7 +132,12 @@ class Worker(Command):
         elif sub == "load":
             yield ResponseMessage(text=self._render_load(await mgr.load(target)))
         elif sub == "unload":
-            yield ResponseMessage(text=self._render_unload(await mgr.unload(target)))
+            # Resolved BEFORE the unload: the worker is gone from status()
+            # afterwards, and the copy that depends on it describes what the
+            # unload just did.
+            transport = self._transport_of(mgr, target)
+            yield ResponseMessage(
+                text=self._render_unload(await mgr.unload(target), transport))
         else:
             # Snapshot what is about to be destroyed BEFORE the call: reload's
             # unload half runs first and removes the tools unconditionally, but
@@ -89,7 +146,8 @@ class Worker(Command):
             was_loaded = bool(mgr.is_loaded(target))
             doomed = len(mgr.tools_of(target) or [])
             yield ResponseMessage(
-                text=self._render_reload(await mgr.reload(target), was_loaded, doomed))
+                text=self._render_reload(await mgr.reload(target), was_loaded,
+                                         doomed, self._transport_of(mgr, target)))
 
     @staticmethod
     def _render_list(mgr) -> str:
@@ -98,9 +156,9 @@ class Worker(Command):
         for s in statuses:
             rows.append({
                 "worker": s.name,
-                "state": "loaded" if s.loaded else "unloaded",
+                "state": _state_of(s),
                 "tools": str(s.tool_count) if s.loaded else "-",
-                "transport": s.transport,
+                "transport": _where_of(s),
                 "floor": s.risk_default,
                 "boot": "auto" if s.autoload else "manual",
                 "tags": ", ".join(s.capability_tags),
@@ -122,6 +180,22 @@ class Worker(Command):
         return f"{table}\n\n{footer}"
 
     @staticmethod
+    def _transport_of(mgr, name: str) -> str | None:
+        """The worker's transport, for copy that is only true on one of them.
+
+        Best-effort: rendering must never fail because a status lookup did.
+        None flows through to the remote wording, which over-warns rather
+        than under-warns.
+        """
+        try:
+            for st in mgr.status():
+                if st.name == name:
+                    return st.transport
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
     def _render_load(res) -> str:
         if not res.ok:
             return f"{res.op} {res.name} failed [{res.error_kind}]: {res.error}"
@@ -129,7 +203,7 @@ class Worker(Command):
                 f"{_REPROCESS_NOTE}")
 
     @staticmethod
-    def _render_unload(res) -> str:
+    def _render_unload(res, transport: str | None = None) -> str:
         # WorkerManager.unload() removes the worker from the executor and the
         # pool BEFORE attempting the (timeout-bounded) disconnect — see its
         # docstring: "everything before the disconnect is unconditional and
@@ -143,10 +217,11 @@ class Worker(Command):
         # The tool-list mutation above is unconditional, so the reprocess note
         # applies regardless of whether the disconnect itself succeeded.
         tail = _REPROCESS_NOTE if res.ok else f"WARNING [{res.error_kind}]: {res.error}\n{_REPROCESS_NOTE}"
-        return f"{head}\n{_DESTRUCTION_BODY}\n{tail}"
+        return f"{head}\n{_destruction_body(transport)}\n{tail}"
 
     @staticmethod
-    def _render_reload(res, was_loaded: bool, doomed: int) -> str:
+    def _render_reload(res, was_loaded: bool, doomed: int,
+                       transport: str | None = None) -> str:
         """A failed reload has UNLOAD's consequences and LOAD's shape.
 
         WorkerManager.reload runs _unload_locked FIRST, and that removes the
@@ -171,13 +246,19 @@ class Worker(Command):
             return (f"{head}\n{res.name} was not loaded before this reload, "
                     f"so nothing was destroyed.")
         if str(res.error or "").startswith("unload half failed:"):
+            # Both wordings keep "may still be running" -- that phrase IS the
+            # property being asserted (do not imply the process died). The
+            # remote variant only adds WHICH machine to go look on, which is
+            # the part that was missing and sent operators hunting locally.
+            where = ("its process may still be running"
+                     if transport == "stdio" else
+                     "its process is REMOTE and may still be running on that host")
             state = (f"WARNING: the unload half removed {res.name}'s {doomed} tools "
                      f"before its disconnect was attempted, and the load half never "
-                     f"ran — {res.name} is now unloaded, but its process may still "
-                     f"be running.")
+                     f"ran — {res.name} is now unloaded, but {where}.")
         else:
             state = (f"WARNING: the unload half had already completed, so {res.name} "
                      f"is now UNLOADED — its {doomed} tools are gone and the load "
                      f"half did not bring them back. Fix the cause above, then "
                      f"/worker load {res.name}.")
-        return f"{head}\n{state}\n{_DESTRUCTION_BODY}\n{_REPROCESS_NOTE}"
+        return f"{head}\n{state}\n{_destruction_body(transport)}\n{_REPROCESS_NOTE}"
