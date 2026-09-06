@@ -21,4 +21,13 @@ class Health(Command):
             f"vault: {cfg.vault_path}",
             f"apk_re_agents: {cfg.apk_re_agents_url}",
         ]
+
+        mgr = getattr(ctx.agent, "worker_manager", None)
+        if mgr is not None:
+            statuses = mgr.status()
+            loaded = ", ".join(f"{s.name}({s.tool_count})" for s in statuses if s.loaded)
+            idle = ", ".join(s.name for s in statuses if not s.loaded)
+            lines.append(f"workers: {loaded or 'none'}"
+                         + (f" · unloaded: {idle}" if idle else ""))
+
         yield ResponseMessage(text="\n".join(lines))

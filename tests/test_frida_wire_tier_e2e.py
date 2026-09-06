@@ -21,7 +21,16 @@ class _Ok:
 
 
 class _Inner:
-    def __init__(self, tools): self._t = tools; self.calls = []
+    # RiskAwareToolPool no longer keeps its own spec dict; it reads specs
+    # through to this inner pool (add_spec/spec/names), so the fake must
+    # satisfy that surface alongside the dispatch methods it already had.
+    def __init__(self, tools):
+        self._t = tools
+        self.calls = []
+        self._specs = {}
+    def add_spec(self, spec): self._specs[spec.name] = spec
+    def spec(self, name): return self._specs.get(name)
+    def names(self): return list(self._specs)
     async def list_tools(self, w): return _ListResult(self._t)
     async def call_tool(self, w, t, a): self.calls.append((w, t)); return _Ok()
     async def close_all(self): pass

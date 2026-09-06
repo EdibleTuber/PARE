@@ -31,7 +31,7 @@ from agent_core.protocol import (
 )
 
 from agent_core.agent import Agent, HandlerContext
-from agent_core.workers import MCPClientPool, discover_and_register
+from agent_core.workers import MCPClientPool, WorkerManager
 from agent_core.workers.registry import WorkerRegistry
 from agent_core.workers.risk import RiskGate
 from agent_core.workers.risk_pool import RiskAwareToolPool
@@ -43,6 +43,7 @@ from pare.commands.snapshot import Snapshot
 from pare.commands.frida_views import Devices, Ps, Apps, Sessions
 from pare.commands.frida_actions import Select, Attach, Detach
 from pare.commands.mitm import Mitm
+from pare.commands.worker import Worker
 from agent_core.capture import CaptureLayer, CaptureStore, SearchCapture, ReadCapture
 from pare.capture_store import CaptureStoreManager
 from pare.handback import (
@@ -75,6 +76,7 @@ class PareAgent(Agent):
         Devices, Ps, Apps, Sessions,   # operator fast-path views
         Select, Attach, Detach,        # operator fast-path actions
         Mitm,                          # HTTPS-traffic daemon control
+        Worker,                        # runtime worker lifecycle
     ]  # framework builtins serve /help, /clear, etc.
 
     # vault_path is PARE's private state dir (RAG-only reads of PAL's vault),
@@ -111,9 +113,23 @@ class PareAgent(Agent):
             if self.config.enable_apk_re_agents else None
         )
         registry = WorkerRegistry.load(self.config.workers_yaml_path)
-        specs = registry.all()
-        self._worker_specs = specs
-        self.mcp_pool = MCPClientPool(specs)
+        self.worker_registry = registry
+        # Empty, deliberately. The pool holds LOADED specs, not declared ones:
+        # if it were seeded with every declaration, the first dispatch after an
+        # unload would lazily reconnect the worker just unloaded, silently
+        # undoing it. WorkerManager owns all population.
+        self.mcp_pool = MCPClientPool([])
+        # Sentinel so the /worker command's requires=("worker_manager",) check
+        # passes in _attach_registries, which runs BEFORE astartup. Same pattern
+        # the framework uses for command_registry (agent_core/runtime.py:55-58).
+        # The real manager is built in astartup(), once tool_executor exists.
+        #
+        # INSTANCE attribute, deliberately: `requires` is a hasattr() check, so
+        # a class-level `worker_manager = None` would satisfy it on every
+        # instance and deleting this line would no longer fail boot — the check
+        # spec 9.1 asked for would silently protect nothing. Unit tests that
+        # build a bare PareAgent() without setup() stub it themselves.
+        self.worker_manager = None
         self._launch_ts = time.time()   # process start; per-launch refinement deferred (spec §11)
         self._capture_stores = CaptureStoreManager(
             marker=self.config.project_marker,
@@ -128,7 +144,7 @@ class PareAgent(Agent):
         )
         self.tool_pool = RiskAwareToolPool(
             inner=self.mcp_pool,
-            specs={s.name: s for s in specs},
+            specs={},
             risk_gate=RiskGate(overrides=registry.risk_overrides()),
             approval_registry=self.tool_approval_registry,
             audit_log=AuditLog(self.config.audit_dir),
@@ -142,34 +158,52 @@ class PareAgent(Agent):
         self._disambig_resolved: dict[str, set[frozenset[str]]] = {}
 
     def register_tools(self):
-        """Discover MCP-direct workers and return their tools, wired to dispatch
-        through the RiskAwareToolPool (so calls are risk-gated + audited).
+        """Declarative tools only. Worker tools are registered by astartup().
 
-        Called by agent_core's runtime after setup(). The returned list is
-        unioned with the class-level `tools` ClassVar (StaticAnalyze). Bridges
-        async discovery to the sync hook via asyncio.run.
-
-        Discovery lazy-connects each worker in THIS throwaway asyncio.run loop
-        (MCPClientPool caches the client on first list_tools). We close the pool
-        before returning so those connections don't leak into the daemon's
-        separate serving loop — a stdio worker's streams are bound to the loop
-        that opened them, so a reused-across-loops client dies on the first
-        dispatched call with ClosedResourceError. The serving loop reconnects
-        lazily on first call_tool, in its own loop.
+        Discovery used to run here inside a throwaway asyncio.run loop, which
+        forced a close_all() afterwards because the connections were bound to
+        that dead loop. astartup() runs in the serving loop instead, so that
+        whole dance is gone.
         """
-        async def _discover():
-            classes = await discover_and_register(self._worker_specs, self.tool_pool)
-            await self.tool_pool.close_all()
-            return classes
+        return [StaticAnalyze] if self.config.enable_apk_re_agents else []
 
-        classes = asyncio.run(_discover())
-        # apk_re_agents' static_analyze is advertised only when explicitly enabled
-        # (default off). The coordinator isn't part of every deployment, and an
-        # always-registered tool the model reaches for first only dead-ends on a
-        # connection-refused. Gate keeps the Phase-1 integration one config flag away.
-        if self.config.enable_apk_re_agents:
-            classes = [*classes, StaticAnalyze]
-        return classes
+    async def astartup(self) -> None:
+        """Build the worker manager and connect every autoload worker.
+
+        Runs after _attach_registries (so tool_executor exists) and before the
+        daemon accepts a connection.
+        """
+        self.worker_manager = WorkerManager(
+            self.worker_registry, self.tool_pool, self.tool_executor)
+        results = await self.worker_manager.load_autoload()
+        ok = [r for r in results if r.ok]
+        bad = [r for r in results if not r.ok]
+        logger.info("workers loaded: %s%s",
+                    ", ".join(f"{r.name}({r.tool_count})" for r in ok) or "none",
+                    "".join(f" | {r.name} FAILED: {r.error}" for r in bad))
+
+    async def ashutdown(self) -> None:
+        """Close worker connections and project capture stores.
+
+        The capture-store close runs in `finally` so it always happens, even
+        if worker_manager.close_all() lets a CancelledError through (it
+        suppresses plain Exception internally but must not swallow
+        cancellation). If astartup() never got as far as building
+        worker_manager (e.g. WorkerManager() rejected a misconfigured pool),
+        fall back to closing mcp_pool directly so its worker subprocesses
+        don't outlive the daemon.
+        """
+        try:
+            if self.worker_manager is not None:
+                await self.worker_manager.close_all()
+            else:
+                close_pool = getattr(self.mcp_pool, "close_all", None)
+                if close_pool is not None:
+                    await close_pool()
+        finally:
+            close = getattr(self._capture_stores, "close_all", None)
+            if close is not None:
+                close()
 
     def system_prompt(self, ctx: HandlerContext) -> str:
         from pathlib import Path
@@ -262,19 +296,31 @@ class PareAgent(Agent):
                 # the rest of the turn; resolved remembers which candidate groups
                 # this channel has already been asked about (persists across turns
                 # via self._disambig_resolved so an answered question isn't re-asked).
+                #   Trigger 3 (unloaded worker): a tool whose worker was
+                #     unloaded mid-session. Needs its own trigger because
+                #     neither of the above fires — distinct frida_* tools are
+                #     distinct RepeatGuard signatures, and POLL_TOOLS exempts
+                #     frida_read_hook_events from the spin handback by design
+                #     (system.md tells the model to poll it repeatedly).
                 name_searches: dict[str, set[str]] = {}
                 resolved = self._disambig_resolved.setdefault(ctx.channel_id, set())
+                unavailable_hits = 0
+                UNAVAILABLE_HANDBACK_AFTER = 2
 
-                def _settle_and_handback(question: str, done_ids: set[str]) -> ResponseMessage:
+                def _settle(marker: str, done_ids: set[str]) -> None:
                     """Fill a synthetic tool result for every tool_call id in this
-                    round that hasn't been answered yet, then append the handback
-                    question as the assistant turn. A dangling tool_call id with no
-                    matching tool result makes the NEXT turn's API request invalid,
-                    so every id in the batch must be settled before we return."""
+                    round that hasn't been answered yet. A dangling tool_call id
+                    with no matching tool result makes the NEXT turn's API request
+                    invalid, so every id in the batch must be settled before this
+                    round can be abandoned by any route."""
                     for tc in tool_calls:
                         if tc.id not in done_ids:
-                            conv.add_tool_result(
-                                tc.id, "[handed back to operator — call not executed]")
+                            conv.add_tool_result(tc.id, marker)
+
+                def _settle_and_handback(question: str, done_ids: set[str]) -> ResponseMessage:
+                    """Settle the round, then append the handback question as the
+                    assistant turn."""
+                    _settle("[handed back to operator — call not executed]", done_ids)
                     conv.add_assistant(question)
                     return ResponseMessage(text=question)
 
@@ -286,6 +332,47 @@ class PareAgent(Agent):
                     ])
                     done_ids: set[str] = set()
                     for tc in tool_calls:
+                        mgr = self.worker_manager
+                        # Presence in the executor IS the provenance test here.
+                        # A registered tool is dispatchable right now, so it is
+                        # never the unloaded-worker case: it is either a
+                        # declarative PARE tool (no `worker` provenance at all)
+                        # or a synthesized tool whose worker is loaded — and
+                        # unload/rollback both remove a worker's tools before
+                        # anything else. Only an ABSENT name can belong to an
+                        # unloaded worker, and worker_of()'s name-prefix match
+                        # is the only signal left for it. Without this gate the
+                        # prefix false-attributes the declarative
+                        # `static_analyze` (pare/tools/static_analyze.py) to a
+                        # worker named `static`, handing the turn back about a
+                        # tool that just executed fine (spec 8.2's namespace
+                        # overlap, made active).
+                        if mgr is not None and tc.name not in self.tool_executor:
+                            owner = mgr.worker_of(tc.name)
+                            why = mgr.unavailable_reason(owner) if owner else None
+                            if why:
+                                unavailable_hits += 1
+                                if unavailable_hits >= UNAVAILABLE_HANDBACK_AFTER:
+                                    # `why` (agent_core's unavailable_reason) is
+                                    # MODEL-facing wording -- it tells the model
+                                    # to "ask the operator to run /worker load
+                                    # ...", which belongs in a tool result the
+                                    # model reads. This handback instead goes
+                                    # straight to the human operator (the model
+                                    # is cut out of this round), so it needs its
+                                    # own phrasing addressed to that reader --
+                                    # reusing `why` verbatim would have the
+                                    # assistant tell the operator to ask the
+                                    # operator.
+                                    yield _settle_and_handback(
+                                        f"the {owner!r} worker is not loaded, "
+                                        f"so the assistant's last tool call "
+                                        f"didn't run. Run /worker load {owner} "
+                                        f"to bring it back, then continue — or "
+                                        f"tell me how you'd like to proceed "
+                                        f"without it.",
+                                        done_ids)
+                                    return
                         if tc.name in COMMIT_TOOLS:
                             cls = normalize_class(str((tc.arguments or {}).get("cls", "")))
                             for pat, cands in name_searches.items():
@@ -297,7 +384,22 @@ class PareAgent(Agent):
                                     return
                         yield ToolProgressMessage(tool=tc.name, arguments=tc.arguments)
                         if guard.should_run(tc.name, tc.arguments):
-                            result = await self.tool_executor.run(tc.name, tc.arguments, ctx)
+                            try:
+                                result = await self.tool_executor.run(
+                                    tc.name, tc.arguments, ctx)
+                            except asyncio.CancelledError:
+                                # The daemon cancels a handler task the moment its
+                                # client disconnects, and this await is where a turn
+                                # spends most of its time. ToolExecutor.run re-raises
+                                # CancelledError — a BaseException — so the `except
+                                # Exception` below never sees it, and without this the
+                                # round's add_assistant_tool_calls entry would keep
+                                # ids that no tool result ever answers, invalidating
+                                # this channel's NEXT request. Settle them, then
+                                # re-raise: cancellation must still propagate, and is
+                                # never swallowed.
+                                _settle("[interrupted — call not completed]", done_ids)
+                                raise
                             result = guard.record(tc.name, tc.arguments, result)
                             if tc.name in NAME_SEARCH_TOOLS:
                                 pat = str((tc.arguments or {}).get("pattern", ""))

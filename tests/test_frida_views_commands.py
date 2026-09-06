@@ -32,9 +32,12 @@ class _Pool:
         return _Result(self._by_tool[tool])
 
 
+_LOADED = type("M", (), {"unavailable_reason": staticmethod(lambda name: None)})()
+
+
 class _Ctx:
     def __init__(self, pool):
-        self.agent = type("A", (), {"tool_pool": pool})()
+        self.agent = type("A", (), {"tool_pool": pool, "worker_manager": _LOADED})()
 
 
 async def _run(cmd_cls, raw, by_tool):

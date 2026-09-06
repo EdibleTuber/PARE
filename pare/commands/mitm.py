@@ -69,6 +69,20 @@ class Mitm(Command):
             return
 
         # status (default)
+        from pare.commands._frida import unavailable
+        why = unavailable(ctx, "mitm")
+        if why:
+            yield ResponseMessage(text=why)
+            return
         result = await ctx.agent.tool_pool.call_tool("mitm", "capture_health", {}, ctx=ctx)
-        payload = json.loads(_result_text(result))
+        if getattr(result, "isError", False):
+            yield ResponseMessage(text=_result_text(result))
+            return
+        try:
+            payload = json.loads(_result_text(result))
+        except (json.JSONDecodeError, ValueError):
+            yield ResponseMessage(
+                text="mitm capture_health returned no/invalid JSON — is the "
+                     "daemon running? (/mitm up)")
+            return
         yield ResponseMessage(text=payload.get("summary", "no status"))

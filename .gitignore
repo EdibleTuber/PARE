@@ -7,3 +7,9 @@
 # Python bytecode
 __pycache__/
 *.py[cod]
+
+# Editor swap files
+*.swp
+*.swo
+.*.swp
+.*.swo

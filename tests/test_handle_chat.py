@@ -25,8 +25,9 @@ def _make_agent(mode="off"):
     # Stub the capture store manager so _bind_store works without full setup().
     agent._capture_stores = MagicMock()
     agent._capture_stores.resolve.return_value = CaptureStore.open_memory()
-    # setup() isn't run in these unit tests; stub the attr it would create.
+    # setup() isn't run in these unit tests; stub the attrs it would create.
     agent._disambig_resolved = {}
+    agent.worker_manager = None
     return agent
 
 

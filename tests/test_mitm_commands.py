@@ -22,9 +22,13 @@ class _Pool:
         return _Result(self._payload)
 
 
+_LOADED = type("M", (), {"unavailable_reason": staticmethod(lambda name: None)})()
+
+
 class _Agent:
     def __init__(self, pool):
         self.tool_pool = pool
+        self.worker_manager = _LOADED
 
 
 class _Ctx:

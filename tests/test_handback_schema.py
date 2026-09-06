@@ -18,9 +18,13 @@ declared by the static and frida contracts (no running worker needed — see
 tests/test_risk_overrides_coverage.py for the same pattern against the frida
 contract) and assert every handback constant resolves against a *real* tool.
 """
+from pathlib import Path
+
 import pytest
 
 from pare.handback import COMMIT_TOOLS, NAME_SEARCH_TOOLS, POLL_TOOLS
+
+_WORKERS_YAML = Path(__file__).resolve().parent.parent / "workers.yaml"
 
 
 def _registered_tool_specs() -> dict[str, object]:
@@ -91,3 +95,19 @@ def test_poll_tools_exist():
             f"POLL_TOOLS entry {name!r} does not match any real registered "
             f"tool name (check the worker prefix). Known tools: {sorted(specs)}"
         )
+
+
+def test_handback_tool_prefixes_name_declared_workers():
+    """Drift guard, not a regression test — passes today. COMMIT_TOOLS /
+    NAME_SEARCH_TOOLS / POLL_TOOLS hardcode {worker}_ prefixes. Renaming a
+    worker in workers.yaml would silently disarm a handback trigger — the
+    tool call just stops matching the set, with no error — a bug class
+    runtime worker loading makes much easier to hit than it used to be."""
+    from agent_core.workers.registry import WorkerRegistry
+
+    declared = {s.name for s in WorkerRegistry.load(_WORKERS_YAML).all()}
+    for tool in COMMIT_TOOLS | NAME_SEARCH_TOOLS | POLL_TOOLS:
+        prefix = tool.split("_", 1)[0]
+        assert prefix in declared, (
+            f"{tool!r} names worker {prefix!r}, which is not declared in "
+            f"workers.yaml (declared: {sorted(declared)})")

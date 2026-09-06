@@ -17,6 +17,21 @@ def result_text(result) -> str:
     return "".join(getattr(b, "text", "") for b in (getattr(result, "content", None) or []))
 
 
+def unavailable(ctx, worker: str = WORKER) -> str | None:
+    """Operator-facing reason this worker cannot serve a call, or None.
+
+    Advisory only — enforcement stays in RiskAwareToolPool.call_tool. Its value
+    here is avoiding a pointless approval prompt: with the spec gone from the
+    pool, resolve_declared_tier returns "high" for an unknown worker, so the
+    operator would be asked to approve a call that then fails with KeyError.
+
+    getattr-guarded because several test fakes (and any partially-constructed
+    agent) have a tool_pool but no worker_manager.
+    """
+    mgr = getattr(ctx.agent, "worker_manager", None)
+    return mgr.unavailable_reason(worker) if mgr is not None else None
+
+
 async def call(ctx, tool: str, args: dict | None = None) -> dict:
     """Call a frida worker tool through the audited pool and parse its JSON
     envelope. Returns the parsed dict, or an error-shaped dict ({"error": True,
@@ -27,6 +42,9 @@ async def call(ctx, tool: str, args: dict | None = None) -> dict:
     wire (risk-tier auditing still runs), but the pool must never substitute a
     stub in place of the real payload — the operator sees the actual response.
     """
+    why = unavailable(ctx)
+    if why:
+        return {"error": True, "summary": why}
     result = await ctx.agent.tool_pool.call_tool(WORKER, tool, args or {}, ctx=ctx, capture=False)
     if getattr(result, "isError", False):
         return {"error": True, "summary": f"{tool} call failed"}
