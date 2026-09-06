@@ -101,18 +101,22 @@ Process: ExecStart=/full/path/to/venv/bin/pare-frida-mcp (code=exited, status=21
 binary, which would then have failed `203/EXEC` for the same reason. A placeholder that
 looks fillable is a placeholder that gets shipped, so substitute the values instead.
 
-**With the venv active**, check what you are about to write:
+**With the venv active**, compute the values into variables and LOOK at them before
+anything is written:
 
 ```bash
-echo "user:    $(whoami)"
-echo "binary:  $(command -v pare-frida-mcp)"
-echo "host if: tailscale0 -> $(ip -4 -o addr show tailscale0 | awk '{print $4}')"
+SVC_USER="$(id -un)"
+SVC_BIN="$(command -v pare-frida-mcp)"
+echo "user=[$SVC_USER]"
+echo "bin =[$SVC_BIN]"
+ip -4 -o addr show tailscale0 | awk '{print "tailscale0 -> " $4}'
 ```
 
-All three must be non-empty. An empty `binary` means the venv is not active or
-`pip install -e .` has not run; an empty `host if` means tailscaled is not up yet.
+All three must be non-empty, and neither of the first two may contain a `$`. An empty
+`bin` means the venv is not active or `pip install -e .` has not run; no `tailscale0`
+line means tailscaled is not up yet.
 
-Then write the unit from those values:
+Then write the unit from those variables:
 
 ```bash
 sudo tee /etc/systemd/system/pare-frida-mcp.service > /dev/null <<EOF
@@ -123,11 +127,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=$(whoami)
+User=${SVC_USER}
 Environment=AGENT_WORKER_TRANSPORT=http
 Environment=AGENT_WORKER_HOST=tailscale0
 Environment=AGENT_WORKER_PORT=9101
-ExecStart=$(command -v pare-frida-mcp)
+ExecStart=${SVC_BIN}
 Restart=on-failure
 RestartSec=5
 
@@ -140,22 +144,43 @@ Note the **unquoted** `<<EOF`: the shell expands `$(whoami)` and `$(command -v .
 writes. Quoting it (`<<'EOF'`) would put the literal `$(...)` in the file and reproduce
 exactly the failure this replaces.
 
-Read back what landed before enabling anything:
+Now make the shell PROVE it substituted, rather than eyeballing it. This exact check is
+here because eyeballing failed in practice: a unit went live containing the literal
+`User=$(whoami)`, and it took a `systemctl cat` and a journal dump to see it.
 
 ```bash
-grep -E '^(User|ExecStart)=' /etc/systemd/system/pare-frida-mcp.service
+if grep -q '\$' /etc/systemd/system/pare-frida-mcp.service; then
+  echo "STILL HAS PLACEHOLDERS — do not enable"
+  grep -n '\$' /etc/systemd/system/pare-frida-mcp.service
+else
+  echo clean
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now pare-frida-mcp
+fi
 ```
 
-Neither line may contain `<`, `>` or `$`. Then:
+If it says STILL HAS PLACEHOLDERS, the heredoc is not being expanded — usually because
+the text is being pasted into an editor rather than run, or because the heredoc got
+quoted. Read the two `echo` values from the previous step and type them into the file
+literally; that works every time.
+
+Then:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now pare-frida-mcp
 systemctl status pare-frida-mcp
 sudo ss -tlnp | grep 9101        # MUST show the tailnet IP, never 0.0.0.0
 ```
 
 That last line is the one worth actually reading.
+
+**Check all three `Environment=` lines survived.** A unit missing
+`AGENT_WORKER_PORT` starts and immediately exits 1 with "AGENT_WORKER_PORT is required
+when serving over http" -- the kit refusing to invent a default port, which is correct
+but looks like a crash if you are not expecting it:
+
+```bash
+grep -c '^Environment=' /etc/systemd/system/pare-frida-mcp.service   # must be 3
+```
 
 **If it still will not start**, the exit code names the cause:
 
@@ -164,7 +189,18 @@ That last line is the one worth actually reading.
 | `217/USER` | `User=` unresolvable | placeholder left in, or a typo'd username |
 | `203/EXEC` | `ExecStart=` not executable | wrong path, or the venv moved |
 | `1` with a wildcard message | the worker refused the bind | `AGENT_WORKER_HOST` resolved to `0.0.0.0` — this is the refusal working |
+| `1` with "AGENT_WORKER_PORT is required" | no port in the unit | an `Environment=` line was dropped — expect 3 |
 | `1`, no output | look at `journalctl -u pare-frida-mcp -n 50` | usually a missing dependency from a skipped `pip install` |
+
+`systemctl cat pare-frida-mcp` is the command that ends the guessing: it prints what
+systemd actually parsed, including any drop-in under `.service.d/` that editing the main
+file would never touch. `sudo journalctl -u pare-frida-mcp -n 30` names the specific
+failure -- for 217 it says "Failed to determine user credentials", which points at the
+`User=` line and nothing else.
+
+Note that `User=root` does NOT cause 217; root always resolves. If you see 217, the
+value is unresolvable for some other reason -- a literal placeholder, a typo, or quotes
+around the name.
 
 ### 1.6 The emulator
 
