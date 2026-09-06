@@ -66,10 +66,21 @@ workers:
   # The worker itself is still being built (../pare-hardware-mcp), so a load
   # today reports spawn_failed — which is the honest answer, and visible in
   # /worker list rather than a silently absent worker.
+  # NOTE: declared as stdio against a local path because pare-hardware-mcp does
+  # not exist yet. It is designed to run on pare-bench (the Pi) as
+  # transport: streamable_http with an endpoint — see the ArcticBase/artifacts
+  # spec. Change both together; a networked worker also needs autoload: false
+  # (already set), connect_timeout, read_timeout and artifact_root.
   hardware:
     command: /mnt/secondary/projects/PARE/.venv/bin/pare-hardware-mcp
     transport: stdio
-    risk_default: medium        # FLOOR; per-tool wire tiers and pins escalate
+    # FLOOR — raised from medium. RiskAwareToolPool gates only high and
+    # critical (risk_pool.py:386), so a medium floor meant any hardware tool
+    # that failed to advertise a wire tier — a half-wired dev build, or a
+    # tampered one under-reporting — DISPATCHED WITH NO PROMPT AT ALL,
+    # bypassing every approval surface. A floor of high means the worst case
+    # is a prompt, not a silent flash write.
+    risk_default: high
     autoload: false
     capability_tags: [hardware, uart, jtag, glitch]
 
@@ -125,6 +136,21 @@ risk_overrides:
   # gating does not rest solely on what the worker advertises over the wire —
   # which a half-wired dev build may not advertise at all.
   - ["mitm_inject_request", "critical"]
+
+  # --- hardware (pare-hardware-mcp), FORWARD-DECLARED ---------------------
+  # The worker does not exist yet, so these match nothing today and
+  # tests/test_risk_overrides_coverage.py reports them as unchecked rather
+  # than failing. Once the package is installed, a pin matching no tool FAILS
+  # that test — which is the point: it forces the tool names to be reconciled
+  # against these patterns rather than shipped past them.
+  #
+  # critical means: prompts every time, can never be session-approved, and
+  # requires a typed justification (risk_pool.py:387, :454, :463). That is the
+  # correct posture for anything that writes to a target you cannot un-write.
+  - ["hardware_flash_*", "critical"]
+  - ["hardware_erase_*", "critical"]
+  - ["hardware_write_*", "critical"]
+  - ["hardware_glitch_*", "critical"]
   - ["mitm_add_blocking_rule", "high"]
   - ["mitm_add_modification_rule", "high"]
   - ["mitm_replay_flow", "high"]
