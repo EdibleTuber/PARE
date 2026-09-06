@@ -89,8 +89,37 @@ strand the worker.
 
 ### 1.5 The unit
 
-```ini
-# /etc/systemd/system/pare-frida-mcp.service
+**Generate it; do not paste it.** An earlier version of this doc gave a template with
+`User=<you>` and `ExecStart=/full/path/to/venv/bin/pare-frida-mcp`, and the placeholders
+survived into a real unit file. systemd reported:
+
+```
+Process: ExecStart=/full/path/to/venv/bin/pare-frida-mcp (code=exited, status=217/USER)
+```
+
+`217/USER` means it could not resolve the `User=` line. It never got as far as the
+binary, which would then have failed `203/EXEC` for the same reason. A placeholder that
+looks fillable is a placeholder that gets shipped, so substitute the values instead.
+
+**With the venv active**, compute the values into variables and LOOK at them before
+anything is written:
+
+```bash
+SVC_USER="$(id -un)"
+SVC_BIN="$(command -v pare-frida-mcp)"
+echo "user=[$SVC_USER]"
+echo "bin =[$SVC_BIN]"
+ip -4 -o addr show tailscale0 | awk '{print "tailscale0 -> " $4}'
+```
+
+All three must be non-empty, and neither of the first two may contain a `$`. An empty
+`bin` means the venv is not active or `pip install -e .` has not run; no `tailscale0`
+line means tailscaled is not up yet.
+
+Then write the unit from those variables:
+
+```bash
+sudo tee /etc/systemd/system/pare-frida-mcp.service > /dev/null <<EOF
 [Unit]
 Description=PARE frida worker
 After=network-online.target tailscaled.service
@@ -98,26 +127,80 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=<you>
+User=${SVC_USER}
 Environment=AGENT_WORKER_TRANSPORT=http
 Environment=AGENT_WORKER_HOST=tailscale0
 Environment=AGENT_WORKER_PORT=9101
-ExecStart=/full/path/to/venv/bin/pare-frida-mcp
+ExecStart=${SVC_BIN}
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+EOF
 ```
 
+Note the **unquoted** `<<EOF`: the shell expands `$(whoami)` and `$(command -v ...)` as it
+writes. Quoting it (`<<'EOF'`) would put the literal `$(...)` in the file and reproduce
+exactly the failure this replaces.
+
+Now make the shell PROVE it substituted, rather than eyeballing it. This exact check is
+here because eyeballing failed in practice: a unit went live containing the literal
+`User=$(whoami)`, and it took a `systemctl cat` and a journal dump to see it.
+
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now pare-frida-mcp
+if grep -q '\$' /etc/systemd/system/pare-frida-mcp.service; then
+  echo "STILL HAS PLACEHOLDERS — do not enable"
+  grep -n '\$' /etc/systemd/system/pare-frida-mcp.service
+else
+  echo clean
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now pare-frida-mcp
+fi
+```
+
+If it says STILL HAS PLACEHOLDERS, the heredoc is not being expanded — usually because
+the text is being pasted into an editor rather than run, or because the heredoc got
+quoted. Read the two `echo` values from the previous step and type them into the file
+literally; that works every time.
+
+Then:
+
+```bash
 systemctl status pare-frida-mcp
 sudo ss -tlnp | grep 9101        # MUST show the tailnet IP, never 0.0.0.0
 ```
 
 That last line is the one worth actually reading.
+
+**Check all three `Environment=` lines survived.** A unit missing
+`AGENT_WORKER_PORT` starts and immediately exits 1 with "AGENT_WORKER_PORT is required
+when serving over http" -- the kit refusing to invent a default port, which is correct
+but looks like a crash if you are not expecting it:
+
+```bash
+grep -c '^Environment=' /etc/systemd/system/pare-frida-mcp.service   # must be 3
+```
+
+**If it still will not start**, the exit code names the cause:
+
+| Code | Means | Usually |
+|---|---|---|
+| `217/USER` | `User=` unresolvable | placeholder left in, or a typo'd username |
+| `203/EXEC` | `ExecStart=` not executable | wrong path, or the venv moved |
+| `1` with a wildcard message | the worker refused the bind | `AGENT_WORKER_HOST` resolved to `0.0.0.0` — this is the refusal working |
+| `1` with "AGENT_WORKER_PORT is required" | no port in the unit | an `Environment=` line was dropped — expect 3 |
+| `1`, no output | look at `journalctl -u pare-frida-mcp -n 50` | usually a missing dependency from a skipped `pip install` |
+
+`systemctl cat pare-frida-mcp` is the command that ends the guessing: it prints what
+systemd actually parsed, including any drop-in under `.service.d/` that editing the main
+file would never touch. `sudo journalctl -u pare-frida-mcp -n 30` names the specific
+failure -- for 217 it says "Failed to determine user credentials", which points at the
+`User=` line and nothing else.
+
+Note that `User=root` does NOT cause 217; root always resolves. If you see 217, the
+value is unresolvable for some other reason -- a literal placeholder, a typo, or quotes
+around the name.
 
 ### 1.6 The emulator
 
@@ -127,6 +210,40 @@ laptop**. The worker talks to frida locally; only PARE crosses the network.
 ---
 
 ## Part 2 — On the inference server
+
+### 2.0 Which `workers.yaml`, and how many daemons
+
+**The inference server's.** Only PARE reads `workers.yaml` --
+`pare/agent.py:116` calls `WorkerRegistry.load(self.config.workers_yaml_path)` -- and
+the worker packages never read it at all. The laptop's frida worker takes its entire
+configuration from the three `Environment=` lines in its unit.
+
+If the laptop was previously your dev box it still has a PARE checkout with its own
+`workers.yaml`. That file is inert unless a daemon is running there, and it should
+stay that way for this test.
+
+**Run exactly one daemon.** Pointing a second one at the same remote worker is
+listed in the spec (§6) as a trigger to revisit the trust boundary, and the mechanism
+is concrete: `_session_approved` and `_tier_highwater` are plain instance attributes on
+`RiskAwareToolPool` (`risk_pool.py:114` and `:119`), so they are per-PROCESS. The
+high-water mark is what makes escalate-only monotonic across *time* rather than only
+within one resolution -- a tool that escalated to `high` stays `high` for the session.
+A second daemon starts with an empty table, so the same tool resolves at its floor
+again. That is a downgrade channel, not a theoretical one.
+
+It also splits the audit log across two machines, which undermines the "total record of
+what this worker did" property -- the one you want after a bricked target.
+
+So:
+
+| Working from | Do this |
+|---|---|
+| Inference server (this test) | Stop any PARE daemon on the laptop |
+| Laptop, later | Stop the worker unit there, and set `frida` back to `transport: stdio` in the LAPTOP's `workers.yaml` |
+
+Do not run both against the remote worker at once, even briefly. Beyond the tier
+reset, two daemons would be attaching to the same device through one frida worker and
+hook state gets confusing fast.
 
 ### 2.1 Point `workers.yaml` at the laptop
 
