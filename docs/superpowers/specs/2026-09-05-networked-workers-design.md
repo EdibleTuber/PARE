@@ -282,10 +282,29 @@ v2's §5.5 claimed the audit log is unaffected. It is not:
   Partial fix, cheap: `_own` already calls `initialize()` and discards the result;
   capture `serverInfo.name`/`.version` and record them. Not equivalent to an mtime, but
   it turns nothing into a value that changes when the remote build changes.
+
+  **Trap found while implementing this, and it nearly voided the control.**
+  `mcp.server.fastmcp.FastMCP` takes **no `version` argument**, so the low-level
+  `Server` it builds gets `None` and the SDK reports **its own version** as
+  `serverInfo.version`. Measured against a real worker: a freshly built
+  `pare-static-mcp` announced `1.29.1` — the `mcp` library's version. That is *worse
+  than absent*, because it looks like provenance and stays constant across every
+  redeploy, which is exactly the change it exists to reveal. `pare-worker-kit`'s
+  `run_worker` now stamps the real package version before serving, so no worker can
+  forget; the same worker then reported `0.1.0`. A mock would not have shown this — it
+  only appears in a live handshake.
 - **`worker_contract_version=1` is hardcoded** into every audit row
   (`risk_pool.py:257,471`) rather than read from the connected worker, so version skew
-  is invisible at connect time *and* unrecoverable afterwards. The same
-  `initialize()` result should populate it.
+  is invisible at connect time *and* unrecoverable afterwards.
+
+  **Corrected during implementation:** v3 said "the same `initialize()` result should
+  populate it". It cannot — **there is no wire mechanism for a worker to advertise its
+  contract version.** `WorkerContract.contract_version()` is a *conformance Protocol*,
+  the shape a worker's test suite implements, not something sent over MCP; the workers
+  define `CONTRACT_VERSION = 1` locally and never transmit it. Doing this properly is a
+  protocol addition across four repos and is its own piece of work. Step 1 replaced the
+  two literals with `WORKER_CONTRACT_VERSION` so a bump is one edit, and put the
+  *identity* that actually detects a swap into the lifecycle row instead.
 - **v2's "every call audited before and after" overstates it.** There is one terminal
   audit row per call, whatever the outcome, including cancellation. The guarantee — no
   silent unaudited dispatch — holds; the mechanism is one row, not two.
@@ -474,13 +493,15 @@ conversation happens. v2's deployment table implied otherwise and should not.
 
 ## 9. Sequencing
 
-1. **`agent_core` bug fixes** — §5.1(a) close leak, (b) timeout split and the
-   `streamable_http_client` migration, (c) `unreachable` error kind. Plus the §6
+1. ~~**`agent_core` bug fixes**~~ — **DONE.** §5.1(a) close leak, (b) timeout split and
+   the `streamable_http_client` migration, (c) `unreachable` error kind; then the §6
    generation-on-transport-error rule, `serverInfo` capture, and the §5.4 audit
-   corrections. Ships as v1.9.0.
-2. **`pare-worker-kit`** — new package; bidirectional guard test on the constant.
-3. **The three existing workers** — adopt `run_worker`, depend on the kit rather than
-   `agent_core`. No behaviour change while they stay stdio.
+   corrections, with the contract-version scope corrected above. Ships as v1.9.0.
+2. ~~**`pare-worker-kit`**~~ — **DONE.** New package, `mcp`-only; bidirectional guard
+   test on the constant; `run_worker` stamps the real version.
+3. ~~**The three existing workers**~~ — **DONE.** All three adopt `run_worker` and
+   depend on the kit rather than `agent_core`. Verified over both transports as real
+   subprocesses: identical tool sets, every risk tier intact in `_meta`.
 4. **Liveness (D7) and the operator-facing corrections** — §5.6 transport-aware copy,
    §7.4 endpoint column, §7.2's poll-tool handback trigger.
 5. **Move `frida` to the laptop** — the proof, with a systemd unit. Verified by a real
