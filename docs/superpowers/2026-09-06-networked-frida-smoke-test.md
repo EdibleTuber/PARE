@@ -211,6 +211,40 @@ laptop**. The worker talks to frida locally; only PARE crosses the network.
 
 ## Part 2 — On the inference server
 
+### 2.0 Which `workers.yaml`, and how many daemons
+
+**The inference server's.** Only PARE reads `workers.yaml` --
+`pare/agent.py:116` calls `WorkerRegistry.load(self.config.workers_yaml_path)` -- and
+the worker packages never read it at all. The laptop's frida worker takes its entire
+configuration from the three `Environment=` lines in its unit.
+
+If the laptop was previously your dev box it still has a PARE checkout with its own
+`workers.yaml`. That file is inert unless a daemon is running there, and it should
+stay that way for this test.
+
+**Run exactly one daemon.** Pointing a second one at the same remote worker is
+listed in the spec (§6) as a trigger to revisit the trust boundary, and the mechanism
+is concrete: `_session_approved` and `_tier_highwater` are plain instance attributes on
+`RiskAwareToolPool` (`risk_pool.py:114` and `:119`), so they are per-PROCESS. The
+high-water mark is what makes escalate-only monotonic across *time* rather than only
+within one resolution -- a tool that escalated to `high` stays `high` for the session.
+A second daemon starts with an empty table, so the same tool resolves at its floor
+again. That is a downgrade channel, not a theoretical one.
+
+It also splits the audit log across two machines, which undermines the "total record of
+what this worker did" property -- the one you want after a bricked target.
+
+So:
+
+| Working from | Do this |
+|---|---|
+| Inference server (this test) | Stop any PARE daemon on the laptop |
+| Laptop, later | Stop the worker unit there, and set `frida` back to `transport: stdio` in the LAPTOP's `workers.yaml` |
+
+Do not run both against the remote worker at once, even briefly. Beyond the tier
+reset, two daemons would be attaching to the same device through one frida worker and
+hook state gets confusing fast.
+
 ### 2.1 Point `workers.yaml` at the laptop
 
 ```yaml
