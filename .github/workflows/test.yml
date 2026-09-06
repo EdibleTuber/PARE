@@ -22,5 +22,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+      - name: Install the worker contract packages
+        # tests/test_risk_overrides_coverage.py checks every risk_overrides pin
+        # in workers.yaml against the REAL tool names, because a typo'd pin
+        # ("frida_execute_scrpt") matches nothing and silently yields no
+        # protection. That test deliberately FAILS rather than skips when no
+        # contract package is installed -- an unchecked run must not look
+        # identical to a verified one -- so CI has to supply them.
+        run: |
+          pip install \
+            "pare-frida-mcp @ git+https://github.com/EdibleTuber/pare-frida-mcp.git" \
+            "pare-static-mcp @ git+https://github.com/EdibleTuber/pare-static-mcp.git" \
+            "pare-mitm-mcp @ git+https://github.com/EdibleTuber/pare-mitm-mcp.git"
       - name: Run tests
         run: pytest -v
