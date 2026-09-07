@@ -79,9 +79,37 @@ HtmlViewer.svelte:32-36`; no `sandbox` appears anywhere in `frontend/src`), from
 same-origin URL, and its postMessage bridge takes its target workbench and object from
 the *message payload* with no origin check (`frontend/src/lib/bridge.ts:48`, `:77`).
 Model-authored HTML would therefore execute with full access to the ArcticBase API.
-`mini-md.ts:3` states markdown rendering *"HTML escapes everything else; no
-`<script>`/`<iframe>`/raw HTML pass-through"*, which removes the class. **Confirm the
-server-side md render path escapes as the inline renderer does before relying on this.**
+**Confirmed on 2026-09-07 — and the reasoning that got here was wrong twice.**
+
+First, `mini-md.ts` was the wrong renderer to cite. It is imported in exactly one place,
+`WorkbenchDashboard.svelte:5`, for workbench *descriptions*, and never renders an `md`
+object. The path that matters is server-side: `render.py:202-218` renders `kind=md`
+through `markdown_it`, configured at `render.py:22` as
+`MarkdownIt("commonmark", {"html": False, "linkify": True, "typographer": True})`.
+
+Second, and worse: **`md` does not escape the iframe problem.** `MdViewer.svelte:32`
+renders the server output in an iframe with no `sandbox` attribute, from the same
+same-origin URL, exactly as `HtmlViewer` does. The two kinds share the container and
+differ only in what reaches it. This decision buys **no** structural isolation, and
+nothing about the viewer would contain a failure. It rests entirely on `html: False`.
+
+That one line does hold. 26 payloads -- raw tags, `javascript:`/`vbscript:`/
+`data:text/html` links with case, HTML-entity and whitespace variants, quote-breaks out
+of `href`, `src` and `title`, reference-style links, fenced-block and table-cell escapes,
+and tasklist injections -- were rendered through that exact configuration, and the output
+was **parsed** for live markup rather than grepped for strings. Zero produced a
+script-capable tag, an `on*` handler, or a script-scheme URL. (A first pass that grepped
+reported eleven leaks; every one was escaped text matching a substring. Parse the output.)
+Verified with the `tasklists` plugin genuinely loaded (`mdit-py-plugins` 0.6.1,
+`markdown-it-py` 4.2.0), because `render.py:26-32` falls back silently when it is absent,
+so a run without it exercises the wrong branch.
+
+**What this makes load-bearing.** `{"html": False}` at `render.py:22` is a security
+control, not a formatting preference. Flipping it -- or adding a plugin that emits raw
+HTML -- makes `md` exactly as dangerous as `html`, and the viewer will not stop it.
+ArcticBase is consumed, not modified (§3), so this is a property of a dependency we do
+not control: re-run the payload check after any ArcticBase upgrade before trusting it
+again.
 
 **D6 — The artifact root is operator-declared in `workers.yaml`,** not in the worker's
 environment. The trust anchor is the file the worker cannot touch — the same reasoning
