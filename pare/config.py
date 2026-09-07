@@ -37,6 +37,12 @@ class PAREConfig(BaseConfig):
     )
     project_marker: str | None = ".pare"
 
+    # The workbench host (ArcticBase). Empty means "not configured", and
+    # the daemon publishes nothing rather than defaulting to localhost --
+    # a default that is right for one deployment and wrong for every other
+    # one sends findings into a void that looks like success.
+    arcticbase_url: str = ""
+
 
 def load_config() -> PAREConfig:
     """Load PARE config from PARE_* environment variables."""
