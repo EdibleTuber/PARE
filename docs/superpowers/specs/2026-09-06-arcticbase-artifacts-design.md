@@ -142,7 +142,34 @@ tarball into memory to serve it.
 
 **This must be enforced, not merely stated.** `ARCTIC_BASE_MAX_UPLOAD_BYTES` defaults to
 2 GB — precisely the failure above. PARE posts only markdown and JSON descriptors here,
-so set it to **8 MiB**. One environment line converts a rule into an enforcement.
+so set it to **8 MiB**.
+
+**But "one environment line converts a rule into an enforcement" was wrong, and wrong in
+the worst possible place.** Measured on 2026-09-07 against a real instance running with
+`ARCTIC_BASE_MAX_UPLOAD_BYTES=8388608`:
+
+| Path | Capped? | Evidence |
+|---|---|---|
+| `POST /objects`, JSON inline `content` | **No** | 9 MiB accepted, HTTP 201, `size_bytes: 9437184` |
+| `POST /objects`, multipart `file` part | Yes | `objects.py:151` |
+| `PUT /objects/{oid}/content` | Yes | 9 MiB → HTTP 413 `upload exceeds size cap` |
+
+The setting is read correctly — `get_settings().max_upload_bytes` is 8388608 — and it is
+applied at `objects.py:151` and `objects.py:313`. Neither guards the JSON branch:
+`objects.py:170-184` encodes `body.content` to UTF-8 and stores it with no size check at
+all. The one path with no cap is the obvious one for posting markdown and a JSON
+descriptor, which is exactly what this section proposes PARE do.
+
+**Therefore the client publishes in two calls:** `POST /objects` with metadata and **no**
+`content`, then `PUT /objects/{oid}/content` with the bytes — the path that is actually
+enforced. PARE also checks the size itself before sending, so the operator gets a clear
+error instead of a 413, but the client-side check is the ergonomic half. The server-side
+cap is the control, and it only exists on the `PUT`.
+
+This is the fourth security rationale in this design that was more confident than its
+mechanism (see D5, and the two in §5.4). The pattern is consistent enough to be worth
+stating as a rule: a claim of the form *"X is safe because we set Y"* is not established
+until someone has watched Y refuse something.
 
 **Why hardware needs no new snapshot architecture.** A hardware tool *result* is a
 result and flows to the capture store at the wire layer like every other worker's. That
