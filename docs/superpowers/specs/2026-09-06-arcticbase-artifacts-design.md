@@ -79,9 +79,37 @@ HtmlViewer.svelte:32-36`; no `sandbox` appears anywhere in `frontend/src`), from
 same-origin URL, and its postMessage bridge takes its target workbench and object from
 the *message payload* with no origin check (`frontend/src/lib/bridge.ts:48`, `:77`).
 Model-authored HTML would therefore execute with full access to the ArcticBase API.
-`mini-md.ts:3` states markdown rendering *"HTML escapes everything else; no
-`<script>`/`<iframe>`/raw HTML pass-through"*, which removes the class. **Confirm the
-server-side md render path escapes as the inline renderer does before relying on this.**
+**Confirmed on 2026-09-07 — and the reasoning that got here was wrong twice.**
+
+First, `mini-md.ts` was the wrong renderer to cite. It is imported in exactly one place,
+`WorkbenchDashboard.svelte:5`, for workbench *descriptions*, and never renders an `md`
+object. The path that matters is server-side: `render.py:202-218` renders `kind=md`
+through `markdown_it`, configured at `render.py:22` as
+`MarkdownIt("commonmark", {"html": False, "linkify": True, "typographer": True})`.
+
+Second, and worse: **`md` does not escape the iframe problem.** `MdViewer.svelte:32`
+renders the server output in an iframe with no `sandbox` attribute, from the same
+same-origin URL, exactly as `HtmlViewer` does. The two kinds share the container and
+differ only in what reaches it. This decision buys **no** structural isolation, and
+nothing about the viewer would contain a failure. It rests entirely on `html: False`.
+
+That one line does hold. 26 payloads -- raw tags, `javascript:`/`vbscript:`/
+`data:text/html` links with case, HTML-entity and whitespace variants, quote-breaks out
+of `href`, `src` and `title`, reference-style links, fenced-block and table-cell escapes,
+and tasklist injections -- were rendered through that exact configuration, and the output
+was **parsed** for live markup rather than grepped for strings. Zero produced a
+script-capable tag, an `on*` handler, or a script-scheme URL. (A first pass that grepped
+reported eleven leaks; every one was escaped text matching a substring. Parse the output.)
+Verified with the `tasklists` plugin genuinely loaded (`mdit-py-plugins` 0.6.1,
+`markdown-it-py` 4.2.0), because `render.py:26-32` falls back silently when it is absent,
+so a run without it exercises the wrong branch.
+
+**What this makes load-bearing.** `{"html": False}` at `render.py:22` is a security
+control, not a formatting preference. Flipping it -- or adding a plugin that emits raw
+HTML -- makes `md` exactly as dangerous as `html`, and the viewer will not stop it.
+ArcticBase is consumed, not modified (§3), so this is a property of a dependency we do
+not control: re-run the payload check after any ArcticBase upgrade before trusting it
+again.
 
 **D6 — The artifact root is operator-declared in `workers.yaml`,** not in the worker's
 environment. The trust anchor is the file the worker cannot touch — the same reasoning
@@ -114,7 +142,34 @@ tarball into memory to serve it.
 
 **This must be enforced, not merely stated.** `ARCTIC_BASE_MAX_UPLOAD_BYTES` defaults to
 2 GB — precisely the failure above. PARE posts only markdown and JSON descriptors here,
-so set it to **8 MiB**. One environment line converts a rule into an enforcement.
+so set it to **8 MiB**.
+
+**But "one environment line converts a rule into an enforcement" was wrong, and wrong in
+the worst possible place.** Measured on 2026-09-07 against a real instance running with
+`ARCTIC_BASE_MAX_UPLOAD_BYTES=8388608`:
+
+| Path | Capped? | Evidence |
+|---|---|---|
+| `POST /objects`, JSON inline `content` | **No** | 9 MiB accepted, HTTP 201, `size_bytes: 9437184` |
+| `POST /objects`, multipart `file` part | Yes | `objects.py:151` |
+| `PUT /objects/{oid}/content` | Yes | 9 MiB → HTTP 413 `upload exceeds size cap` |
+
+The setting is read correctly — `get_settings().max_upload_bytes` is 8388608 — and it is
+applied at `objects.py:151` and `objects.py:313`. Neither guards the JSON branch:
+`objects.py:170-184` encodes `body.content` to UTF-8 and stores it with no size check at
+all. The one path with no cap is the obvious one for posting markdown and a JSON
+descriptor, which is exactly what this section proposes PARE do.
+
+**Therefore the client publishes in two calls:** `POST /objects` with metadata and **no**
+`content`, then `PUT /objects/{oid}/content` with the bytes — the path that is actually
+enforced. PARE also checks the size itself before sending, so the operator gets a clear
+error instead of a 413, but the client-side check is the ergonomic half. The server-side
+cap is the control, and it only exists on the `PUT`.
+
+This is the fourth security rationale in this design that was more confident than its
+mechanism (see D5, and the two in §5.4). The pattern is consistent enough to be worth
+stating as a rule: a claim of the form *"X is safe because we set Y"* is not established
+until someone has watched Y refuse something.
 
 **Why hardware needs no new snapshot architecture.** A hardware tool *result* is a
 result and flows to the capture store at the wire layer like every other worker's. That
