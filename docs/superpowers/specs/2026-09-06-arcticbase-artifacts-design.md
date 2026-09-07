@@ -197,9 +197,16 @@ daemon then does the lexical check it *can* do — absolute, normalised, contain
 `..` — as defence in depth.
 
 **Be honest about what this buys.** A worker-side check defends against a *buggy* worker
-and a confused path, not against a hostile one. The control that survives an untrusted
-producer is content-addressing: the operator's retrieval verifies `sha256` after
-transfer and refuses on mismatch.
+and a confused path, not against a hostile one. **And do not reach for `sha256` as the
+answer to that** — an earlier draft of this section did, and it was wrong in a way the
+section below already knew. The producer computes both the file *and* its digest, so a
+hostile or broken producer returns a perfectly correct hash of whatever bytes it chose;
+see "A truncated dump must not produce a valid-looking descriptor" below, where exactly
+this case is spelled out. Content-addressing on retrieval is **integrity, not
+authenticity**: it detects corruption in transit and a half-finished `scp`, and it is
+worth doing for that. It does not make an untrusted producer honest. What actually
+constrains a producer is the operator's own preflight and the fact that `workers.yaml`
+— the trust anchor the worker cannot touch — declares where that producer may write.
 
 **A missing root fails closed.** `WorkerSpec` sets no `model_config`, so pydantic's
 `extra="ignore"` applies — the class documents this hazard in situ for `autoload`. An
