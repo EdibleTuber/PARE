@@ -115,3 +115,16 @@ async def test_astartup_starts_liveness_and_ashutdown_stops_it(tmp_path):
         agent.worker_manager._liveness_interval <= 0
     await agent.ashutdown()
     assert agent.worker_manager._liveness_task is None
+
+
+@pytest.mark.parametrize("url", ["", "http://bench.example.invalid:2929"])
+def test_publish_finding_is_registered_only_when_a_workbench_host_is_configured(
+        tmp_path, url):
+    """Same reasoning config.py gives for enable_apk_re_agents: an
+    always-registered tool whose backend is not there hands the model a dead
+    tool it reaches for first and dead-ends on."""
+    from pare.tools import PublishFinding
+
+    agent = _agent(tmp_path, arcticbase_url=url)
+    classes = agent.register_tools()
+    assert (PublishFinding in classes) is bool(url)
