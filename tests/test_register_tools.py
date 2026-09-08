@@ -102,18 +102,25 @@ async def test_astartup_survives_a_worker_that_cannot_spawn(tmp_path):
     assert statuses["later"].loaded is False, "autoload: false must be skipped"
 
 
-async def test_astartup_starts_liveness_and_ashutdown_stops_it(tmp_path):
-    """A probe loop nobody starts is not a liveness story, and one nobody
-    stops logs spurious 'unreachable' warnings for a shutdown the operator
-    asked for."""
+async def test_astartup_starts_the_sweep_loop_and_ashutdown_stops_it(tmp_path):
+    """A probe loop nobody starts is not a liveness story, and one nobody stops
+    keeps probing through a shutdown the operator asked for.
+
+    PARE runs its own sweep loop rather than WorkerManager.start_liveness(),
+    because §8.2 requires the heartbeat to be written by the task that does the
+    polling -- see agent.py. The lifecycle guarantee is unchanged and still has
+    to hold; only the task it applies to moved.
+    """
     agent = _agent(tmp_path)
     agent.setup()
     agent.tool_executor = MagicMock()
     agent.tool_executor.add_all = MagicMock()
     await agent.astartup()
-    assert agent.worker_manager._liveness_task is not None or \
-        agent.worker_manager._liveness_interval <= 0
+    assert agent._sweep_task is not None and not agent._sweep_task.done()
     await agent.ashutdown()
+    assert agent._sweep_task.done(), "the sweep task outlived the daemon"
+    # agent_core's own loop must NOT also be running -- two loops would probe
+    # every worker twice per interval.
     assert agent.worker_manager._liveness_task is None
 
 

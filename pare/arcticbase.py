@@ -126,9 +126,8 @@ class ArcticBaseClient:
         raise PublishFailed(
             f"could not create workbench {slug!r}: {status} {raw[:200]!r}")
 
-    def publish(self, slug: str, *, kind: str, title: str, content: str,
-                description: str = "") -> str:
-        """Publish one object and return its id. Two calls; see the module docstring."""
+    def _check_publishable(self, kind: str, content: str) -> bytes:
+        """Both write paths go through here, so neither can drift from the other."""
         if kind not in PUBLISHABLE_KINDS:
             raise UnpublishableKind(
                 f"refusing to publish kind {kind!r}; this client publishes only "
@@ -138,12 +137,18 @@ class ArcticBaseClient:
                 f"as one.")
         payload = content.encode("utf-8")
         if len(payload) > self._max_bytes:
-            # Checked BEFORE the POST. Doing it after would leave a
+            # Checked BEFORE any write. Doing it after would leave a
             # metadata-only object behind when the PUT is rejected.
             raise ContentTooLarge(
                 f"content is {len(payload)} bytes, over the {self._max_bytes} "
                 f"byte limit for a workbench object; artifacts stay on the "
                 f"machine that produced them and only a descriptor travels")
+        return payload
+
+    def publish(self, slug: str, *, kind: str, title: str, content: str,
+                description: str = "") -> str:
+        """Publish one object and return its id. Two calls; see the module docstring."""
+        payload = self._check_publishable(kind, content)
 
         meta = json.dumps(
             {"kind": kind, "title": title, "description": description}).encode()
@@ -163,6 +168,38 @@ class ArcticBaseClient:
                 f"created object {oid} in {slug!r} but its content was refused: "
                 f"{status} {raw[:200]!r}")
         return oid
+
+    def upsert(self, slug: str, *, kind: str, title: str, content: str) -> str:
+        """Create the object named `title`, or replace the content of the one
+        that already exists. Returns its id.
+
+        `publish` mints a new object per call, which is right for a finding and
+        wrong for anything written repeatedly: the heartbeat beats 1440 times a
+        day, and a workbench accumulating 1440 objects a day is not a status
+        page, it is a landfill.
+
+        Matching is by title within the workbench. That is ArcticBase's only
+        stable handle short of storing the object id ourselves, and storing it
+        would not survive a daemon restart -- which is exactly when the beat
+        matters most.
+        """
+        self._check_publishable(kind, content)
+        status, raw = self._request("GET", f"/workbenches/{slug}/objects")
+        if status != 200:
+            raise PublishFailed(
+                f"could not list objects in {slug!r}: {status} {raw[:200]!r}")
+        existing = next(
+            (o["id"] for o in json.loads(raw) if o.get("title") == title), None)
+        if existing is None:
+            return self.publish(slug, kind=kind, title=title, content=content)
+        status, raw = self._request(
+            "PUT", f"/workbenches/{slug}/objects/{existing}/content",
+            body=content.encode("utf-8"), content_type="text/markdown")
+        if status != 200:
+            raise PublishFailed(
+                f"could not replace content of {existing} in {slug!r}: "
+                f"{status} {raw[:200]!r}")
+        return existing
 
     def publish_report(self, slug: str, title: str, markdown: str) -> str:
         """A model-authored finding. Always `md` -- D5, enforced by having no
