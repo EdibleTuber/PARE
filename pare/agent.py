@@ -53,7 +53,7 @@ from pare.handback import (
     disambig_question, spin_question,
 )
 from pare.repeat_guard import RepeatGuard
-from pare.tools import ReadVaultDoc, StaticAnalyze
+from pare.tools import PublishFinding, ReadVaultDoc, StaticAnalyze
 from pare.tools._http import ApkReAgentsClient
 
 logger = logging.getLogger(__name__)
@@ -70,8 +70,8 @@ class PareAgent(Agent):
     env_prefix = "PARE_"
 
     tools = [ReadVaultDoc, SearchCapture, ReadCapture]  # add Tool subclasses here
-    # StaticAnalyze (apk_re_agents) is appended in register_tools() only when
-    # config.enable_apk_re_agents is set (default off) — see setup().
+    # StaticAnalyze (apk_re_agents) and PublishFinding (ArcticBase) are appended
+    # in register_tools() only when their backend is configured — see setup().
     commands = [
         Hello, Health, Snapshot,
         Devices, Ps, Apps, Sessions,   # operator fast-path views
@@ -166,7 +166,15 @@ class PareAgent(Agent):
         that dead loop. astartup() runs in the serving loop instead, so that
         whole dance is gone.
         """
-        return [StaticAnalyze] if self.config.enable_apk_re_agents else []
+        extra = []
+        if self.config.enable_apk_re_agents:
+            extra.append(StaticAnalyze)
+        if self.config.arcticbase_url:
+            # Same reasoning config.py gives for apk_re_agents: a tool whose
+            # backend is not configured is a dead end the model reaches for
+            # first, so it is absent rather than present-and-failing.
+            extra.append(PublishFinding)
+        return extra
 
     async def astartup(self) -> None:
         """Build the worker manager and connect every autoload worker.
