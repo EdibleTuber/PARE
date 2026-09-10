@@ -9,26 +9,23 @@ Ubuntu Server has no X, no Wayland and no browser. `cage` is a Wayland kiosk
 compositor: one client, fullscreen, no window manager, no desktop. That is a much
 smaller surface than a desktop environment installed to show a single page.
 
-## 0. Which user
+## 0. Which user — ALREADY SATISFIED
 
-The status page runs as the `pare` nologin service user. **The kiosk cannot.** It
-needs a real login user with a real home, because the Chromium snap needs a
-writable `HOME` and seat access comes from a logind session that a nologin account
-never gets. Use your normal login user (`ubuntu` by default) and set `User=`/
-`Group=` in the unit to match.
+An earlier draft of this file said the kiosk needed a different user from the
+status page. That was written before I could see the device, assuming `pare`
+would be a `nologin` service account. It is not: surveyed as uid 1000 with
+`/home/pare` and `/bin/bash`, so it is a real login user and one account runs
+both units. The unit says `User=pare`.
 
-Add it to the groups that own the hardware:
-
-```bash
-sudo usermod -aG video,input,render "$USER"
-```
-
-Log out and back in, then confirm — group changes do not apply to an existing
-session:
+The group prerequisites are also already met — `pare` is in `video`, `render`
+and `input`, so no `usermod` and no re-login. Confirm if you like:
 
 ```bash
 id | tr ',' '\n' | grep -E 'video|input|render'
 ```
+
+The screen is on the DSI ribbon (`card1-DSI-1` reports `connected`; both HDMI
+outputs are disconnected), so cage will drive that panel.
 
 ## 1. Install
 

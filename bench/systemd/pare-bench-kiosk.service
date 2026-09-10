@@ -28,12 +28,14 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 
-# EDIT THIS. It must be a real login user with a real home directory and a
-# shell -- NOT the `pare` nologin service user the status page runs as. The
-# Chromium snap needs a writable HOME, and seat access comes from a logind
-# session, which a nologin account does not get.
-User=ubuntu
-Group=ubuntu
+# `pare` on this bench: surveyed as uid 1000 with /home/pare and /bin/bash, so
+# it is a real login user, already in video/render/input, and already the
+# tailscale operator. An earlier draft assumed a `nologin` service account and
+# insisted the kiosk use a different user -- that no longer applies, because the
+# Chromium snap needs a writable HOME and seat access needs a logind session,
+# both of which this account has.
+User=pare
+Group=pare
 
 # PAMName=login is what makes this work at all: it opens a real logind session,
 # which is what grants the seat, DRM and input access cage needs. Without it
