@@ -86,11 +86,31 @@ on its own.
 ## 4. Install the unit
 
 ```bash
-sudo cp pare-bench-kiosk.service /etc/systemd/system/
+sudo install -m 644 ~/pare-bench/systemd/pare-bench-kiosk.service \
+    /etc/systemd/system/pare-bench-kiosk.service
 sudo systemctl daemon-reload
-sudo systemctl disable --now getty@tty1        # cage owns tty1; Conflicts= also handles this
 sudo systemctl enable --now pare-bench-kiosk
 journalctl -u pare-bench-kiosk -n 40 --no-pager
+```
+
+## Do NOT disable getty@tty1 yourself
+
+An earlier version of this file told you to run
+`sudo systemctl disable --now getty@tty1` before enabling the kiosk, annotated
+"Conflicts= also handles this". It does handle it, which made the command
+redundant — and running it first is actively harmful: it removes the login
+prompt from the only screen, so the very next command has to be typed blind at a
+dead console. That is exactly what happened on this bench.
+
+`Conflicts=getty@tty1.service` in the unit stops getty as a *consequence* of the
+kiosk starting. That ordering matters: if the kiosk fails to start, getty is
+still there and you can still type. Leave it **enabled** — `enabled/inactive` is
+the correct steady state, and it is your recovery path if the kiosk ever dies.
+
+If a console is already gone, restore it over SSH, never from the dead screen:
+
+```bash
+sudo systemctl enable --now getty@tty1
 ```
 
 ## 5. Prove the failure modes, not just the happy path
