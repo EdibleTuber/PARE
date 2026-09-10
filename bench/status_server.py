@@ -139,7 +139,26 @@ def probe_arcticbase(fetch: Callable[..., tuple[int, bytes, dict]], *,
     except ValueError:
         version = "?"
     date_header = headers.get("Date") or headers.get("date")
-    return f"ok (v{version})", parse_http_date(date_header) if date_header else None
+    server_now = parse_http_date(date_header) if date_header else None
+
+    # The API answering is NOT the same as the page being servable, and this
+    # probe hands the kiosk off to the UI. On this bench /api/health returned
+    # 200 while / and /wb/<slug> returned {"detail":"Not Found"}, because
+    # ArcticBase's frontend had never been built -- so the screen went green and
+    # then redirected to a 404. Checking one surface and handing off to another
+    # is the "looks fine then isn't" failure this whole page exists to prevent.
+    try:
+        ui_status, _, _ = fetch(base_url.rstrip("/") + "/", timeout=PROBE_TIMEOUT)
+    except Exception as exc:
+        raise ProbeError(f"{base_url} serves its API but its web UI did not "
+                         f"answer ({type(exc).__name__}: {exc})") from exc
+    if ui_status != 200:
+        raise ProbeError(
+            f"{base_url} serves its API (v{version}) but its web UI returns "
+            f"{ui_status} -- the ArcticBase frontend has not been built, so "
+            f"there is nowhere to hand off to. Build frontend/dist and set "
+            f"ARCTIC_BASE_FRONTEND_DIST.")
+    return f"ok (v{version}, UI served)", server_now
 
 
 def probe_heartbeat(fetch: Callable[..., tuple[int, bytes, dict]], *,

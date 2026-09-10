@@ -269,3 +269,32 @@ def test_a_beat_from_far_in_the_future_is_a_failure_not_a_zero():
     with pytest.raises(ProbeError) as e:
         probe_heartbeat(_hb_fetch(payload), base_url=SERVER, server_now=server_now)
     assert "future" in str(e.value).lower()
+
+
+# --- the probe must not green-light a surface it never checked --------------
+
+def test_arcticbase_is_not_ok_when_the_page_we_hand_off_to_is_missing():
+    """Found on the bench: /api/health returned 200, the probe went green, and
+    the kiosk then redirected to /wb/<slug> which returned {"detail":"Not Found"}
+    because ArcticBase's frontend had never been built. The probe was checking
+    the API and handing off to the UI -- two different surfaces."""
+    def fetch(url, timeout=None):
+        if url.endswith("/api/health"):
+            return 200, b'{"status":"ok","version":"0.1.0"}', {"Date": "Wed, 10 Sep 2026 04:00:00 GMT"}
+        return 404, b'{"detail":"Not Found"}', {}
+
+    with pytest.raises(ProbeError) as e:
+        probe_arcticbase(fetch, base_url=SERVER)
+    msg = str(e.value)
+    assert "api" in msg.lower() and "frontend" in msg.lower(), msg
+
+
+def test_arcticbase_is_ok_when_both_the_api_and_the_ui_answer():
+    def fetch(url, timeout=None):
+        if url.endswith("/api/health"):
+            return 200, b'{"status":"ok","version":"0.1.0"}', {"Date": "Wed, 10 Sep 2026 04:00:00 GMT"}
+        return 200, b"<!doctype html><title>Arctic Base</title>", {}
+
+    detail, server_now = probe_arcticbase(fetch, base_url=SERVER)
+    assert "0.1.0" in detail
+    assert server_now is not None
