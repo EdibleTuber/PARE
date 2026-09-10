@@ -87,3 +87,17 @@ def test_an_unset_base_url_fails_loudly_rather_than_guessing_localhost():
 def test_health_also_reports_not_configured():
     with pytest.raises(NotConfigured):
         ArcticBaseClient("").health()
+
+
+# --- upsert: one object updated in place, not a new one per write -----------
+
+def test_upsert_requires_a_publishable_kind_too():
+    client = ArcticBaseClient(UNREACHABLE, timeout=0.2)
+    with pytest.raises(UnpublishableKind):
+        client.upsert("proj", kind="html", title="t", content="x")
+
+
+def test_upsert_enforces_the_same_size_cap():
+    client = ArcticBaseClient(UNREACHABLE, max_bytes=16, timeout=0.2)
+    with pytest.raises(ContentTooLarge):
+        client.upsert("proj", kind="file", title="t", content="x" * 100)

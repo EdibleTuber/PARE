@@ -12,6 +12,7 @@ Extension points:
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
 import logging
 import os
@@ -53,6 +54,8 @@ from pare.handback import (
     disambig_question, spin_question,
 )
 from pare.repeat_guard import RepeatGuard
+from pare.arcticbase import ArcticBaseClient
+from pare.heartbeat import (BEAT_INTERVAL_SECONDS, Heartbeat)
 from pare.tools import PublishFinding, ReadVaultDoc, StaticAnalyze
 from pare.tools._http import ApkReAgentsClient
 
@@ -190,11 +193,74 @@ class PareAgent(Agent):
         logger.info("workers loaded: %s%s",
                     ", ".join(f"{r.name}({r.tool_count})" for r in ok) or "none",
                     "".join(f" | {r.name} FAILED: {r.error}" for r in bad))
-        # Started here rather than in WorkerManager's constructor: it creates a
-        # task, and a task needs a running loop that will outlive this call.
-        # astartup runs inside the serving loop, which is the one that will.
-        # No-ops for an all-stdio fleet -- nothing gets probed.
-        self.worker_manager.start_liveness()
+        # PARE runs its own sweep loop instead of WorkerManager.start_liveness().
+        # §8.2 requires the heartbeat to be written by the task that does the
+        # polling: a beat on a timer of its own keeps ticking through a wedged
+        # daemon, which is the state it exists to reveal. agent_core's loop is
+        # `sleep -> probe_all -> log and continue` and offers no hook, so the
+        # loop lives here and calls the same public probe_all(). If that loop
+        # ever grows behaviour, this has to track it.
+        #
+        # Started here rather than in a constructor: it creates a task, and a
+        # task needs a running loop that will outlive this call. astartup runs
+        # inside the serving loop, which is the one that will.
+        self._heartbeat = (
+            Heartbeat(ArcticBaseClient(self.config.arcticbase_url))
+            if self.config.arcticbase_url else None)
+        self._sweep_task = asyncio.create_task(
+            self._sweep_loop(), name="pare-sweep-heartbeat")
+
+    async def _sweep_loop(self) -> None:
+        while True:
+            await asyncio.sleep(BEAT_INTERVAL_SECONDS)
+            try:
+                await self._sweep_and_beat()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A sweep loop that dies takes worker liveness AND the operator's
+                # only "the daemon is alive" signal with it, silently.
+                logger.warning("sweep/heartbeat failed; continuing", exc_info=True)
+
+    async def _sweep_and_beat(self) -> bool:
+        """One sweep, then one beat. Returns whether the sweep succeeded.
+
+        The beat is skipped when the sweep raises. That is the entire design:
+        a heartbeat that survives a wedged poller is a false all-clear.
+        """
+        try:
+            workers = await self.worker_manager.probe_all()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("worker sweep failed; skipping the beat", exc_info=True)
+            return False
+        if self._heartbeat is not None:
+            try:
+                await asyncio.to_thread(
+                    self._heartbeat.beat,
+                    active_slug=self._active_slug(), workers=workers)
+            except Exception:
+                # Heartbeat.beat swallows its own errors; this is belt and
+                # braces so a bug there cannot stop worker probing.
+                logger.warning("heartbeat write failed", exc_info=True)
+        return True
+
+    def _active_slug(self) -> str | None:
+        """The project the daemon most recently served, or None outside one.
+
+        Best-effort by design: a daemon serving no project is a different fact
+        from a dead daemon, and must not be reported as one.
+        """
+        stores = getattr(self, "_capture_stores", None)
+        db_path = getattr(stores, "last_db_path", None) if stores else None
+        if db_path is None:
+            return None
+        try:
+            from pare.project_slug import read_or_create_slug
+            return read_or_create_slug(Path(db_path).parent)
+        except Exception:
+            return None
 
     async def ashutdown(self) -> None:
         """Close worker connections and project capture stores.
@@ -208,10 +274,19 @@ class PareAgent(Agent):
         don't outlive the daemon.
         """
         try:
+            # Before close_all: a probe firing against a worker being torn down
+            # would log a spurious "unreachable" for a shutdown the operator
+            # asked for. This is PARE's own loop (see astartup), so stopping it
+            # is PARE's job -- an un-cancelled task would keep probing, and keep
+            # beating, through the shutdown it is supposed to make visible.
+            task = getattr(self, "_sweep_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
             if self.worker_manager is not None:
-                # Before close_all: a probe firing against a worker being torn
-                # down would log a spurious "unreachable" for a shutdown the
-                # operator asked for.
+                # Belt and braces: harmless if PARE never started it, and
+                # correct if some other path did.
                 await self.worker_manager.stop_liveness()
                 await self.worker_manager.close_all()
             else:

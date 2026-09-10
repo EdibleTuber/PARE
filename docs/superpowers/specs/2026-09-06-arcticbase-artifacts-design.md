@@ -417,6 +417,11 @@ file into memory, and `snapshot_workbench` tars it. A 60 s beat in a project wor
 would make its audit trail — the record you want after a bricked target — mostly
 heartbeat noise. Beat at 60 s, stale at 3 minutes.
 
+**What that costs, measured rather than estimated.** One `audit.jsonl` row per
+beat at 206 bytes: ~289 KiB/day, ~103 MiB/year, unrotated. Isolating the beat
+protects a project's audit trail; it does not stop the status workbench's own from
+growing without bound. Added to §9.
+
 **Never use the Pi's clock.** It has no RTC; a Pi off over a weekend boots believing it
 is Friday. Take "now" from the `Date:` response header of the status page's own probe —
 the server's clock, free with every poll, no ArcticBase change. If the Pi's own clock
@@ -453,6 +458,7 @@ v1 had none. In the order these actually fill:
 | What | Where | Rule |
 |---|---|---|
 | Docker's `json-file` log | inference server root fs | `max-size: 10m, max-file: 3` in the compose service |
+| **`pare-daemon-status/audit.jsonl`** | inference server | **measured 2026-09-08: 206 bytes per beat, so a 60 s beat writes ~289 KiB/day, ~103 MiB/year.** No rotation exists, and `read_audit` loads the file whole. §8.2 isolates the beat into its own workbench so it cannot bury a *project's* audit trail, which is right — but it does not stop this one growing. Prune or recreate the workbench periodically. |
 | `.pare/blobs/` | daemon host | age-based prune; no prune exists today |
 | PARE's audit rows | `~/.local/share/pare/audit` | rotate; one row per dispatch, forever |
 | ArcticBase `trash/`, `snapshots/` | inference server | only `restore_workbench` ever deletes one |
