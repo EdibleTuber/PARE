@@ -77,14 +77,30 @@ Two prerequisites were checked on the device and are already satisfied:
 
 ## 3. The status page
 
+The unit file has to reach `/etc/systemd/system/` — copying the code to
+`/opt/pare` is not enough, and `systemctl enable` answers "does not exist" if you
+only did the latter:
+
 ```bash
-scp bench/systemd/pare-bench-status.service pare-bench:/tmp/
-ssh pare-bench 'sudo mv /tmp/pare-bench-status.service /etc/systemd/system/ && \
-                sudo systemctl daemon-reload && \
-                sudo systemctl enable --now pare-bench-status'
-ssh pare-bench 'systemctl --no-pager status pare-bench-status | head -5'
-ssh pare-bench 'curl -s localhost:8080/status.json | head -c 400; echo'
+sudo install -m 644 ~/pare-bench/systemd/pare-bench-status.service \
+    /etc/systemd/system/pare-bench-status.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now pare-bench-status
+systemctl --no-pager status pare-bench-status | head -12
+curl -s localhost:8080/status.json | head -c 400; echo
 ```
+
+Then confirm the **network** probe specifically, because it is the one with a
+sandbox-shaped failure mode:
+
+```bash
+curl -s localhost:8080/status.json |
+  python3 -c "import json,sys; p=json.load(sys.stdin)['probes'][0]; print(p['state'], p['detail'])"
+```
+
+It must say `ok`. If it reports a tailscale permission error, `ReadWritePaths`
+did not cover the socket — check `systemctl show pare-bench-status -p ReadWritePaths`
+and where `tailscaled.sock` actually is on your system.
 
 You should see four probes. Expect `network` and `arcticbase` green immediately.
 `heartbeat` goes green once the PARE daemon has beaten at least once, and `project`

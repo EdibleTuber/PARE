@@ -38,5 +38,18 @@ ProtectSystem=strict
 ProtectHome=true
 ReadOnlyPaths=/opt/pare
 
+# ProtectSystem=strict mounts the whole hierarchy read-only, and connecting to
+# an AF_UNIX socket requires WRITE access to the socket inode -- so the network
+# probe's `tailscale status` would have failed on a read-only /run, reporting a
+# permission problem while the network was perfectly fine. That is precisely the
+# wrong diagnosis this probe's message exists to prevent.
+#
+# A targeted exception rather than relaxing ProtectSystem to `full`: this is the
+# only writable path the service needs. The leading `-` makes it optional, so the
+# unit still starts if tailscaled has not created the directory yet -- otherwise
+# a boot-order race would leave the status page dead exactly when it is the only
+# thing that could tell you why.
+ReadWritePaths=-/run/tailscale
+
 [Install]
 WantedBy=multi-user.target
