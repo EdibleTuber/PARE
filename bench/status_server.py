@@ -34,7 +34,8 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 # datetime.UTC is 3.11+. Raspberry Pi OS Bookworm ships 3.11, but Bullseye
 # ships 3.9 and this file is meant to need nothing but system python -- so it
