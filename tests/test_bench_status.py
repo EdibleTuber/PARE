@@ -219,3 +219,22 @@ def test_a_pi_clock_within_a_minute_raises_no_warning():
         server_base=SERVER, expected_slug=None,
         pi_now=server_now + timedelta(seconds=15), server_now=server_now)
     assert status["clock_warning"] is None
+
+
+def test_a_failed_tailscale_surfaces_its_stderr_and_names_both_causes():
+    """The message is the whole value of this probe. Discarding stderr left it
+    asserting "is tailscaled running?" when the likelier cause on a service
+    account is no access to the local API -- opposite fixes, and sending the
+    operator to the wrong one costs a bench trip."""
+    import subprocess
+
+    def run(argv):
+        raise subprocess.CalledProcessError(
+            1, argv, output="", stderr="failed to connect to local tailscaled\n")
+
+    with pytest.raises(ProbeError) as e:
+        probe_network(run, server_host="100.82.222.92")
+    msg = str(e.value)
+    assert "failed to connect to local tailscaled" in msg, "stderr was dropped"
+    assert "operator" in msg, "the permission fix is not named"
+    assert "not running" in msg, "the other cause is not named"

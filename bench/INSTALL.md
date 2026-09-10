@@ -61,10 +61,28 @@ The units run as `User=pare`. Either create it:
 ssh pare-bench 'sudo useradd -r -s /usr/sbin/nologin pare'
 ```
 
-…or edit `User=`/`Group=` in both units to the Pi's existing login user. **The
-kiosk unit must run as the user who owns the X session** — a service user with
-`nologin` cannot open a display, so if you create `pare` for the status page, leave
-the kiosk unit on your desktop user and fix `XAUTHORITY` to match.
+…or edit `User=`/`Group=` in the status unit to the Pi's existing login user.
+
+**The status page's first probe shells out to `tailscale status --json`, and a
+service user cannot do that by default** — the local API socket is privileged.
+Grant it explicitly:
+
+```bash
+sudo tailscale set --operator=pare
+```
+
+Then check it as that user, because getting this wrong makes the *network* probe
+red while the network is fine:
+
+```bash
+sudo -u pare tailscale status --json | head -c 80
+```
+
+If it fails, the probe now reports stderr and names both causes rather than
+guessing — but it is better to fix it here than to read about it on the screen.
+
+**The kiosk runs as a different user.** See §4: it needs a real login user with a
+home directory, which a `nologin` service account is not.
 
 ## 3. The status page
 
@@ -83,14 +101,14 @@ adopts whatever project the daemon reports.
 
 ## 4. The kiosk
 
-Needs a desktop session and `chromium-browser`.
+This bench runs **Ubuntu Server**, which has no X, no Wayland and no browser, so
+the kiosk is `cage` + Chromium rather than a desktop session. It also needs a
+different user from the status page.
 
-```bash
-scp bench/systemd/pare-bench-kiosk.service pare-bench:/tmp/
-ssh pare-bench 'sudo mv /tmp/pare-bench-kiosk.service /etc/systemd/system/ && \
-                sudo systemctl daemon-reload && \
-                sudo systemctl enable --now pare-bench-kiosk'
-```
+**Follow [`KIOSK-UBUNTU.md`](KIOSK-UBUNTU.md) instead of copying the unit
+straight in.** I had no access to the Pi and could not test any of it, so that
+file proves one layer at a time — a failure tells you which layer instead of
+leaving you with a blank screen and four candidates.
 
 The home URL is `http://127.0.0.1:8080/` — the Pi's **own** page, never one served
 by `agenthost`. §8.1: cold-boot the Pi with the server down and a remote home URL

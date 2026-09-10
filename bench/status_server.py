@@ -87,9 +87,21 @@ def probe_network(run_tailscale: Callable[[list[str]], str], *,
         raw = run_tailscale(["tailscale", "status", "--json"])
     except FileNotFoundError as exc:
         raise ProbeError(f"tailscale is not installed or not on PATH: {exc}") from exc
+    except subprocess.CalledProcessError as exc:
+        # Surface stderr: it is the actual diagnostic, and discarding it left
+        # this probe guessing. Two causes are common and they need opposite
+        # fixes, so name both rather than asserting one -- the same reason §5.5
+        # insists EROFS be distinguished from a permission error.
+        detail = (exc.stderr or "").strip().splitlines()
+        raise ProbeError(
+            f"tailscale status failed (exit {exc.returncode})"
+            + (f": {detail[0]}" if detail else "")
+            + ". Either tailscaled is not running, or this service user has no "
+              "access to the local API -- `tailscale set --operator=<user>` "
+              "grants it.") from exc
     except Exception as exc:
-        raise ProbeError(f"tailscale status failed ({type(exc).__name__}: {exc}); "
-                         f"is tailscaled running?") from exc
+        raise ProbeError(f"could not run tailscale status "
+                         f"({type(exc).__name__}: {exc})") from exc
     try:
         status = json.loads(raw)
     except ValueError as exc:
@@ -249,6 +261,9 @@ def _parse_iso(raw: str | None) -> datetime | None:
 
 
 def run_tailscale(argv: list[str]) -> str:
+    # check=True so a non-zero exit becomes CalledProcessError, which carries
+    # stderr. probe_network reads it: the message is the difference between
+    # "start tailscaled" and "grant this user the local API".
     return subprocess.run(argv, capture_output=True, text=True, timeout=5,
                           check=True).stdout
 
