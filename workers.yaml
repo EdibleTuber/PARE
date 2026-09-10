@@ -1,5 +1,41 @@
 # PARE worker registry. Each entry maps to an agent_core WorkerSpec.
-# Format: workers.<name>.{endpoint | command+args, transport, risk_default, capability_tags?, kind?}
+#
+# EVERY KEY A WORKER MAY CARRY. agent_core's WorkerSpec sets extra="forbid", so
+# an unknown key is not ignored -- it aborts the WHOLE file, leaving no workers
+# AND no risk_overrides. A typo here takes the entire fleet down, so this list
+# is the operator's map and tests/test_workers_yaml_format_comment.py fails if
+# it drifts from WorkerSpec. Do not prune it by hand.
+#
+#   transport         stdio | streamable_http   (required)
+#   risk_default      low | medium | high | critical   (the FLOOR; see below)
+#   kind              internal | external_mcp
+#   capability_tags   list of strings, for /worker discovery
+#
+#   -- stdio workers: a process PARE launches and speaks to over stdin/stdout
+#   command           absolute path to the executable
+#   args              list of arguments
+#   env               mapping of environment variables for the child
+#   cwd               working directory for the child
+#   container         container image, when the worker is run as one
+#
+#   -- networked workers: streamable_http over the tailnet
+#   endpoint          full URL, e.g. http://100.68.47.23:9101/mcp
+#   connect_timeout   seconds to wait for the initial connection
+#   read_timeout      seconds to wait for a response
+#
+#   -- lifecycle
+#   autoload          connect at boot (default true). REQUIRED false for a
+#                     networked worker -- see the NOTE below.
+#
+#   -- artifacts (declared, not yet enforced; see the ArcticBase/artifacts spec)
+#   artifact_root     absolute path on the WORKER's machine where it may write
+#                     artifacts. Validated at load: must be absolute, carry no
+#                     '..' component, and not begin with exactly two slashes --
+#                     the same lexical rule pare-worker-kit enforces, so a root
+#                     that loads here is one the worker will accept.
+#   artifact_drive_id expected contents of {artifact_root}/.bench-store-id, so
+#                     one project's removable drive is distinguishable from
+#                     another's.
 #
 # stdio workers (a process PARE launches and talks to over stdin/stdout) are
 # declared with `command` + `args` instead of `endpoint` — e.g. the in-house
