@@ -83,3 +83,43 @@ async def test_a_beat_that_throws_cannot_kill_the_sweep_loop():
     a.worker_manager = _Manager()
     a._heartbeat = _Exploding()
     assert await a._sweep_and_beat() is True     # sweep succeeded; beat did not
+
+
+@pytest.mark.asyncio
+async def test_the_first_beat_does_not_wait_a_whole_interval():
+    """A freshly started daemon must not look wedged for a minute.
+
+    The loop slept BEFORE its first iteration, so for up to BEAT_INTERVAL_SECONDS
+    after startup the bench screen showed `heartbeat FAIL -- the daemon is
+    wedged or stopped` about a daemon that had just started perfectly. The beat
+    still rides a completed sweep (§8.2); only the ordering of sleep and sweep
+    within the loop changes.
+    """
+    import asyncio as _asyncio
+
+    order: list[str] = []
+    a = _agent()
+    a.worker_manager = _Manager()
+    a._heartbeat = _Beat()
+
+    real_sweep = a._sweep_and_beat
+
+    async def _record_sweep():
+        order.append("swept")
+        return await real_sweep()
+
+    async def _record_sleep(_seconds):
+        order.append("slept")
+        if order.count("slept") >= 2:
+            raise _asyncio.CancelledError
+
+    a._sweep_and_beat = _record_sweep
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_asyncio, "sleep", _record_sleep)
+        with pytest.raises(_asyncio.CancelledError):
+            await a._sweep_loop()
+
+    assert order[0] == "swept", (
+        f"the loop slept before its first sweep: {order[:4]}")
+    # and it still paces itself afterwards rather than spinning
+    assert order[:3] == ["swept", "slept", "swept"], order[:4]
