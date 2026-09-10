@@ -1,0 +1,80 @@
+# Chromium in kiosk mode under cage, on Ubuntu Server (no desktop).
+#
+# §8.1: the home URL is the Pi's OWN status page, never one served by the
+# inference server. Cold-boot with the server down and a remote home URL shows
+# Chromium's own interstitial, in kiosk mode, to someone holding two probes.
+#
+# cage is a Wayland kiosk compositor: one client, fullscreen, no window manager
+# and no desktop. That is the whole reason it is here -- Ubuntu Server has no
+# graphical stack, and installing a desktop to display one page is a lot of
+# surface that breaks unattended.
+#
+# UNTESTED ON HARDWARE. Written against a Pi I have no access to. Work through
+# bench/KIOSK-UBUNTU.md by hand FIRST -- it proves each layer separately, so a
+# failure tells you which one. Do not enable this unit until cage and Chromium
+# have been seen working from a shell.
+[Unit]
+Description=PARE bench kiosk (cage + Chromium)
+After=systemd-user-sessions.service pare-bench-status.service
+Wants=pare-bench-status.service
+# cage takes over tty1, so getty must not also be holding it.
+Conflicts=getty@tty1.service
+
+# A crash loop must not be the reason the screen is blank. [Unit], not
+# [Service]: systemd-analyze confirms it is ignored there, which would leave
+# StartLimitBurst=5 in force.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+
+# `pare` on this bench: surveyed as uid 1000 with /home/pare and /bin/bash, so
+# it is a real login user, already in video/render/input, and already the
+# tailscale operator. An earlier draft assumed a `nologin` service account and
+# insisted the kiosk use a different user -- that no longer applies, because the
+# Chromium snap needs a writable HOME and seat access needs a logind session,
+# both of which this account has.
+User=pare
+Group=pare
+
+# PAMName=login is what makes this work at all: it opens a real logind session,
+# which is what grants the seat, DRM and input access cage needs. Without it
+# cage exits with "could not create backend" and the screen stays blank.
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+
+Environment=XDG_SESSION_TYPE=wayland
+
+# §8.3, Wayland edition. `xset s off`/`-dpms` were X commands and do nothing
+# here. Console blanking happens in the kernel framebuffer BEFORE cage starts,
+# so it is disabled on the tty directly; add `consoleblank=0` to the kernel
+# cmdline as well (see KIOSK-UBUNTU.md) because setterm only affects the tty
+# that is already active. cage itself does not blank or idle-suspend.
+ExecStartPre=-/usr/bin/setterm --blank 0 --powersave off --cursor off
+
+# --ozone-platform=wayland is required: without it the Chromium snap looks for
+# an X display, finds none, and exits.
+# --incognito is not about privacy (§8.3): ArcticBase serves index.html with no
+# Cache-Control, so after a frontend rebuild a cached index.html references
+# content-hashed assets that now 404 -- a white screen on an unattended machine.
+ExecStart=/usr/bin/cage -- /snap/bin/chromium \
+    --kiosk \
+    --incognito \
+    --ozone-platform=wayland \
+    --noerrdialogs \
+    --disable-infobars \
+    --disable-session-crashed-bubble \
+    --disable-features=TranslateUI \
+    --check-for-update-interval=31536000 \
+    http://127.0.0.1:8080/
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

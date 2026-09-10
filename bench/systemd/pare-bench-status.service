@@ -1,0 +1,55 @@
+# The Pi's own status page. Its whole purpose is to be up when nothing else is,
+# so it depends on nothing off-box: no network-online, no ArcticBase, no daemon.
+#
+# Install:  sudo cp bench/systemd/pare-bench-status.service /etc/systemd/system/
+#           sudo systemctl enable --now pare-bench-status
+[Unit]
+Description=PARE bench status page (local)
+# network.target only, NOT network-online.target: this page must come up and
+# say "no network" rather than wait for a network that may never arrive.
+After=network.target
+
+# A crash loop must not be the reason the screen is blank. This is a [Unit]
+# key: systemd-analyze confirmed it is IGNORED under [Service], which left the
+# default StartLimitBurst=5 in force -- systemd would have given up after five
+# restarts and left a blank screen on a machine with no keyboard.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pare
+Group=pare
+WorkingDirectory=/opt/pare
+# --server is the ONLY thing that needs editing per bench.
+# --slug is deliberately omitted: the page adopts whatever project the daemon
+# reports, so a screen cannot silently disagree with the daemon about scope.
+ExecStart=/usr/bin/python3 -m bench.status_server \
+    --server http://100.82.222.92:2929 \
+    --bind 127.0.0.1 --port 8080
+Environment=PYTHONPATH=/opt/pare
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=2
+
+# It serves one static page and reads two URLs. Nothing here needs privilege.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/pare
+
+# ProtectSystem=strict mounts the whole hierarchy read-only, and connecting to
+# an AF_UNIX socket requires WRITE access to the socket inode -- so the network
+# probe's `tailscale status` would have failed on a read-only /run, reporting a
+# permission problem while the network was perfectly fine. That is precisely the
+# wrong diagnosis this probe's message exists to prevent.
+#
+# A targeted exception rather than relaxing ProtectSystem to `full`: this is the
+# only writable path the service needs. The leading `-` makes it optional, so the
+# unit still starts if tailscaled has not created the directory yet -- otherwise
+# a boot-order race would leave the status page dead exactly when it is the only
+# thing that could tell you why.
+ReadWritePaths=-/run/tailscale
+
+[Install]
+WantedBy=multi-user.target
