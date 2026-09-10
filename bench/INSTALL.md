@@ -106,6 +106,23 @@ You should see four probes. Expect `network` and `arcticbase` green immediately.
 `heartbeat` goes green once the PARE daemon has beaten at least once, and `project`
 adopts whatever project the daemon reports.
 
+### Verified on the device, 2026-09-10
+
+Steps 0–3 are done and confirmed working through the installed unit:
+
+```
+enabled / active      ReadWritePaths = -/run/tailscale
+network     ok   tailnet up · agenthost online
+arcticbase  ok   ok (v0.1.0)
+heartbeat   ok   boot bench-live-03 · 0s old
+project     ok   bench-demo-1a2b3c4d (adopted from the daemon)
+ok = True   handoff = http://100.82.222.92:2929/wb/bench-demo-1a2b3c4d
+Cache-Control: no-store
+```
+
+Two things remain unverified because they need a password or the physical console:
+a `systemctl restart` / reboot survival check, and everything in §4.
+
 ## 4. The kiosk
 
 This bench runs **Ubuntu Server**, which has no X, no Wayland and no browser, so
