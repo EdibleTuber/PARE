@@ -1,0 +1,53 @@
+# Chromium in kiosk mode, pointed at the LOCAL status page.
+#
+# §8.1: the home URL is the Pi's own page, never one served by the inference
+# server. Cold-boot with the server down and a remote home URL shows Chromium's
+# own interstitial, in kiosk mode, to someone holding two probes.
+#
+# Install:  sudo cp bench/systemd/pare-bench-kiosk.service /etc/systemd/system/
+#           sudo systemctl enable --now pare-bench-kiosk
+[Unit]
+Description=PARE bench kiosk browser
+After=pare-bench-status.service graphical.target
+Wants=pare-bench-status.service
+
+# A crash loop must not be the reason the screen is blank. This is a [Unit]
+# key: systemd-analyze confirmed it is IGNORED under [Service], which left the
+# default StartLimitBurst=5 in force -- systemd would have given up after five
+# restarts and left a blank screen on a machine with no keyboard.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pare
+Group=pare
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/pare/.Xauthority
+
+# §8.3: a blank screen looks identical to a crash, and this machine has no
+# keyboard to wake. Disable blanking and DPMS explicitly rather than trusting
+# the desktop's power settings, which a distro upgrade can reset.
+ExecStartPre=/usr/bin/xset s off
+ExecStartPre=/usr/bin/xset s noblank
+ExecStartPre=/usr/bin/xset -dpms
+
+# --incognito is not about privacy. §8.3: ArcticBase serves index.html with no
+# Cache-Control, so after a frontend rebuild a cached index.html references
+# content-hashed assets that now 404 -- a white screen on a machine nobody is
+# logged into.
+ExecStart=/usr/bin/chromium-browser \
+    --kiosk \
+    --incognito \
+    --noerrdialogs \
+    --disable-infobars \
+    --disable-session-crashed-bubble \
+    --disable-features=TranslateUI \
+    --check-for-update-interval=31536000 \
+    --autoplay-policy=no-user-gesture-required \
+    http://127.0.0.1:8080/
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target
