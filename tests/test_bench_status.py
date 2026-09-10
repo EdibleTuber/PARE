@@ -238,3 +238,34 @@ def test_a_failed_tailscale_surfaces_its_stderr_and_names_both_causes():
     assert "failed to connect to local tailscaled" in msg, "stderr was dropped"
     assert "operator" in msg, "the permission fix is not named"
     assert "not running" in msg, "the other cause is not named"
+
+
+def test_a_slightly_negative_age_reads_as_zero_not_as_minus_one():
+    """Found on real hardware, not in these tests -- here I control both clocks.
+
+    The beat's `ts` has sub-second precision; `server_now` comes from the Date
+    header, which is whole seconds and can round DOWN below it. The screen
+    showed "-1s old", which is harmless (a negative age never trips staleness)
+    but reads as a broken display, and this page's whole job is being trusted.
+    """
+    server_now = datetime.now(UTC)
+    payload = {"boot_id": "abc", "active_slug": "p",
+               "ts": (server_now + timedelta(milliseconds=900)).isoformat().replace("+00:00", "Z"),
+               "stale_after_seconds": 180}
+    detail, _ = probe_heartbeat(_hb_fetch(payload), base_url=SERVER,
+                                server_now=server_now)
+    assert "-" not in detail.split("·")[-1], f"negative age leaked: {detail}"
+    assert "0s" in detail
+
+
+def test_a_beat_from_far_in_the_future_is_a_failure_not_a_zero():
+    """Clamping hides rounding; it must not hide a real clock disagreement.
+    Reuses the bound the daemon published, so the two sides cannot disagree
+    about the threshold in either direction."""
+    server_now = datetime.now(UTC)
+    payload = {"boot_id": "abc", "active_slug": "p",
+               "ts": (server_now + timedelta(seconds=400)).isoformat().replace("+00:00", "Z"),
+               "stale_after_seconds": 180}
+    with pytest.raises(ProbeError) as e:
+        probe_heartbeat(_hb_fetch(payload), base_url=SERVER, server_now=server_now)
+    assert "future" in str(e.value).lower()

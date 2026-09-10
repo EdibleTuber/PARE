@@ -181,6 +181,19 @@ def probe_heartbeat(fetch: Callable[..., tuple[int, bytes, dict]], *,
         raise ProbeError(f"{STALE_STATE}: last beat {int(age)}s ago, over the "
                          f"{int(stale_after)}s bound the daemon published "
                          f"(boot {boot}) -- the daemon is wedged or stopped")
+    if age < -stale_after:
+        # Beyond the published bound in the other direction is not rounding, it
+        # is a real disagreement about what time it is -- and an age computed
+        # across two clocks that disagree is not an age. Reusing stale_after
+        # keeps one threshold for both directions.
+        raise ProbeError(f"the heartbeat is timestamped {int(abs(age))}s in the "
+                         f"FUTURE relative to the workbench host (boot {boot}); "
+                         f"the daemon host and the workbench host disagree about "
+                         f"the time, so no age here can be trusted")
+    # Clamp small negatives. The Date header is whole seconds and can round down
+    # below a sub-second `ts`, which put "-1s old" on the bench screen during the
+    # first real run. Harmless, but it reads as a broken display.
+    age = max(0.0, age)
     return f"boot {boot} · {int(age)}s old", payload
 
 

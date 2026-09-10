@@ -4,8 +4,15 @@ Step 4 of the ArcticBase/artifacts design. Concrete addresses for this bench:
 
 | | |
 |---|---|
-| Pi | `pare-bench` — `100.97.133.126` |
+| Pi | `pare-bench` — `100.97.133.126`, Ubuntu 26.04.1 LTS, aarch64, Python 3.14.4 |
 | inference server / daemon host / ArcticBase | `agenthost` — `100.82.222.92`, ArcticBase on `:2929` |
+| bench screen | DSI ribbon (`card1-DSI-1` connected; HDMI unplugged) |
+| login user | `pare`, uid 1000, `/home/pare`, `/bin/bash` |
+
+**Surveyed on the real device 2026-09-10, so several steps below are already
+done.** What is genuinely still needed is marked. In particular `pare` is a real
+login user, not the `nologin` service account this guide first assumed — so one
+account covers both the status page and the kiosk, and `useradd` is not needed.
 
 The Pi needs **no venv, no pip, no PARE package**. The status page is stdlib-only
 and was verified importing under `python3 -S` with no site-packages, and it parses
@@ -53,36 +60,20 @@ Plain `scp`, not `scp -O`. Legacy SCP mode requires execution of the remote user
 shell, so the path is re-parsed remotely; OpenSSH ≥9.0 defaults to SFTP and that
 default is the safe one.
 
-## 2. The service user
+## 2. The service user — ALREADY DONE
 
-The units run as `User=pare`. Either create it:
+`pare` exists as a real login user (uid 1000, `/home/pare`, `/bin/bash`), so no
+`useradd` is needed and the same account can run both units.
 
-```bash
-ssh pare-bench 'sudo useradd -r -s /usr/sbin/nologin pare'
-```
+Two prerequisites were checked on the device and are already satisfied:
 
-…or edit `User=`/`Group=` in the status unit to the Pi's existing login user.
-
-**The status page's first probe shells out to `tailscale status --json`, and a
-service user cannot do that by default** — the local API socket is privileged.
-Grant it explicitly:
-
-```bash
-sudo tailscale set --operator=pare
-```
-
-Then check it as that user, because getting this wrong makes the *network* probe
-red while the network is fine:
-
-```bash
-sudo -u pare tailscale status --json | head -c 80
-```
-
-If it fails, the probe now reports stderr and names both causes rather than
-guessing — but it is better to fix it here than to read about it on the screen.
-
-**The kiosk runs as a different user.** See §4: it needs a real login user with a
-home directory, which a `nologin` service account is not.
+- **`tailscale status --json` works as `pare`** — it is already the tailscale
+  operator, having been the user that ran `tailscale up`. No
+  `tailscale set --operator=` needed. This matters because the status page's
+  first probe shells out to it, and without access the *network* probe goes red
+  while the network is perfectly fine.
+- **`pare` is in `video`, `render` and `input`** — cage's prerequisites, so no
+  `usermod` and no re-login needed.
 
 ## 3. The status page
 
@@ -114,7 +105,12 @@ The home URL is `http://127.0.0.1:8080/` — the Pi's **own** page, never one se
 by `agenthost`. §8.1: cold-boot the Pi with the server down and a remote home URL
 shows Chromium's own interstitial, in kiosk mode, to someone holding two probes.
 
-## 5. The artifact drive
+## 5. The artifact drive — NOT POSSIBLE YET
+
+There is no external drive attached: `lsblk` shows only the 59 GB SD card
+(`/boot/firmware` + `/`), and `/mnt/bench-store` is not a mountpoint. Nothing to
+mount until a drive is plugged in, so this section is for when one is.
+
 
 `/etc/fstab`, and `nofail` is not optional (§8.4) — without it a Pi booted at the
 bench with the drive unplugged drops to an emergency shell, which is a brick on a
