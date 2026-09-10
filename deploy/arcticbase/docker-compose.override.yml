@@ -1,0 +1,24 @@
+# Local deployment overrides for the PARE bench. Not part of ArcticBase.
+#
+# docker-compose.yml ships `image: arctic-base:latest` with its `build:` stanza
+# commented out, so `docker compose up` tries to PULL an image that was never
+# published and fails with "pull access denied". This adds the build instead of
+# editing the tracked file -- ArcticBase is consumed, not modified.
+#
+# Compose reads docker-compose.override.yml automatically; no -f needed.
+services:
+  arctic-base:
+    build:
+      context: .
+      args:
+        VERSION: 1.0.0
+    environment:
+      # Spec §5.1. The default is 2 GB, which is precisely the failure that
+      # section describes: a 2 GB object makes every labelled checkpoint a 2 GB
+      # tarball, and get_snapshot_bytes reads a whole tarball into memory.
+      #
+      # Measured caveat, so nobody trusts this further than it goes: this cap is
+      # applied to the multipart part and to PUT /objects/{oid}/content, but NOT
+      # to the JSON POST /objects path, which stores inline content with no size
+      # check at all. That is why PARE publishes in two calls.
+      ARCTIC_BASE_MAX_UPLOAD_BYTES: 8388608
