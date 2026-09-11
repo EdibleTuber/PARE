@@ -53,10 +53,25 @@ cat /opt/pare/DEPLOYED_FROM      # on the Pi
 - **`pare-hardware-mcp` does not exist.** `/mnt/secondary/projects/pare-hardware-mcp`
   is an empty directory — no git repo, no spec. §15 says it gets its own spec, and
   that spec must absorb the three open follow-ups below.
-- **No artifact drive.** `/mnt/bench-store` is not a mountpoint; the Pi's only block
-  device is the 59 GB SD card. §5.5's preflight requires `ismount`, so the root
-  filesystem cannot serve. §14's drive-state tests use a loopback fs and need no
-  physical media.
+- ~~No artifact drive.~~ **Done 2026-09-11.** `/dev/sda1`, ext4,
+  `LABEL=bench-store`, `UUID=61c3b8ce-eb78-4531-813d-505112165533`, 916 GiB with
+  907 GiB free, mounted at `/mnt/bench-store` via fstab
+  (`nofail,x-systemd.device-timeout=10`), owned by `pare`, and carrying
+  `.bench-store-id` = `88dabc85-9d25-4acf-ad8b-d4c2335b4427` — that UUID is what
+  goes into `workers.yaml` as `artifact_drive_id` when the hardware worker is
+  declared.
+
+  The disk is an HGST HTS721010A9E630: a 1 TB **7200 rpm 2.5" spinner**, and it
+  **requires the powered hub**. On the Pi's own ports its spin-up surge exceeded
+  what the enclosure requests (`bMaxPower 800mA`) and the bridge enumerated with
+  no SATA target behind it — `Generic ATA/ATAPI Device`, 0 B, "Media removed",
+  inconsistently between attempts. The same drive enumerated in 4 s on a desktop
+  port. Diagnosed by moving it between machines, which cost nothing; `smartctl`
+  would have told us less. If it ever reverts to that symptom, check the hub's
+  power before suspecting the disk.
+
+  Currently linked at **480M** — the hub is in a USB 2 port. Works, but caps a
+  2 GB dump at about a minute instead of ten seconds.
 - **No Tigard attached.** `lsusb` shows only a wireless receiver. `pare` is already
   in `dialout`, `spi`, `i2c`, `gpio`, `plugdev`, so no group work is needed when one
   arrives.

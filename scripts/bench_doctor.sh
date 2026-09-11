@@ -94,8 +94,20 @@ else
     rm -f "$probe"
     pass "mounted, writable, $free free"
   else
-    fail "mounted but NOT WRITABLE ($free free) -- likely remounted read-only " \
-         "after an error; check dmesg"
+    # Two causes, opposite fixes, and this used to GUESS between them --
+    # "likely remounted read-only after an error" is what it said when the
+    # real cause on a freshly mounted drive was root:root ownership. Distinguish
+    # them instead: the mount options say which it is.
+    #
+    # (That message was also being passed as two arguments to a function that
+    # prints only "$1", so half of it never reached the screen.)
+    opts="$(findmnt -n -o OPTIONS "$ARTIFACT_ROOT" 2>/dev/null)"
+    case ",$opts," in
+      *,ro,*)
+        fail "mounted READ-ONLY ($free free). ext4 remounts ro on error by default, so this usually means a write failed; check dmesg before writing anything else here." ;;
+      *)
+        fail "mounted rw with $free free, but not writable by $(id -un): $(stat -c '%U:%G %a' "$ARTIFACT_ROOT" 2>/dev/null). A fresh mount is owned by root; chown it to the user the worker runs as." ;;
+    esac
   fi
   if [ -r "$DRIVE_ID_FILE" ]; then
     pass "drive id $(head -c 64 "$DRIVE_ID_FILE" 2>/dev/null | tr -d '\n')"
