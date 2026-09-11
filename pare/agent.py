@@ -211,8 +211,19 @@ class PareAgent(Agent):
             self._sweep_loop(), name="pare-sweep-heartbeat")
 
     async def _sweep_loop(self) -> None:
+        # Sweep FIRST, then sleep. Sleeping first meant a freshly started daemon
+        # wrote no beat for a full interval, so the bench screen reported
+        # "heartbeat FAIL -- the daemon is wedged or stopped" about a daemon that
+        # had just started perfectly. A liveness signal whose first minute is a
+        # false alarm trains the operator to disbelieve it.
+        #
+        # This does probe workers immediately after load_autoload connected them,
+        # which agent_core's own loop avoids by sleeping first. That redundancy
+        # is cheap -- probe_all does nothing for a stdio fleet -- and it buys a
+        # startup-time confirmation that the networked workers are reachable.
+        # The beat still rides a COMPLETED sweep (§8.2); only the ordering of
+        # sleep and sweep within the loop changed.
         while True:
-            await asyncio.sleep(BEAT_INTERVAL_SECONDS)
             try:
                 await self._sweep_and_beat()
             except asyncio.CancelledError:
@@ -221,6 +232,7 @@ class PareAgent(Agent):
                 # A sweep loop that dies takes worker liveness AND the operator's
                 # only "the daemon is alive" signal with it, silently.
                 logger.warning("sweep/heartbeat failed; continuing", exc_info=True)
+            await asyncio.sleep(BEAT_INTERVAL_SECONDS)
 
     async def _sweep_and_beat(self) -> bool:
         """One sweep, then one beat. Returns whether the sweep succeeded.
