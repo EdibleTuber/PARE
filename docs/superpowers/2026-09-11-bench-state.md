@@ -54,24 +54,43 @@ cat /opt/pare/DEPLOYED_FROM      # on the Pi
   is an empty directory — no git repo, no spec. §15 says it gets its own spec, and
   that spec must absorb the three open follow-ups below.
 - ~~No artifact drive.~~ **Done 2026-09-11.** `/dev/sda1`, ext4,
-  `LABEL=bench-store`, `UUID=61c3b8ce-eb78-4531-813d-505112165533`, 916 GiB with
-  907 GiB free, mounted at `/mnt/bench-store` via fstab
-  (`nofail,x-systemd.device-timeout=10`), owned by `pare`, and carrying
-  `.bench-store-id` = `88dabc85-9d25-4acf-ad8b-d4c2335b4427` — that UUID is what
-  goes into `workers.yaml` as `artifact_drive_id` when the hardware worker is
-  declared.
+  `LABEL=bench-store`, `UUID=04f21c09-f0ef-4345-957f-01fe21d383ba`, 117 GiB with
+  116 GiB free, mounted at `/mnt/bench-store` via fstab
+  (`nofail,x-systemd.device-timeout=10`), owned by `pare`, carrying
+  `.bench-store-id` = `0361c41f-e680-4d4e-b9c3-39af8a33d067` — that UUID goes into
+  `workers.yaml` as `artifact_drive_id` when the hardware worker is declared.
 
-  The disk is an HGST HTS721010A9E630: a 1 TB **7200 rpm 2.5" spinner**, and it
-  **requires the powered hub**. On the Pi's own ports its spin-up surge exceeded
-  what the enclosure requests (`bMaxPower 800mA`) and the bridge enumerated with
-  no SATA target behind it — `Generic ATA/ATAPI Device`, 0 B, "Media removed",
-  inconsistently between attempts. The same drive enumerated in 4 s on a desktop
-  port. Diagnosed by moving it between machines, which cost nothing; `smartctl`
-  would have told us less. If it ever reverts to that symptom, check the hub's
-  power before suspecting the disk.
+  It is a **128 GB NVMe in a JMicron enclosure** (`152d:0580`), plugged directly
+  into the Pi, no hub needed. Driver is `uas`, link 480M. Write ~28 MB/s, so a
+  2 GB dump takes about 70 s.
 
-  Currently linked at **480M** — the hub is in a USB 2 port. Works, but caps a
-  2 GB dump at about a minute instead of ten seconds.
+  **Verified before trusting it:** 1 GiB written with `fdatasync` and checksummed
+  as the stream was written, read back with a matching sha256, twice, with zero
+  transport or filesystem errors. The read-back rate (113–128 MB/s) exceeds USB 2's
+  ceiling, so the read was partly served from page cache — the *write* path is what
+  was proven, which is what matters for artifact production. Anyone wanting the
+  stronger claim must drop caches BETWEEN the write and the read; dropping them
+  beforehand is useless because the write repopulates them.
+
+  **Two drives were rejected getting here, both for non-obvious reasons worth not
+  rediscovering:**
+
+  - A 1 TB HGST HTS721010A9E630 (7200 rpm spinner) in an **Innostor IS621**
+    enclosure. On the Pi's own ports its spin-up surge exceeded the enclosure's
+    declared `bMaxPower 800mA`, so the bridge enumerated with no SATA target —
+    `Generic ATA/ATAPI Device`, 0 B, "Media removed", *inconsistently*, which reads
+    exactly like a dying disk. A powered hub fixed that. But at **SuperSpeed the
+    Innostor bridge destroys filesystems**: `DID_ERROR` four seconds after attach,
+    then `JBD2: I/O error when updating journal superblock` and `EXT4-fs: I/O error
+    while writing superblock` at 1.2 GiB of sustained write. At 480M it was stable
+    for 13½ minutes. The disk was never the problem either time.
+  - Diagnosis method that actually worked, both times: **move the drive to another
+    machine.** Free, and more informative than the `smartctl` install it replaced.
+
+  If the JMicron ever shows I/O errors under load, try
+  `usb-storage.quirks=152d:0580:u` on the kernel cmdline to force it off UAS before
+  suspecting the disk.
+
 - **No Tigard attached.** `lsusb` shows only a wireless receiver. `pare` is already
   in `dialout`, `spi`, `i2c`, `gpio`, `plugdev`, so no group work is needed when one
   arrives.
