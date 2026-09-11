@@ -1,0 +1,39 @@
+# The PARE daemon, as a USER unit -- no sudo needed to install or enable.
+#
+# Why this exists: the daemon was hand-started, so nothing restarted it. A
+# power cut took it and it did not come back, which is also how a process
+# started on 2026-09-06 came to be running without PARE_ARCTICBASE_URL, a
+# variable added two days later. An environment pinned in a unit cannot drift
+# from the environment someone happened to have exported.
+#
+# Install:
+#   cp deploy/systemd/pare-daemon.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now pare-daemon
+#
+# Surviving a reboot needs lingering, so the user manager starts without a
+# login. Already on for this host (`loginctl show-user $USER | grep Linger`);
+# enable with `sudo loginctl enable-linger $USER` elsewhere.
+[Unit]
+Description=PARE daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/secondary/projects/PARE
+ExecStart=/mnt/secondary/projects/PARE/.venv/bin/python -m pare
+
+# The workbench host. Deliberately the TAILNET address rather than 127.0.0.1,
+# even though ArcticBase runs on this same machine: publish_finding returns a
+# `url` built from this value, and the operator reading it is at the bench, not
+# here. A loopback URL would be correct for the daemon and useless to the person
+# it is for.
+Environment=PARE_ARCTICBASE_URL=http://100.82.222.92:2929
+
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
