@@ -15,6 +15,7 @@ import pytest
 
 from bench.status_server import (
     PROBE_ORDER,
+    probe_workbench_exists,
     STALE_STATE,
     ProbeError,
     build_status,
@@ -51,14 +52,31 @@ def test_a_failed_probe_stops_the_rest_and_they_report_not_checked():
 
 
 def test_all_green_hands_off_to_the_workbench():
+    """Green AND a confirmed workbench. `workbench_exists=True` is passed
+    explicitly because this test used to encode "green implies somewhere to go"
+    -- which is the belief that put a 404 on the bench screen. Handing off is
+    now conditional on the target existing, so the premise must be stated."""
     now = datetime.now(UTC)
     status = build_status(
         probes={"network": "1 peer online", "arcticbase": "ok (v0.1.0)",
                 "heartbeat": "boot abc · 12s old", "project": "proj-1a2b3c4d"},
-        server_base=SERVER, expected_slug="proj-1a2b3c4d", pi_now=now)
+        server_base=SERVER, expected_slug="proj-1a2b3c4d", pi_now=now,
+        workbench_exists=True)
     assert status["ok"] is True
     assert status["first_failure"] is None
     assert status["handoff_url"] == f"{SERVER}/wb/proj-1a2b3c4d"
+
+
+def test_an_unconfirmed_workbench_withholds_the_handoff():
+    """Fail closed. If the Pi cannot confirm the target exists, not redirecting
+    is better than landing the operator on a not-found page."""
+    status = build_status(
+        probes={"network": "ok", "arcticbase": "ok", "heartbeat": "ok",
+                "project": "proj-1a2b3c4d"},
+        server_base=SERVER, expected_slug="proj-1a2b3c4d",
+        pi_now=datetime.now(UTC), workbench_exists=None)
+    assert status["handoff_url"] is None
+    assert "could not confirm" in status["handoff_blocked"]
 
 
 def test_nothing_hands_off_while_anything_is_red():
@@ -298,3 +316,65 @@ def test_arcticbase_is_ok_when_both_the_api_and_the_ui_answer():
     detail, server_now = probe_arcticbase(fetch, base_url=SERVER)
     assert "0.1.0" in detail
     assert server_now is not None
+
+
+# --- the handoff target must EXIST, not merely be a route that serves -------
+
+def test_no_handoff_when_the_projects_workbench_does_not_exist_yet():
+    """Found on the bench, again. All four probes green, the screen handed off
+    to /wb/hardware-9c3412cc, and the SPA rendered a 404 -- because nothing had
+    created that workbench yet.
+
+    ArcticBase cannot tell us this from the handoff URL: /wb/<anything> returns
+    200, because the SPA fallback serves index.html for every client-side route.
+    The only server-side truth is /api/workbenches/<slug>. So checking that the
+    UI serves (which is what probe_arcticbase does) can never catch it -- that
+    verified the surface, and a handoff targets a specific resource on it.
+    """
+    status = build_status(
+        probes={"network": "ok", "arcticbase": "ok", "heartbeat": "ok",
+                "project": "hardware-9c3412cc"},
+        server_base=SERVER, expected_slug="hardware-9c3412cc",
+        pi_now=datetime.now(UTC), workbench_exists=False)
+    assert status["handoff_url"] is None
+    # Everything IS healthy -- the daemon is fine, ArcticBase is fine, there is
+    # simply nothing published yet. Reporting a failure would be a false alarm.
+    assert status["ok"] is True
+    assert "nothing published" in status["handoff_blocked"].lower()
+
+
+def test_handoff_happens_once_the_workbench_exists():
+    status = build_status(
+        probes={"network": "ok", "arcticbase": "ok", "heartbeat": "ok",
+                "project": "hardware-9c3412cc"},
+        server_base=SERVER, expected_slug="hardware-9c3412cc",
+        pi_now=datetime.now(UTC), workbench_exists=True)
+    assert status["handoff_url"] == f"{SERVER}/wb/hardware-9c3412cc"
+    assert status["handoff_blocked"] is None
+
+
+def test_workbench_existence_is_read_from_the_api_not_the_spa_route():
+    """/wb/<slug> is useless for this: it returns 200 for a slug that does not
+    exist. Pin the endpoint actually queried so nobody 'simplifies' it back."""
+    seen = []
+
+    def fetch(url, timeout=None):
+        seen.append(url)
+        return 200, b"{}", {}
+
+    assert probe_workbench_exists(fetch, base_url=SERVER, slug="p-1a2b3c4d") is True
+    assert seen == [f"{SERVER}/api/workbenches/p-1a2b3c4d"]
+
+
+def test_a_404_from_the_api_means_it_does_not_exist():
+    def fetch(url, timeout=None):
+        return 404, b'{"detail":"Not Found"}', {}
+    assert probe_workbench_exists(fetch, base_url=SERVER, slug="nope") is False
+
+
+def test_an_unreachable_host_is_not_mistaken_for_an_absent_workbench():
+    """Unknown is not the same as absent. Claiming absence on a transport error
+    would put a wrong explanation on the screen."""
+    def fetch(url, timeout=None):
+        raise OSError("connection refused")
+    assert probe_workbench_exists(fetch, base_url=SERVER, slug="p") is None
