@@ -235,11 +235,36 @@ def probe_project(heartbeat: dict[str, Any], *, expected_slug: str | None) -> st
     return active
 
 
+def probe_workbench_exists(fetch, *, base_url: str, slug: str) -> bool | None:
+    """Does this project's workbench actually exist? True/False, or None if unknown.
+
+    Asks the API, NOT the handoff URL. `/wb/<slug>` returns 200 for a slug that
+    does not exist, because ArcticBase's SPA fallback serves index.html for
+    every client-side route -- the not-found is rendered by the app after its
+    own API call fails. So the handoff URL cannot be used to validate itself,
+    which is how the bench screen came to hand off to a 404 twice.
+
+    None rather than False on a transport error: unknown is not absent, and
+    claiming absence would put a confident wrong explanation on the screen.
+    """
+    try:
+        status, _, _ = fetch(f"{base_url.rstrip('/')}/api/workbenches/{slug}",
+                             timeout=PROBE_TIMEOUT)
+    except Exception:
+        return None
+    if status == 200:
+        return True
+    if status == 404:
+        return False
+    return None
+
+
 # --- assembly ----------------------------------------------------------------
 
 def build_status(*, probes: dict[str, Any], server_base: str,
                  expected_slug: str | None, pi_now: datetime,
-                 server_now: datetime | None = None) -> dict[str, Any]:
+                 server_now: datetime | None = None,
+                 workbench_exists: bool | None = None) -> dict[str, Any]:
     """Fold probe outcomes into what the page renders.
 
     `probes` maps a probe name to its detail string, or to a ProbeError. Names
@@ -260,12 +285,29 @@ def build_status(*, probes: dict[str, Any], server_base: str,
 
     ok = first_failure is None and all(p["state"] == "ok" for p in out)
     slug = expected_slug
+
+    # Green does NOT imply somewhere to go. The daemon can be perfectly healthy
+    # and scoped to a project nothing has published to yet, in which case its
+    # workbench does not exist and handing off lands on the SPA's not-found.
+    # That is not a failure of anything -- so the probes stay green and the
+    # handoff is withheld with a reason, rather than reddening a healthy bench.
+    handoff_blocked: str | None = None
+    if ok and slug and workbench_exists is False:
+        handoff_blocked = (
+            f"the daemon is scoped to {slug}, but no workbench exists for it "
+            f"yet -- nothing published. It appears with the first finding.")
+    elif ok and slug and workbench_exists is None:
+        handoff_blocked = (
+            f"could not confirm a workbench exists for {slug}; not handing off "
+            f"to a page that may not be there")
+
     return {
         "ok": ok,
         "first_failure": first_failure,
         "probes": out,
         "handoff_url": (f"{server_base.rstrip('/')}/wb/{slug}"
-                        if ok and slug else None),
+                        if ok and slug and handoff_blocked is None else None),
+        "handoff_blocked": handoff_blocked,
         "clock_warning": _clock_warning(pi_now, server_now),
         "server_now": server_now.isoformat() if server_now else None,
         "generated_at_server_time": server_now is not None,
@@ -344,9 +386,12 @@ def collect(*, server_base: str, expected_slug: str | None,
     except ProbeError as exc:
         probes["project"] = exc
 
+    slug = expected_slug or payload.get("active_slug")
+    exists = (probe_workbench_exists(fetch, base_url=server_base, slug=slug)
+              if slug else None)
     return build_status(probes=probes, server_base=server_base,
-                        expected_slug=expected_slug or payload.get("active_slug"),
-                        pi_now=datetime.now(UTC), server_now=server_now)
+                        expected_slug=slug, pi_now=datetime.now(UTC),
+                        server_now=server_now, workbench_exists=exists)
 
 
 # --- serving -----------------------------------------------------------------
@@ -399,7 +444,12 @@ async function poll(){
     const banner = document.getElementById('banner');
     if (s.ok) {
       banner.className = 'ok';
-      banner.textContent = 'ALL GREEN' + (s.handoff_url ? ' — opening workbench…' : '');
+      // Say WHY there is no redirect. Otherwise the screen reads ALL GREEN and
+      // then does nothing, and the operator stands there waiting for a handoff
+      // that is never coming.
+      banner.textContent = 'ALL GREEN' + (s.handoff_url
+        ? ' — opening workbench…'
+        : (s.handoff_blocked ? ' — ' + s.handoff_blocked : ''));
       if (s.handoff_url) setTimeout(() => location.href = s.handoff_url, 2500);
     } else {
       banner.className = 'bad';
