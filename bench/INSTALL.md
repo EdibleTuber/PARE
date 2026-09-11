@@ -43,22 +43,34 @@ Verify from the Pi, not from the server:
 curl -m3 http://100.82.222.92:2929/api/health     # expect {"status":"ok",...}
 ```
 
-## 1. Copy the two things the Pi needs
+## 1. Clone the repo ON THE PI, and deploy from it
 
-From the repo checkout on `agenthost`:
+The repo is public, so this needs no credentials:
 
 ```bash
-ssh pare-bench 'sudo mkdir -p /opt/pare/bench /opt/pare/scripts'
-scp bench/__init__.py bench/status_server.py pare-bench:/tmp/
-scp scripts/bench_doctor.sh pare-bench:/tmp/
-ssh pare-bench 'sudo mv /tmp/__init__.py /tmp/status_server.py /opt/pare/bench/ && \
-                sudo mv /tmp/bench_doctor.sh /opt/pare/scripts/ && \
-                sudo chmod +x /opt/pare/scripts/bench_doctor.sh'
+git clone https://github.com/EdibleTuber/PARE.git ~/PARE
+cd ~/PARE
+./scripts/bench_deploy.sh --check     # read-only, no sudo
+sudo ./scripts/bench_deploy.sh        # installs what differs, stamps, restarts
 ```
 
-Plain `scp`, not `scp -O`. Legacy SCP mode requires execution of the remote user's
-shell, so the path is re-parsed remotely; OpenSSH ≥9.0 defaults to SFTP and that
-default is the safe one.
+**Deploy from a checkout, not by copying files.** The first version of this guide
+streamed files over SSH into a staging directory to be copied into `/opt/pare` by
+hand. Nothing recorded which commit they came from, so "what is running?" could
+only be answered by sha256-ing each file against the repo — and the staging copy
+silently drifted **two commits behind** the running one, which made following the
+documented install step a downgrade.
+
+`bench_deploy.sh` writes `/opt/pare/DEPLOYED_FROM`, so the question is answerable
+by reading one line:
+
+```bash
+cat /opt/pare/DEPLOYED_FROM
+```
+
+Updating later is `git -C ~/PARE pull` then the same two commands. The `--check`
+half needs no privilege, which means the state can be established by anyone —
+including an agent that cannot sudo — rather than inferred.
 
 ## 2. The service user — ALREADY DONE
 
