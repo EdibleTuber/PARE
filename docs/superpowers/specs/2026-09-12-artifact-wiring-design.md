@@ -63,14 +63,64 @@ A field the worker never sends is a field it cannot lie about, and a check that
 does not exist cannot rot. This single rule decides the wire contract in §4 and
 dissolves one of the three deferred follow-ups instead of implementing it.
 
-**A2 — `host` and `produced_by` leave the wire; the daemon synthesizes them.**
-The follow-up list asks for *"`host` checked against the WorkerSpec endpoint."*
-The better answer is that the worker should never have sent it. The daemon knows
-which spec it dispatched to and which `worker.tool` it called. `_HOST_RE`
-(`artifacts.py:24`) survives, its job changed from validating an inbound field to
-constraining an outbound one — a `WorkerSpec` endpoint is operator-written, not
-trusted by construction, and the synthesized host still lands in
-`scp <host>:<path>`.
+**A2 — `produced_by` leaves the wire. `host` becomes operator-declared, in a new
+`WorkerSpec.artifact_host`.**
+
+`produced_by` is `worker.tool` at the chokepoint; the worker echoing it back adds
+nothing, and A1 applies cleanly.
+
+**`host` does not, and an earlier draft of this spec got it wrong.** That draft
+deleted `host` and had the daemon synthesize it from `spec.endpoint`. Three facts
+defeat it:
+
+- **The parent chose the field deliberately.** §11, under *Deferred —
+  cross-machine artifact transfer*: *"The descriptor carries `host` as a field
+  rather than an assumption, so it can carry this later."* Synthesis converts it
+  back into an assumption and forecloses the IoT-Android case the parent names.
+- **`endpoint` is `None` for every stdio worker** (`types.py:78`;
+  `validate_transport_fields` at `:203` requires it only for the HTTP
+  transports). §8's own Level 1 probe is stdio, so synthesis has no source for
+  the first acceptance level this spec specifies.
+- **A forwarded endpoint synthesizes a confidently wrong answer.**
+  `http://127.0.0.1:9101/mcp` — the form already sitting commented in
+  `workers.yaml` — yields host `127.0.0.1`, and
+  `scp 127.0.0.1:/mnt/bench-store/dump.bin` reads **the daemon's own filesystem**.
+
+That last point generalises, and it is why this decision reversed: a check has
+three outcomes — agree, disagree, absent — and **disagreement is the diagnostic
+one**. Synthesis has two, and makes the daemon's belief unfalsifiable. Deleting a
+field is an improvement only when the daemon's answer is *better*, not merely
+*unchallenged*.
+
+So `artifact_host` joins `artifact_root` and `artifact_drive_id` on `WorkerSpec`,
+operator-declared in `workers.yaml` — D6's trust anchor, the file the worker
+cannot touch — defaulting to the endpoint's hostname via `urlsplit().hostname`
+where there is one, and **required explicitly when `transport: stdio`**. The
+worker still reports `host`, and `_HOST_RE` (`artifacts.py:24`) keeps its job
+unchanged.
+
+**What reconciliation means, precisely, because "refuse a mismatch" would be
+wrong here.** The two values are not the same kind of thing: the worker's is what
+it calls *itself* (`pare-bench`), the operator's is a *reachable address*
+(`100.97.133.126`). They legitimately differ, so an equality refusal would fire on
+every correct dispatch at this bench — and a refusal that fires constantly is one
+an operator disables, which is worse than not having it. Therefore:
+
+- **`artifact_host` is what retrieval uses.** Always. The worker's claim never
+  determines where the operator is sent, which is the whole point of A2's trust
+  anchor and is what closes `artifacts.py:130-137`'s lateral-aiming pivot.
+- **The worker's `host` must be well-formed** (`_HOST_RE`) or the descriptor is
+  refused — that check is about what lands in the operator's shell, and it is
+  unconditional.
+- **Disagreement is recorded and surfaced, not refused.** It goes in the capture
+  row and the descriptor published to the workbench. This is the third outcome
+  A2 exists to preserve: a worker that starts claiming a host it did not claim
+  yesterday is a fact worth seeing, and it is exactly the signal synthesis threw
+  away.
+
+An endpoint is never silently reused as a retrieval address. `_HOST_RE` admits no colons or brackets, so a
+literal IPv6 `artifact_host` is refused at config load — fail-closed, and recorded
+here as a known limit rather than a discovery at the bench.
 
 **A3 — `validate_descriptor` takes the `WorkerSpec`, not a worker name.**
 `validate_descriptor(payload, *, spec, tool)`. This is what makes containment and
@@ -121,17 +171,18 @@ it did.
 | `hashed_at` | worker | §5.5 — the daemon cannot know when the worker hashed, and that gap is what a chain of custody exists to make visible |
 | `media_type` | worker | the producing tool knows what it wrote |
 | `drive_id` | worker | read from `{root}/.bench-store-id`; the daemon has no view of that filesystem |
-| `host` | **daemon** | synthesized from the dispatched `WorkerSpec` (A2) |
+| `host` | worker, **reconciled** | must be well-formed; retrieval uses `spec.artifact_host`, disagreement is recorded (A2) |
 | `produced_by` | **daemon** | it is `worker.tool` at the chokepoint |
 
-Six fields on the wire, **all required, none optional**. Every one is either a
+Seven fields on the wire, **all required, none optional**. Every one is either a
 security input or a custody record, and "absent means default" is how a
 half-wired dev build slips past. `media_type` in particular gets no default: a
 default hides a tool that never considered the question.
 
-The daemon adds its two after validation, yielding §5.1's eight-field object
-unchanged for the capture store and for `publish_descriptor`
-(`pare/arcticbase.py:209`).
+The daemon adds `produced_by` after validation, yielding §5.1's eight-field
+object for `publish_descriptor` (`pare/arcticbase.py:209`). **What reaches the
+capture store is a separate question, which an earlier draft of this spec
+asserted without checking** — see §6.
 
 `_REQUIRED` (`artifacts.py:39`) changes accordingly. Both this and A3 are
 breaking changes to the released `agent_core` 1.10.0, and both are **free right
@@ -154,7 +205,22 @@ actual codebase.
 expected_size)` in `pare_worker_kit.artifacts`, a context manager yielding a
 writer. The writer exposes `write(b)`, hashing inline — §5.5's "nearly free",
 since the producing tool already has every byte in hand — and, after a clean
-exit, `.descriptor`: the six fields of §4.
+exit, `.descriptor`: the worker-reported fields of §4.
+
+**`expected_size` is a contract, not a hint, and this is the spec's one defence
+against a short read.** An earlier draft spent it solely on the free-space check
+at step 3, which `ENOSPC` already backstops, and then claimed §5.5's `.partial`
+mechanism caught truncation. It does not: `.partial` fires on *abnormal* exit. A
+tool that asks for 2 GB, gets short reads off the chip, and leaves its `with`
+block **cleanly** reaches the rename and publishes a correct size and a correct
+hash of the truncated bytes — which is the ordinary hardware failure, not an
+exotic one. So step 7 additionally refuses a clean exit when
+`bytes_written != expected_size`.
+
+This does not make a hostile producer honest — §9 still holds, and nothing here
+changes it. It closes the *buggy* half, which §9's disclaimer was being read as a
+licence to leave open. `expected_size` is the only value in the walk that did not
+come from the bytes, and spending it on `statvfs` alone wastes it.
 
 **The walk, as ordering.** Every step after the first is relative to a directory
 *descriptor*, never re-derived from a path. Re-opening by path is what
@@ -176,13 +242,32 @@ reintroduces the race this function exists to close.
 4. The project directory is opened `O_DIRECTORY|O_NOFOLLOW` relative to root,
    created if absent. This is the race-free counterpart of the `lexists`/`islink`
    pair in `artifact_path`, which checks a *persistent* redirection and says so.
-5. `{name}.partial` is created relative to *that* descriptor,
-   `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`.
+5. A temporary name is created relative to *that* descriptor,
+   `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`. **It must not be `{name}.partial`**, and
+   this is not cosmetic: `_NAME_RE` (`pare_worker_kit/artifacts.py:53`) is
+   `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, which admits a literal `.`, so
+   `dump.partial` is itself a legal artifact name. Verified by running the
+   regex — `dump`, `dump.partial` and `dump.partial.partial` all match. The
+   temporary name must therefore contain at least one character **outside
+   `_NAME_RE`'s alphabet**, so that no legal `name` can ever collide with any
+   temporary, and it must **not** begin with `.`, because §5.5 wants the orphan
+   visible to a plain `ls` at the bench and a dotfile is not. `{name}+partial`
+   satisfies both (`+` is outside the class); the property is what binds, not
+   that spelling.
 6. The held descriptor is `fstat`-ed: regular file, `st_nlink == 1`, `st_dev`
    equal to the root directory's. `fstat` on the fd, never `lstat` on a path —
    same reason as the relativity above.
-7. **On clean exit only:** flush, `fsync` the file, rename `.partial` → `name`
-   relative to the project descriptor, `fsync` the project directory.
+7. **On clean exit only:** confirm `bytes_written == expected_size`, flush,
+   `fsync` the file, then rename the temporary → `name` relative to the project
+   descriptor with **`RENAME_NOREPLACE`**, then `fsync` the project directory.
+
+   `RENAME_NOREPLACE` is the control, not a pre-existence check — checking first
+   and renaming second is a TOCTOU window of exactly the kind this walk exists to
+   close. A plain `renameat` silently replaces its destination, which is what
+   makes both of the following reachable: a second dump quietly destroying a
+   completed one (see the timeout interaction below), and a call whose `name`
+   collides with an in-flight temporary clobbering it. `renameat2` is Linux-only,
+   which A7 has already accepted as the cost of this function.
 
 **Invariants, in priority order.** No component after `root` is ever resolved
 through a symlink. No path string is re-opened after being checked. Drive
@@ -200,9 +285,20 @@ only for a file that reached step 7.
 - `EFBIG` names FAT32's 4 GiB ceiling. The store is ext4; a replacement stick
   might not be.
 - A sentinel mismatch names both UUIDs.
-- A pre-existing `.partial` fails `O_EXCL`; the message names the file and says
+- A pre-existing temporary fails `O_EXCL`; the message names the file and says
   to remove it. **Left in place deliberately** — §5.5 wants the orphan visible to
-  `ls` at the bench, and that is worth more than a convenient retry.
+  `ls` at the bench, and that is worth more than a convenient retry. The message
+  must **not** assume the file is abandoned: nothing here distinguishes an orphan
+  from a live writer, and the most likely way to meet one is the timeout case
+  below, where an operator told to "remove it" would unlink a running dump's
+  target mid-write.
+- `EEXIST` from the step 7 rename means `name` already exists. Distinct message
+  from the one above: a completed artifact is in the way, not a temporary, and
+  the operator's choice is different.
+- `ENOENT` at step 7 means the temporary vanished while it was being written —
+  the other half of the case above, seen from the writer's side.
+- `bytes_written != expected_size` on a clean exit: the temporary is kept, and the
+  message states both numbers.
 
 **What the tests must discriminate.** Each must be verified *failing* against an
 `artifact_path`-only implementation. A test that passes there is exercising a
@@ -243,7 +339,17 @@ artifact work interleaves at three points and the ordering is load-bearing.
    tier-downgrade channel.
 2. **If `artifact`, validate the spec and refuse before the gate.** No
    `artifact_root` → refused (§5.4, fail closed). No `artifact_drive_id` → refused
-   (A5). No slug → refused. Before `_await_operator`, because prompting an
+   (A5). No `artifact_host` → refused (A2). No slug → refused.
+
+   **And raise the effective tier to at least `high`.** `risk_pool.py:413` —
+   `if effective in ("high", "critical")` — is the *only* path to
+   `_await_operator`, and nothing anywhere couples `produces=artifact` to a tier
+   that reaches it. Without this, a tool declaring `produces: artifact` and
+   `risk_tier: low` dispatches with no prompt, and step 3 below spends its whole
+   argument protecting an approval surface that never renders. This is the same
+   reasoning that put `hardware`'s `risk_default` at `high` in `workers.yaml` —
+   a floor, so the worst case is a prompt — applied to the property that actually
+   predicts a write rather than to the worker that happens to host it. Before `_await_operator`, because prompting an
    operator to approve a dispatch that cannot succeed teaches them to approve
    without reading.
 3. **Inject the reserved arguments, then snapshot.** `snapshot` at `:399` is what
@@ -267,6 +373,33 @@ descriptor. Exactly-one is refusable and therefore checkable, and it becomes a
 conformance assertion beside `_assert_valid_produces_meta`
 (`conformance.py:63`), so a worker that gets it wrong fails at build time rather
 than mid-dump.
+
+**Timeouts, and the silent overwrite they cause.** An earlier draft of this spec
+did not contain the word "timeout". It needs to, because the bench's numbers make
+the failure routine rather than theoretical: a 2 GB dump at the measured
+~28 MB/s takes about 70 s, and the only `read_timeout` precedent an operator has
+to copy is `frida`'s `60` at `workers.yaml:63`.
+
+**What a read timeout does was read from the installed SDK, not assumed.**
+`mcp/shared/session.py:290-303` wraps the wait in `anyio.fail_after` and, on
+expiry, raises `McpError` **locally**; no `notifications/cancelled` is sent, and
+the `finally` at `:307` drops the response stream. Nothing in `agent_core`
+cancels the server side either. So the worker keeps writing, completes, renames a
+perfectly good artifact into place, and answers on a stream nobody is reading —
+while the daemon has already reported failure to the model.
+
+The retry is where the data is lost: the temporary is gone (renamed away), so
+`O_EXCL` passes cleanly, a second 70-second write runs, and **a plain `renameat`
+would silently replace the good file**. §5 step 7's `RENAME_NOREPLACE` is what
+makes that second rename fail loudly instead — the two findings share one fix,
+which is why they are in one round.
+
+Two requirements follow. An artifact-producing worker's `read_timeout` must
+**exceed its worst-case dump time with real margin**, declared in `workers.yaml`
+beside `artifact_root`; and because a bound can always be wrong, the
+`RENAME_NOREPLACE` refusal is the backstop that keeps being wrong survivable. The
+plan must state the floor as a rule tied to the measured rate, not as a literal
+number that rots the moment a faster enclosure arrives.
 
 **Placement.** All of this lives in `RiskAwareToolPool.call_tool` rather than in
 a separate wrapper. The alternative — an `ArtifactAwarePool` layered outside it —
