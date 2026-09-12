@@ -241,6 +241,25 @@ the host in that command.
 | `host` | worker, **reconciled** | must be well-formed; retrieval uses `spec.artifact_host`, disagreement is recorded (A2) |
 | `produced_by` | **daemon** | it is `worker.tool` at the chokepoint |
 
+**Four of these have no semantics anywhere in the code yet** — `hashed_at`,
+`media_type`, `drive_id` and (daemon-side) `produced_by` appear in no source
+file; `_REQUIRED` (`artifacts.py:39`) is still the original four. So this spec
+states them, because "required" without a grammar is not a contract:
+
+- `hashed_at` — RFC 3339 UTC. A format is needed for the parent's §14 test to be
+  writable at all (*"`hashed_at` equals the dump time when hashed inline, and is
+  later when supplied by `hash_artifact`"*).
+- `media_type` — an IANA type/subtype, validated as such. No default (above).
+- `drive_id` — the same grammar as the sentinel file it is read from, and
+  **control-character-checked**, because §5's mismatch message prints it to an
+  operator. `path` gets `_CONTROL_RE` (`artifacts.py:34`) for exactly this
+  reason; a worker-supplied field that reaches a terminal gets it too.
+
+**`hash_artifact` is deferred, and named rather than dropped.** §5.5 specifies it
+as the separate, I/O-bound *"this is what is on disk now"* tool, distinct from the
+free inline hash. Nothing here builds it; `hashed_at` exists so that when it is
+built, a late hash cannot masquerade as a creation-time one.
+
 Seven fields on the wire, **all required, none optional**. Every one is either a
 security input or a custody record, and "absent means default" is how a
 half-wired dev build slips past. `media_type` in particular gets no default: a
@@ -314,11 +333,24 @@ reintroduces the race this function exists to close.
    that failed to mount leaves an empty directory on the SD card, where the
    sentinel is simply absent. `ismount` answers "is this a mount"; the sentinel
    answers "which drive", which is the question.
+
+   **Only `ismount` is subsumed, not §5.5's write-probe.** The parent added a
+   write-probe precisely because *"`ismount` is true for a read-only mount"* — and
+   the sentinel is equally readable on a read-only mount, so it does not answer
+   that either. In practice step 5's `O_CREAT|O_EXCL` raises `EROFS` before any
+   bytes are written, which *is* the write-probe, done at the moment it matters
+   rather than earlier. Stated explicitly because an earlier draft claimed
+   subsumption for both and had only argued it for one.
 3. Free space is checked against `expected_size` from the same descriptor, so the
    answer cannot come from a different filesystem than the one written to.
 4. The project directory is opened `O_DIRECTORY|O_NOFOLLOW` relative to root,
    created if absent. This is the race-free counterpart of the `lexists`/`islink`
    pair in `artifact_path`, which checks a *persistent* redirection and says so.
+   "Created if absent" implies an open/mkdir retry: `O_NOFOLLOW` makes a racing
+   symlink **safe** (`ELOOP`, never a follow), so this is not an escape — but the
+   loop needs a **bounded** number of attempts and a named give-up error, because
+   anything with write access inside the root can otherwise drive it
+   indefinitely.
 5. A temporary name is created relative to *that* descriptor,
    `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`. **It must not be `{name}.partial`**, and
    this is not cosmetic: `_NAME_RE` (`pare_worker_kit/artifacts.py:53`) is
@@ -334,6 +366,18 @@ reintroduces the race this function exists to close.
 6. The held descriptor is `fstat`-ed: regular file, `st_nlink == 1`, `st_dev`
    equal to the root directory's. `fstat` on the fd, never `lstat` on a path —
    same reason as the relativity above.
+
+   **`st_nlink == 1` is belt-and-braces, and the spec must not pretend
+   otherwise.** Step 5 creates the file with `O_CREAT|O_EXCL`, so a pre-planted
+   hardlink at that path returns `EEXIST` and step 6 is never reached; every file
+   that gets here has `st_nlink == 1` **by construction**. Keep the check — it is
+   the one that still refuses if step 5's flags are ever loosened — but do not
+   attribute a catch to it (see the test list, where an earlier draft did exactly
+   that). The hardlink window that *is* real is different and uncovered: between
+   step 5 and step 7, anything with write access in the project directory can
+   `link()` the temporary elsewhere, keeping a handle that can read and write the
+   artifact after the descriptor is published. Nothing here detects that; §9 owns
+   it.
 7. **On clean exit only:** confirm `bytes_written == expected_size`, flush,
    `fsync` the file, then rename the temporary → `name` relative to the project
    descriptor with **`RENAME_NOREPLACE`**, then `fsync` the project directory.
@@ -377,6 +421,11 @@ only for a file that reached step 7.
 - `bytes_written != expected_size` on a clean exit: the temporary is kept, and the
   message states both numbers.
 
+Orphans accumulate, and multi-gigabyte ones are not cheap on a 117 GiB drive.
+`scripts/bench_doctor.sh` reports free space but has no `.partial`-specific
+check, so an accumulation looks like ordinary shrinkage rather than a named
+problem. It gets one, alongside the artifact-dispatch probe in §8.
+
 **What the tests must discriminate.** Each must be verified *failing* against an
 `artifact_path`-only implementation. A test that passes there is exercising a
 path that was already correct, and the fix belongs somewhere else.
@@ -384,9 +433,26 @@ path that was already correct, and the fix belongs somewhere else.
 - A symlink swapped in at the project-directory component *between* a lexical
   check and the open. This is the one case `artifact_path` cannot catch and the
   reason this function exists.
-- A hardlink to a file outside the root — no symlink exists to find, so only
-  `st_nlink` sees it.
-- A sentinel on a different filesystem from the write target.
+- A pre-existing hardlink at the temporary's path. **Assert that `O_EXCL`
+  refuses it** — not that `st_nlink` does. An earlier draft of this list
+  justified this test as *"only `st_nlink` sees it"*, which is false for the
+  reason in step 6. The test would still have gone green against the new code and
+  red against the old, satisfying the "verified failing" rule while crediting the
+  wrong mechanism — the precise trap that rule exists to catch, sprung by the
+  rule's own author.
+- **An absent sentinel**, which is the likeliest real bench failure and was in no
+  list at all: `/mnt/bench-store` is fstab-mounted `nofail`, so a Pi that boots
+  with the drive unplugged has an ordinary empty directory there. The error must
+  say *"no `.bench-store-id` at `{root}` — is the drive mounted?"*, distinct from
+  a mismatch, and a bare `FileNotFoundError` is not acceptable. (The
+  wrong-filesystem sentinel test an earlier draft asked for is **dropped**: the
+  sentinel is read relative to the root fd, so it is in root's filesystem by
+  construction except via a file bind mount needing `CAP_SYS_ADMIN`. The test was
+  either unconstructible or vacuous — it would have compared two values the walk
+  makes equal by construction, and passed forever.)
+- **A short read that exits cleanly** — `bytes_written < expected_size` with no
+  exception. This is the ordinary hardware failure, and step 7's size check is
+  the only thing that catches it.
 - `ENOSPC` partway through: assert no descriptor is produced **and** that the
   `.partial` remains. Asserting only the raise is vacuous against a design whose
   claim is the `.partial`.
@@ -649,6 +715,38 @@ recorded: `agent_core` sat at 1.9.0 through thirteen commits and the staleness w
 invisible by version number. The suites must run anyway; the pin bump is the cheap
 half.
 
+## 7a. Sequencing, and why this is not one implementation plan
+
+Counting the discrete units of work this spec requires: roughly nine in
+`agent_core`, four in `pare-worker-kit`, five in PARE, plus pin bumps and suite
+runs in three worker repos and two tag releases. **Around twenty items across six
+repos**, including two breaking changes to a released library and one security
+invariant with a race in it. That is far past the four-item round this project
+caps changes at, and the cap is not arbitrary — larger rounds are where a fix
+introduces a regression worse than the bug.
+
+It also mixes phases with very different stakes, which is the more important half:
+running them at one review weight would over-process the mechanical work and
+under-process the one part where a silent failure is severe and hard to detect.
+
+- **P1 — wire vocabulary.** Mechanical, fully specified, single-file edits:
+  **include code in the plan.** The descriptor field-set and reserved-argument
+  constants land in both repos as pure declarations, *then* the bidirectional
+  guard (§7), then `_REQUIRED` and `validate_descriptor`'s new signature with
+  containment and the drive-id comparison.
+- **P2 — `open_artifact`.** Heaviest review, most adversarial framing, **no code
+  in the plan** (§5 says why), loopback rig required. The walk, the Linux
+  refusal, the failure modes, the tests that discriminate.
+- **P3 — dispatch wiring.** Route on the existing `pool.produces()`, injection
+  and its ordering against `snapshot`/`_await_operator`, the tier floor, slug
+  validation, extraction, the refusals and their audit rows.
+- **P4 — release, consumers, acceptance.** Tags, four pin bumps, consuming suites,
+  the probe and its tripwire, publication and the retrieval command, the bench
+  run.
+
+Each phase gets its own plan. P2 gets the most capable reviewer and an explicit
+attack-sequence brief; P1 and P4 do not need one.
+
 ## 8. Acceptance
 
 **The wiring's end-to-end property does not need a Tigard.** §14 phrases
@@ -657,10 +755,19 @@ acceptance as "a dump on `pare-bench`", which could be read as blocking this wor
 on a drive, and the drive exists, is mounted, carries its sentinel and has been
 write-verified. A probe that writes bytes exercises the path a flash dump would.
 
-**Level 1 — local, on `agenthost`.** A stdio probe worker, `artifact_root` at a
-temp directory carrying a `.bench-store-id`. Exercises injection ordering, the
-`produces` ratchet across a reload, containment, the drive-id comparison, every
-refusal path, and both races from §5. This is where the adversarial tests live.
+**Level 1 — local, on `agenthost`.** A stdio probe worker (with an explicit
+`artifact_host`, per A2). Exercises injection ordering, the `produces` ratchet
+across a reload, containment, the drive-id comparison, every refusal path, and
+both races from §5. This is where the adversarial tests live.
+
+**The rig is a loopback filesystem, not a temp directory**, and an earlier draft
+of this section got that wrong in a way that would have hollowed out the most
+important tests. The parent's §14 specifies it — `truncate -s 64M`, `mkfs.ext4`,
+mount — because you cannot produce `ENOSPC`, `EROFS`, or an unmounted root on a
+tmpdir. With a tmpdir rig the `ENOSPC` and `EROFS` tests get mocked, and a mocked
+`ENOSPC` proves nothing about whether the temporary survives, which is the entire
+assertion. Every drive state gets forced on the loopback: full mid-write,
+read-only, unmounted, wrong id, absent sentinel.
 
 **Level 2 — the bench.** The same probe on `pare-bench` over streamable_http,
 `artifact_root: /mnt/bench-store`, `artifact_drive_id:
@@ -677,6 +784,29 @@ is **temporary, and leaving it declared is a finding.**
 Not an API 200, not a successful `PUT`, not a descriptor in the capture store —
 the page, on the DSI panel, at the bench.
 
+**And that is two pages, not one.** The kiosk's home URL is `http://127.0.0.1:8080/`
+— the Pi's *own* status server (`bench/status_server.py`), never one served by
+`agenthost`, per the parent's §8.1. It reaches the workbench through
+`handoff_url` (`build_status`, `:308`), which is only offered when the probes are
+green **and** `probe_workbench_exists` (`:238`) confirms the workbench is there,
+specifically so a handoff cannot land on the SPA's not-found page. So acceptance
+walks that path: status page green, handoff offered, workbench reached, finding
+read. Anything that changes `bench/` also needs a `scripts/bench_deploy.sh` run
+before it is true at the bench — the unit serving the screen is the installed
+copy at `/etc/systemd/system/`, not the file in the repo.
+
+**Two operational additions, both small and both worth doing here.** The status
+page has four probes (`PROBE_ORDER`, `:46`) and `scripts/bench_doctor.sh` has
+five, and **none of them can answer "did the last artifact dispatch fail, and
+why"** — which by design publishes nothing, so the screen stays silent. An
+operator at the bench, whose only other route to that answer is a live `pare-cli`
+session against `agenthost`, should get it locally. And the probe worker's
+`workers.yaml` entry needs a **tripwire, not a sentence**: "leaving it declared is
+a finding" is enforced by nobody. `tests/test_workers_yaml_format_comment.py`
+reads only lines above the `workers:` key, so it is structurally blind to it, and
+`tests/test_risk_overrides_coverage.py` would at most emit a `UserWarning`. A
+test that fails on a declared `probe` worker is the enforcement.
+
 **Test discipline.** Every regression test is verified failing against the
 pre-change code. No assertion on a count of fields or of tests: assert the
 relationship — the kit's constant equals agent_core's; a descriptor the kit
@@ -684,6 +814,30 @@ produces validates against the daemon's validator — because a literal breaks o
 the next legitimate change and a relationship survives it.
 
 ## 9. What this cannot establish
+
+**Containment under `artifact_root` against a *compromised* worker.** This must be
+said plainly, because §5.4, §6 and both docstrings describe containment as a
+control and a reader finishes them believing `artifact_root` is an enforced
+boundary. It is not, against the threat the trust boundary actually names:
+
+- `open_artifact` is a function the worker *chooses to call*. A compromised worker
+  calls nothing, runs `ln -s /etc/shadow {root}/{slug}/dump.bin`, and hand-writes
+  a descriptor. Daemon-side, every check passes — the path string genuinely is
+  under the root, the drive id genuinely matches. The operator's `scp` follows the
+  remote symlink.
+- So the daemon's lexical containment constrains a **buggy** worker and a hostile
+  *client*; against a compromised worker it buys nothing, because `commonpath`
+  compares strings and the mapping from string to inode belongs to the attacker.
+  §6 calls it defence in depth; there is no first depth for this threat.
+- **The retrieval window is hours, not milliseconds.** `open_artifact` closes a
+  race at write time; the operator retrieves by path, by hand, long afterwards.
+  Anything with write access inside the root can swap the file in between. The
+  only detector is the operator comparing the sha256 by hand — and per the
+  paragraph below, that comparison cannot establish authenticity either.
+
+What bounds this is not a check in this codebase: it is that `workers.yaml`, which
+the worker cannot touch, declares where the producer may write, and that a
+compromised bench worker is a compromise of the bench.
 
 That a dump's bytes are the chip's bytes. The producer supplies both the file and
 its digest, so a worker that truncates at production returns a correct sha256 of
@@ -717,8 +871,30 @@ owns it, and it needs a Tigard on the bench.
 - **The `.partial` left behind is a deliberate ergonomic cost.** If it proves
   intolerable in practice the fix is a named recovery command, never silently
   overwriting on `O_EXCL`.
+- **The result-shape rule has no build-time enforcement** until an invocation
+  harness exists (§6). Until then it is a runtime refusal, and a worker can ship
+  a wrong result shape that only fails at the bench.
+- **A `read_timeout` is a guess about hardware that will change.** §6 states it
+  as a rule tied to the measured rate rather than a number, and
+  `RENAME_NOREPLACE` is the backstop for the guess being wrong — but a dump
+  slower than anyone predicted still costs a wasted 70 seconds and a confusing
+  failure.
+- **This spec was substantially wrong on first draft, in ways a four-reviewer
+  panel caught and its author did not.** Recorded as a risk because the same
+  failure mode — asserting from the shape of an API rather than from the file —
+  is available to whoever writes the implementation plans. The phases in §7a that
+  carry security invariants get an attack-sequence brief for that reason, not as
+  ceremony.
 
 ## 11. Provenance
+
+**Revision note.** v1 of this document was reviewed on 2026-09-12 by four
+independent reviewers reading the source rather than the spec. About thirty
+findings survived verification; they landed in four commits on
+`docs/artifact-wiring-design`, grouped by kind rather than by count. The larger
+reversals are narrated in place — A2's host decision, §6's already-existing
+ratchet, §7's release order, §8's rig — rather than quietly corrected, because
+the reasoning that produced the wrong version is the useful part.
 
 Every file:line in this document was read on 2026-09-12. Machine state — the
 daemon active, ArcticBase 200 on api and ui, `agent_core` 1.10.0 in PARE's venv,
