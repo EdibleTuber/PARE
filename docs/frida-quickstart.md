@@ -90,7 +90,7 @@ risk_overrides:
 The effective tier of each call is `max(risk_default floor, wire tier, operator pin)`.
 Because the floor is **high**, *every* Frida tool prompts for approval during this
 conservative rollout — not just the dangerous ones. (See the risk-gating diagram in
-the [README](../README.md#risk-gating--operator-approval-hitl).)
+[`ARCHITECTURE.md`](../ARCHITECTURE.md#risk-gating--operator-approval-hitl).)
 
 ## 3. Launch
 

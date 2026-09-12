@@ -1,8 +1,10 @@
 # PARE Quick Start
 
 Get PARE talking — backed by PAL's research vault and risk-gated RE workers — in
-a few minutes. For the full picture see [`README.md`](README.md); for design
-detail see [`docs/superpowers/`](docs/superpowers/).
+a few minutes. For what PARE is see [`README.md`](README.md); for the worker
+registry and risk model [`WORKERS.md`](WORKERS.md); for how it fits together
+[`ARCHITECTURE.md`](ARCHITECTURE.md); for design detail
+[`docs/superpowers/`](docs/superpowers/).
 
 ## 1. Prerequisites
 
