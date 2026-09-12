@@ -18,6 +18,12 @@ until the model returns a final answer. Everything `handle_chat` yields is
 emitted to the client by the daemon; risk gating and operator approval happen
 transparently inside tool dispatch.
 
+The two loops are nested and are not the same thing: `for _round in
+range(MAX_TOOL_ROUNDS)` (`pare/agent.py:437`) is the round, and each round runs
+every tool call the model asked for before going back to the model. The round cap
+of 50 is *"a coarse final backstop"* in its own words (`:356`) — the repeat-guard
+and the handback checkpoints are what normally stop a loop, long before it.
+
 ```mermaid
 sequenceDiagram
     actor User
@@ -37,19 +43,23 @@ sequenceDiagram
         INF-->>H: tokens
         H-->>CLI: StreamChunkMessage… (daemon emits each yield)
     else model returns tool calls
-        INF-->>H: [ToolCall]
-        loop per tool call (≤ 50 rounds)
-            H-->>CLI: ToolProgressMessage
-            H->>TE: run(name, args)
-            alt builtin/local tool
-                TE->>TE: search_vault / read_vault_doc (in-process)
-            else MCP worker tool
-                TE->>RP: call_tool(worker, tool, args)
-                Note over RP: risk gate — see below
-                RP->>W: dispatch (if allowed)
+        loop tool round — at most 50
+            INF-->>H: [ToolCall]
+            loop each call in this round
+                H-->>CLI: ToolProgressMessage
+                H->>TE: run(name, args)
+                alt builtin / local tool
+                    TE->>TE: search_vault, read_vault_doc,<br/>publish_finding — in-process, not gated
+                else MCP worker tool
+                    TE->>RP: call_tool(worker, tool, args)
+                    Note over RP: risk gate — see below
+                    RP->>W: dispatch (if allowed)
+                    W-->>RP: result
+                    Note over RP: captured — always stored,<br/>stub returned if large
+                end
+                TE-->>H: result string
             end
-            TE-->>H: result string
-            H->>INF: complete(messages + tool result)
+            H->>INF: complete(messages + this round's results)
         end
     end
     H-->>CLI: ResponseMessage
@@ -66,13 +76,13 @@ pulls a hit's full body.
 flowchart LR
     M["model consults the vault"] --> SV["search_vault"]
     SV --> RC["RetrievalClient.search"]
-    RC -->|"POST /collections/vault/search"| MGR["inference manager"]
+    RC -->|"POST /collections/{collection}/search"| MGR["inference manager"]
     MGR --> IDX[("vault embeddings index")]
     IDX --> MGR
     MGR -->|"hits: path, name, summary, score"| SV --> M
     M --> RV["read_vault_doc"]
     RV --> GD["RetrievalClient.get_document"]
-    GD -->|"GET /collections/vault/docs/{id}"| MGR
+    GD -->|"GET /collections/{collection}/docs/{doc_id}"| MGR
     MGR -->|"full note body"| RV --> M
     M --> ANS["grounded answer citing the note"]
 ```
@@ -90,14 +100,26 @@ flowchart TD
     RP --> T["effective tier =<br/>max(risk_default floor,<br/>advertised wire tier,<br/>operator pin)"]
     T --> Q{"tier?"}
     Q -->|"low / medium"| EX["execute on worker"]
-    Q -->|"high / critical"| AP{"operator approval"}
-    AP -->|"approve"| EX
-    AP -->|"deny / timeout"| DN["blocked → error string to model"]
-    EX --> AUD[("JSONL audit log")]
+    Q -->|"high"| S{"already approved<br/>for this session?"}
+    Q -->|"critical"| AP
+    S -->|"yes"| EX
+    S -->|"no"| AP{"operator approval"}
+    AP -->|"y — approve once"| EX
+    AP -->|"a — approve for session<br/>(high only)"| EX
+    AP -->|"j — approve with justification<br/>(forced for critical)"| EX
+    AP -->|"n / timeout"| DN["blocked → error string to model"]
+    EX --> CAP["capture: always stored,<br/>stub returned if large"]
+    CAP --> AUD[("JSONL audit log")]
     DN --> AUD
-    AP -. "ToolApprovalRequest via ctx.emit" .-> OP["operator at CLI"]
-    OP -. "ToolApprovalResponse" .-> AP
+    AP -. "ToolApprovalRequestMessage via ctx.emit" .-> OP["operator at CLI"]
+    OP -. "ToolApprovalResponseMessage" .-> AP
 ```
+
+**`critical` never takes the session shortcut** — `risk_pool.py:414` reads
+`if effective != "critical" and self.is_session_approved(...)`, so a critical tool
+prompts every time and requires a typed justification. That branch was missing
+from an earlier version of this diagram, which showed `high` and `critical`
+behaving identically.
 
 ### Ecosystem
 
@@ -106,22 +128,35 @@ the inference server indexes it for RAG; PARE reads it and drives RE workers.
 
 ```mermaid
 flowchart TB
-    subgraph inf["inference server (192.168.1.14:11434)"]
+    subgraph inf["inference server (default http://192.168.1.14:11434)"]
         MGR["manager: /v1 + /collections"] --> LLM["gemma-4-26b"]
         MGR --> RAG[("vault RAG index")]
     end
+    AB["ArcticBase"] --> WB[("workbenches:<br/>reports + artifact descriptors")]
     subgraph palside["PAL host"]
         PAL["PAL agent"] --> VAULT[("vault (git repo)")]
     end
     subgraph pareside["PARE host"]
         PARE["PARE agent"] --> WK["MCP workers: static, frida, mitm"]
     end
+    subgraph bench["pare-bench — the Raspberry Pi at the workbench"]
+        KIOSK["kiosk browser + local status page"]
+    end
     VAULT -. indexed into .-> RAG
     PAL -->|"chat + RAG"| MGR
     PARE -->|"completions + search_vault"| MGR
+    PARE -->|"publishes reports<br/>+ descriptors"| AB
+    KIOSK -->|"reads, on the bench screen"| AB
     AC[["agent_core (shared library)"]] --- PAL
     AC --- PARE
 ```
+
+**These are roles, not machines.** On this deployment the inference server, the
+PARE daemon and ArcticBase are all the same host (`agenthost`); only the bench Pi
+is genuinely separate. The split is drawn because nothing in the design assumes
+they are co-located — the Pi reaches ArcticBase over the tailnet, which is why
+`PARE_ARCTICBASE_URL` is pinned to a tailnet address in the deployed unit rather
+than to loopback.
 
 ## Layout
 
