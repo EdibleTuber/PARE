@@ -27,10 +27,6 @@ diff "$(systemctl --user show -p FragmentPath --value pare-daemon)" \
 
 `pare-cli` is run interactively in a terminal, not as a service.
 
-> **`systemd/pare-daemon.service` at the repo root is a stale template** — it
-> still contains `/path/to/pare` placeholders and a different `After=`. It is not
-> what runs. Use `deploy/systemd/`.
-
 ## The bench Pi
 
 The status server and kiosk units, the drive, and the by-hand bring-up that
