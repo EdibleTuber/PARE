@@ -82,6 +82,14 @@ descriptor routing, argument injection and validation in
 `RiskAwareToolPool.call_tool`; the cross-package constant guard; release
 ordering; acceptance on the bench.
 
+**And PARE, which an earlier draft of this section excluded while the rest of the
+spec went on requiring it.** §6 has PARE supplying the slug through `ctx`; §7 has
+PARE bumping its pin; §8 puts the probe in PARE's `scripts/` with a
+`workers.yaml` entry and makes ArcticBase publication an acceptance criterion.
+Naming the two libraries and omitting the consumer was a scope statement three
+later sections contradict. PARE is in scope for: slug supply, descriptor
+publication, the probe, and the bench run.
+
 **Out:** `pare-hardware-mcp` itself — its tools, its Tigard bindings, its
 `workers.yaml` entry. Out: any change to ArcticBase, which is consumed and not
 modified. Out: making a self-reported digest authentic, which nothing in this
@@ -192,6 +200,34 @@ verbatim.** A refused descriptor is the most interesting row in an audit trail.
 The file stays on the bench: the daemon cannot delete it and must not imply that
 it did.
 
+**A9 — The capture holds the worker's text; the augmented object is what gets
+published.** An earlier draft said the eight-field object reached "the capture
+store and `publish_descriptor`". It cannot reach the capture store without
+rewriting the worker's result: the capture layer stores `stringify_result(result)`
+— the worker's own content text (`capture/layer.py:55`, into `CaptureRecord.body`
+at `:64`). So the capture row is verbatim (A8, and the forensic point of a
+capture is that it is what the worker said); the augmented object goes to the
+workbench, where `produced_by` and the reconciled host belong; and the
+reconciliation outcome goes in the audit row. Without this split the two custody
+fields this design adds would live only in memory and appear in no durable
+record, which is the one place custody matters.
+
+**A10 — Descriptor publication and the retrieval command are this spec's work,
+not assumed to exist.** `publish_descriptor` (`pare/arcticbase.py:209`) has zero
+production callers — its only caller is a live test. §8 makes publication an
+acceptance criterion, so something must call it, and this spec assigns it.
+
+The workbench object carries a **retrieval command**, per the parent's §11
+(*"v1 leaves transfer manual, with the workbench showing the command"*), which
+nothing in PARE builds today — `grep -rn "scp\|sftp\|rsync" pare/ scripts/`
+returns nothing. It is built from `spec.artifact_host` (A2), never from the
+worker's claim, and it **must not be a legacy `scp -O`**: under the legacy SCP
+protocol the remote shell re-parses the path, so quoting protects the operator's
+local shell only. `scp` in its default SFTP mode, `sftp`, or `rsync -s`. OpenSSH
+≥9.0 defaults to SFTP, so this is a rule about not overriding the default.
+A2 raises the stakes here rather than lowering them: the daemon now *authors*
+the host in that command.
+
 ## 4. The wire contract
 
 | Field | Reported by | Why |
@@ -211,9 +247,8 @@ half-wired dev build slips past. `media_type` in particular gets no default: a
 default hides a tool that never considered the question.
 
 The daemon adds `produced_by` after validation, yielding §5.1's eight-field
-object for `publish_descriptor` (`pare/arcticbase.py:209`). **What reaches the
-capture store is a separate question, which an earlier draft of this spec
-asserted without checking** — see §6.
+object for `publish_descriptor` (`pare/arcticbase.py:209`). What reaches the
+capture store is a different thing — see A9.
 
 `_REQUIRED` (`artifacts.py:39`) changes accordingly. Both this and A3 are
 breaking changes to the released `agent_core` 1.10.0, and both are **free right
@@ -404,19 +439,73 @@ artifact work interleaves at three points and the ordering is load-bearing.
    argument protecting an approval surface that never renders. This is the same
    reasoning that put `hardware`'s `risk_default` at `high` in `workers.yaml` —
    a floor, so the worst case is a prompt — applied to the property that actually
-   predicts a write rather than to the worker that happens to host it. Before `_await_operator`, because prompting an
+   predicts a write rather than to the worker that happens to host it.
+
+   All of these refuse **before `_await_operator`**, because prompting an
    operator to approve a dispatch that cannot succeed teaches them to approve
    without reading.
+
+   **The slug is validated here, before injection, not by the worker.** §5.4's
+   *"the daemon supplies a slug, never a path (D7): validated `re.fullmatch`"* has
+   an implementation waiting — `validate_slug` (`artifacts.py:205`), which like
+   `validate_descriptor` has no non-test consumer. This is its consumer. Relying
+   on the worker's `artifact_path` to reject a bad slug would check it *after* the
+   operator approved it, and the reserved argument is injected before the snapshot
+   at `:399`, so an unvalidated slug lands verbatim in the approval prompt
+   (`:466`) and the audit row (`:567`). `validate_descriptor` already reasons this
+   way about `path` (`artifacts.py:88-90`): *"an escape sequence rewrites what the
+   operator SEES while confirming the path."* A slug carrying `\x1b[2K` or a
+   newline does the same to the prompt and to any line-oriented reader of the
+   audit log.
+
+   **Every refusal here emits an audit row.** Each existing early return in
+   `call_tool`/`_await_operator` emits before returning — `risk_pool.py:454`,
+   `:472`, `:485`, `:510` — and a security refusal that leaves no trace is the one
+   event an audit log exists for. `Outcome` (`types.py:222-233`) has no member for
+   this; the plan picks one and states it rather than leaving the implementer to
+   invent it.
 3. **Inject the reserved arguments, then snapshot.** `snapshot` at `:399` is what
    reaches the approval prompt. Injecting first means the operator sees the slug
    and drive the call will actually use; injecting after would show the operator
    the model's values and send different ones — an approval surface displaying
    something other than what it approves.
+
+   **The reserved names are wire vocabulary and get the same treatment as every
+   other shared constant.** They are agreed between two independently installed
+   packages that never share a Python environment — precisely the condition §7
+   states a constant and a bidirectional guard for — so they are named constants
+   on both sides, guarded, not string literals in two files.
+
+   **The object dispatched at `:517` must be the object snapshotted at `:399`.**
+   Not a deepcopy-equal one. Stated as an invariant because the pre-existing
+   non-dict-`arguments` defect (§1) sits exactly here, and an injection written as
+   `arguments = dict(arguments or {})` would silently make a list-of-pairs succeed
+   and keep the divergence, where in-place mutation raises and fails loudly.
 4. **Gate and dispatch unchanged.**
-5. **After `:517`, validate.** `validate_descriptor(payload, spec=spec,
-   tool=tool)` now performs containment against `spec.artifact_root` and compares
-   the reported `drive_id` to `spec.artifact_drive_id`. The daemon then adds
-   `host` and `produced_by`.
+5. **Validate — and "after `:517`" is not precise enough.** It goes inside
+   `_execute_and_audit` after the dispatch and **before** the `_emit` at `:559`,
+   so the audit row can carry the refusal, and it must **not** run on the paths
+   that already returned `_ErrorResult` (`:542`, `:513`). Placed instead in
+   `call_tool` after `_execute_and_audit` returns, it would receive
+   `_ErrorResult` (`risk_pool.py:57-67`) — one text block that does not parse as
+   JSON — and every transport failure, reload race and genuine worker error from
+   an artifact tool would be re-reported as *"declared produces=artifact but
+   returned a non-JSON object"*, masking the real cause.
+
+   `validate_descriptor(payload, spec=spec, tool=tool)` performs containment and
+   compares the reported `drive_id` to `spec.artifact_drive_id`.
+
+   **Containment is against `{spec.artifact_root}/{slug}`, not against
+   `spec.artifact_root` alone.** An earlier draft said the root, which leaves the
+   injected slug binding nothing: the daemon injects `project_slug=alpha`, shows
+   it to the operator, records it — and then accepts a descriptor at
+   `/mnt/bench-store/beta/dump.bin`. That is §10's Risk 1 scenario exactly, and
+   containment against the root would not catch it.
+
+   **One ordering detail:** the reported `host` is checked for well-formedness
+   here, but `artifact_host` was already validated at step 2, before the gate — so
+   a malformed operator declaration refuses before a 70-second dump rather than
+   after it.
 
 **How the descriptor is extracted, and why strictly.** Nothing in any of the
 three repos uses `structuredContent` — `_stringify_result`
@@ -424,10 +513,31 @@ three repos uses `structuredContent` — `_stringify_result`
 blocks. So a `produces=artifact` result must be **exactly one text content block
 parsing as a JSON object**. Not "the first block that parses": that is a guess
 dressed as a rule, and it silently tolerates a tool that logs a line before its
-descriptor. Exactly-one is refusable and therefore checkable, and it becomes a
-conformance assertion beside `_assert_valid_produces_meta`
-(`conformance.py:63`), so a worker that gets it wrong fails at build time rather
-than mid-dump.
+descriptor. Exactly-one is refusable and therefore checkable.
+
+**Where that rule can be enforced is not where an earlier draft of this spec put
+it.** That draft said it "becomes a conformance assertion beside
+`_assert_valid_produces_meta` (`conformance.py:63`), so a worker that gets it
+wrong fails at build time". **The conformance suites never call a tool.**
+`assert_streamable_http_conformance` (`:190-203`) and `assert_stdio_conformance`
+(`:296-352`) both do `connect` → `initialize` → `list_tools` → `close`, and
+inspect `tool.name`, `tool.inputSchema` and `tool.meta`. There is no `tools/call`
+anywhere in the file — verified by grep, which returns nothing.
+
+An assertion about a *result* therefore requires invoking the tool, which for a
+real hardware worker means dumping a chip in CI. Two things follow, and the plan
+must treat them as work rather than as a line added beside `:63`:
+
+- **What conformance *can* assert today, it should**: that an artifact-declaring
+  tool's `inputSchema` declares the reserved argument names. That is a `_meta`/
+  schema property, available from `list_tools`, and it is the real mitigation for
+  §10's Risk 1 — an author who does not know the name is reserved fails the build.
+- **The result-shape rule needs an invocation harness** — a conformance mode that
+  calls the tool, which in turn needs artifact tools to support a declared
+  no-op/dry-run. That is a discrete piece of design, and until it exists the
+  result-shape rule is enforced at dispatch only, at runtime, which is the thing
+  the draft claimed to avoid. Say so rather than implying a build-time guarantee
+  that does not exist.
 
 **Timeouts, and the silent overwrite they cause.** An earlier draft of this spec
 did not contain the word "timeout". It needs to, because the bench's numbers make
@@ -590,8 +700,14 @@ owns it, and it needs a Tigard on the bench.
 ## 10. Risks
 
 - **The injection overwrites a model-supplied argument.** A tool author who does
-  not know `project_slug` is reserved writes a tool whose argument silently never
-  arrives. Mitigated by the conformance assertion in §6, not by documentation.
+  not know the name is reserved writes a tool whose argument silently never
+  arrives. An earlier draft said this was "mitigated by the conformance assertion
+  in §6, not by documentation" — and §6's only proposed assertion was about the
+  *result* shape, which is a different thing and, as §6 now records, cannot live
+  in the conformance suites at all. The real mitigation is the **input-schema**
+  assertion §6 specifies: an artifact-declaring tool must declare the reserved
+  names in its `inputSchema`, which `list_tools` already exposes and conformance
+  can therefore check at build time.
 - **`open_artifact` is Linux-only and the classifier enforces nothing** (A7). The
   runtime refusal is the control, and it is only a control once a test has
   watched it refuse.
