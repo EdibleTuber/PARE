@@ -20,13 +20,22 @@ security-invariant half the same review weight as a new package's scaffolding.
 Verified on 2026-09-12 by reading the files, not by recalling the previous
 session:
 
-- `validate_descriptor` (`agent_core/workers/artifacts.py:46`), `artifact_path`
-  (`pare_worker_kit/artifacts.py:67`), `PRODUCES_META_KEY` and `artifact_root`
-  have **no non-test consumers** in either repo. A grep for `produces` across
-  `agent_core/` and `PARE/pare/` finds conformance, docstrings and prose.
-- Nothing reads `WorkerSpec.artifact_root` (`types.py:112`) or
-  `artifact_drive_id` (`types.py:135`) at dispatch. Both docstrings say so in
-  situ.
+- **The two things this spec changes breakingly have no non-test consumers:**
+  `validate_descriptor` (`agent_core/workers/artifacts.py:46`) and its
+  `_REQUIRED` tuple (`:39`). Every call site of `validate_descriptor` in all
+  three repos is in `agent_core/tests/workers/test_artifacts.py`. Same for
+  `artifact_path` (`pare_worker_kit/artifacts.py:67`).
+
+  An earlier draft of this section said that of `PRODUCES_META_KEY` and
+  `artifact_root` too, and **that was false in both cases** — stated from a grep
+  scoped too narrowly to find its own counter-examples. `PRODUCES_META_KEY` is
+  consumed in production at `risk_pool.py:365`; `artifact_root` is read by
+  PARE's `/health` at `pare/commands/health.py:145`. Neither changes shape here,
+  so the "free breaking change" argument survives — but it rests on the two names
+  above, not on a blanket claim.
+- Nothing reads `WorkerSpec.artifact_root` or `artifact_drive_id` **at
+  dispatch** (`types.py:112`, `:135`; both docstrings say so in situ).
+  `/health` reads the root outside the dispatch path.
 - `RiskAwareToolPool.call_tool` (`risk_pool.py:397`) — the single dispatch
   chokepoint — does not mention artifacts at all.
 
@@ -43,6 +52,28 @@ Two things the previous session's follow-up list records as outstanding are
 
 `WorkerSpec` already carries `model_config = ConfigDict(extra="forbid")`
 (`types.py:64`), so §5.4's fail-closed requirement is met.
+
+**Three pre-existing defects the review of this spec surfaced. None is caused by
+this design and none is fixed by it; they are recorded so they are not
+rediscovered, and so nobody mistakes them for regressions introduced here.**
+
+1. **`conformance.py:55` still has `meta = getattr(tool, "meta", None) or {}`.**
+   Its sibling `_assert_valid_produces_meta` (`:79`) does the strict `isinstance`
+   check instead, so the two validators disagree about a non-dict `_meta`. Traced
+   rather than assumed: with `meta=[]` the risk-tier version still *fails*, just
+   with a message blaming the tier rather than the malformed container. A
+   diagnosis defect, not a bypass — milder than the `risk_pool` instance it was
+   modelled on, which is already fixed.
+2. **`risk_pool.py:399` snapshots `{}` for a non-dict `arguments`** while `:517`
+   dispatches the original object. The operator's approval prompt and the audit
+   row would show no arguments for a call that carries a payload. Reachable: tool
+   arguments come from `json.loads` of model-emitted text with no runtime type
+   check.
+3. **`validate_descriptor`'s leading-dash check covers only the last path
+   component** (`artifacts.py:174-179`). Inert for a single-file `scp`, live
+   under `scp -r`, where an intermediate component named `-oProxyCommand=...`
+   becomes a local directory whose name the next `tar`/`rm` glob hands over as an
+   option.
 
 ## 2. Scope
 
@@ -201,7 +232,7 @@ authoritative and gets transcribed faithfully. Specify signatures, invariants an
 what the tests discriminate; let the implementer write the code against the
 actual codebase.
 
-**Signature.** `open_artifact(root, slug, name, *, expect_drive_id,
+**Signature.** `open_artifact(root, slug, name, *, media_type, expect_drive_id,
 expected_size)` in `pare_worker_kit.artifacts`, a context manager yielding a
 writer. The writer exposes `write(b)`, hashing inline — §5.5's "nearly free",
 since the producing tool already has every byte in hand — and, after a clean
@@ -216,6 +247,17 @@ block **cleanly** reaches the rename and publishes a correct size and a correct
 hash of the truncated bytes — which is the ordinary hardware failure, not an
 exotic one. So step 7 additionally refuses a clean exit when
 `bytes_written != expected_size`.
+
+**Where these two arguments come from, since A4 does not inject them.** A4's
+reserved arguments carry the *slug* and the *expected drive id* — values the
+worker must not take from its own configuration. `media_type` and
+`expected_size` are different: they are facts about the artifact the calling
+tool is producing, so the tool supplies both. Neither may be `None`: a tool that
+cannot state its media type has not decided what it is writing, and a tool that
+cannot state its size in advance cannot have the short-read check. Where a size
+genuinely is not knowable ahead of time — compressed output, a stream of unknown
+length — that is a different tool contract and this spec does not cover it;
+saying so is better than admitting a `None` that silently disables the check.
 
 This does not make a hostile producer honest — §9 still holds, and nothing here
 changes it. It closes the *buggy* half, which §9's disclaimer was being read as a
@@ -332,11 +374,24 @@ can act on.
 `risk_pool.py:399`, resolves the tier, gates, and dispatches at `:517`. The
 artifact work interleaves at three points and the ordering is load-bearing.
 
-1. **Resolve `produces` first**, from a `_tool_produces` cache with the ratchet
-   `_tier_highwater` gets (`risk_pool.py:121`) and that `_bump()` deliberately
-   never clears (`:224`). §5.3 requires this: without it, a reload is a channel
-   for turning descriptor validation *off*, exactly as it would otherwise be a
-   tier-downgrade channel.
+1. **Resolve `produces` first — by calling the accessor that already exists.**
+   An earlier draft of this spec instructed the implementer to build "a
+   `_tool_produces` cache with the ratchet `_tier_highwater` gets". **That work
+   is already done**, and building it again would create a second cache that
+   `list_tools` never feeds, i.e. one that is not ratcheted at all.
+   `_produces_highwater` is declared at `risk_pool.py:132` — with the comment
+   *"a reload must not become a channel for turning descriptor validation
+   off"*, the exact property §5.3 asks for — populated from wire meta at
+   `:365-368`, and exposed as `produces(worker, tool)` at `:206-214`, defaulting
+   to `PRODUCES_RESULT`. It has **zero callers**: built, populated, never
+   consulted. `call_tool` calls `self.produces(worker, tool)`.
+
+   One limit worth one sentence, since §5.3's argument is about reloads: the
+   ratchet is in-memory, so it survives a `/worker reload` and **not** a daemon
+   restart. That is the same property `_tier_highwater` and `_floor_highwater`
+   already have, so it is a pre-existing characteristic rather than something
+   this wiring introduces — but the reload hole is what it closes, not the
+   restart one.
 2. **If `artifact`, validate the spec and refuse before the gate.** No
    `artifact_root` → refused (§5.4, fail closed). No `artifact_drive_id` → refused
    (A5). No `artifact_host` → refused (A2). No slug → refused.
@@ -422,23 +477,55 @@ guarded for, and it gets the same treatment: a named constant on both sides and 
 bidirectional guard joining `test_risk_agreement.py:24` and its agent_core
 counterpart.
 
-Without it the failure is the quiet one: the kit produces five fields, agent_core
-requires six, and every dump is refused with a message about a missing field
-rather than about the mismatch that caused it.
+Without it the failure is the quiet one: the two sides disagree by one field, and
+every dump is refused with a message about *that field being missing* rather than
+about the drift that caused it. Stated as a disagreement rather than as "five
+versus six" on purpose — the field count changed once already while this spec was
+being reviewed, and a literal here would have rotted inside a day.
 
-**Order, and why nothing is red in between.** The kit's change is additive; no
-existing behaviour is touched. agent_core's is breaking, but only for its own
-tests (§1).
+**Order. An earlier draft of this spec got this wrong, and the CI step it cited
+as verified is the thing that refutes it.** That draft had the kit merge first
+and said its guard would *skip* agent_core's not-yet-present constant — "honest
+and visible". Two facts kill it:
 
-1. **kit PR merges to main.** Its guard *skips* agent_core's new constant, which
-   is absent from agent_core main — honest and visible, which is the distinction
-   the follow-up list draws between a skip and a pass-against-stale.
-2. **agent_core PR merges.** Both CI jobs install the sibling from `git+…` at
-   **main**, not at a tag, so the guard sees the kit's constant as soon as step 1
-   lands. No tag is needed for CI to go green.
-3. **Tag `pare-worker-kit v0.2.0` and `agent_core v1.11.0`.** Tags exist for
-   consumer pins, not for CI.
-4. **PARE bumps its pin** from `agent_core@v1.10.0`.
+- **A skip is a hard failure here, by design.**
+  `pare-worker-kit/.github/workflows/test.yml:53-71` runs the guards and then
+  `sys.exit`s if `skipped` is non-zero: *"A skipped cross-package guard proves
+  nothing."* §1 cites this step approvingly and the draft then designed an
+  ordering that trips it.
+- **It would not even skip.** `pytest.importorskip` skips on
+  `ModuleNotFoundError`. `agent_core.workers.artifacts` exists on main; a missing
+  *attribute* raises `AttributeError`, which is a failure, not a skip. Every
+  existing guard in both repos accesses attributes directly, with no `hasattr`
+  fallback — so a guard written like its neighbours fails, and one written
+  defensively skips, which the CI step then fails anyway.
+
+The mirrored order is red for the same reason, so no ordering of the two PRs as
+drafted works. **The constants must land as pure declarations before the guard
+that compares them exists:**
+
+1. **Declaration PRs, either order, in both repos.** Each adds the descriptor
+   field-set constant and nothing that reads the sibling's. No cross-package
+   guard is added or changed, so the existing guards keep passing against the
+   existing constants.
+2. **Guard PR, in either repo, after both of step 1 are on main.** Now the
+   attribute exists on both sides, the guard compares two real values, and it
+   neither skips nor raises.
+3. **The behavioural PRs** — `open_artifact` in the kit, `_REQUIRED` plus
+   `validate_descriptor`'s signature in agent_core, dispatch wiring.
+4. **Tag `pare-worker-kit v0.2.0` and `agent_core v1.11.0`.** Tags exist for
+   consumer pins, not for CI — CI installs siblings from `main`.
+5. **PARE bumps its pin** from `agent_core@v1.10.0`.
+
+The three worker repos are insulated from steps 1-3: all three pin the kit at the
+**tag** `v0.1.2` and none installs `agent_core` at all, so nothing in their CI
+moves until step 4.
+
+**Two version literals, not one.** `pare-worker-kit` states its version in
+`pyproject.toml` *and* at `src/pare_worker_kit/__init__.py:18`, and `stamp_version`
+feeds the latter into `serverInfo` — which the networked-workers spec made the
+worker-swap detection signal. Step 4 bumps both, or the wire starts lying about
+which build is running.
 
 **Before either tag, the consuming suites run.** A contract widening can pass
 every one of a library's own tests and still break a consumer's test doubles.
