@@ -27,12 +27,23 @@ is an empty directory; this is the spec §15 says it gets.
 
 **Phase 1 — the console.** UART only. No artifacts, no flash, no JTAG.
 
-**This phase depends on none of the artifact wiring.** A console returns *results*,
-not artifacts, so it touches neither `open_artifact`, the descriptor contract, nor
-the dispatch changes. It can ship while that work is still in flight. An earlier
-reading of §15 assumed the flash dump would come first and therefore that the
-hardware worker was blocked; choosing the console first removes the dependency
-entirely.
+**This phase depends on none of the artifact *contract*** — verified, not
+assumed: `WorkerSpec.artifact_root` defaults to `None` and its only validator is
+skipped for `None` (`types.py:148-152`); `validate_transport_fields` requires only
+`endpoint` for `streamable_http`; `call_tool` never mentions artifacts; and
+`_assert_valid_produces_meta` treats absent as valid. A console returns *results*,
+so `produces: result` is declarable against the kit as it ships today.
+
+**But "it can ship while that work is in flight" is true of the contract and
+optimistic about the merge.** The couplings phase 1 does have are to **PARE**, and
+several land in the same files the artifact-wiring spec edits: `workers.yaml`, the
+`_CONTRACT_MODULES` map and PARE's CI install step (§7.3), `POLL_TOOLS` (§7a),
+`bench_deploy.sh`'s `FILES` array and `bench/systemd/` (§6). Expect conflicts
+there, not blocking dependencies.
+
+An earlier reading of §15 assumed the flash dump would come first and therefore
+that this worker was blocked. Choosing the console first removes the *contract*
+dependency; it does not make the two work streams disjoint.
 
 **Phase 2 — target power.** The relay lands 2026-09-13. §7.
 
@@ -706,6 +717,15 @@ cursor advanced by the number of bytes read, not that it equals 4096.
   around guesses would be worse.
 
 ## 12. Provenance
+
+**Revision note.** v1 was reviewed on 2026-09-12 by four independent reviewers
+reading the source rather than the spec. About thirty findings survived
+verification and landed in four commits, grouped by kind rather than by count. The
+reversals are narrated in place — §4's tool naming, §7's pins and floor, B1's
+config location, B3's "no long calls", §6's deployment claims — because the
+reasoning that produced the wrong version is the useful part. Two of those
+reversals (the pins, the floor) restore decisions that earlier designs had made
+deliberately and this spec had overturned without citing them.
 
 Every fact in §1 was read from `pare-bench` over SSH on 2026-09-12, not recalled.
 Line references to `agent_core`, `pare-worker-kit` and PARE were read from the
