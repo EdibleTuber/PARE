@@ -73,36 +73,42 @@ Handoff to the workbench is a **button, not a timer**. It used to redirect after
 and the only one that still works when ArcticBase is down — was visible for two
 and a half seconds at a time, with no way back under `--kiosk`.
 
-### A physical button on GPIO
+### A physical button — use J2, not GPIO
 
 Worth having, because it works when the screen is frozen, Chromium has died, the
 network is down, or the Pi is already off — none of which a web page can do.
 
-Add to `/boot/firmware/config.txt`:
+**On a Pi 5 the right connection is the J2 breakout**, a two-pad footprint
+between the RTC battery connector and the board edge. Raspberry Pi's own
+documentation: *"This breakout allows you to add your own power button to
+Raspberry Pi 5 by adding a Normally Open (NO) momentary switch bridging the two
+pads"*, performing *"the same actions as the onboard power button"*.
 
-```
-dtoverlay=gpio-shutdown
-```
+Solder a 2-pin header (or wires) to J2 and run a normally-open momentary switch
+out through the enclosure. That is electrically the onboard button, so:
 
-The overlay ships with the kernel — on this Ubuntu image it lives at
-`/boot/firmware/current/overlays/gpio-shutdown.dtbo`, not the
-`/boot/firmware/overlays/` path most Pi documentation names. Default pin is
-GPIO3, so wire a momentary button between **header pin 5 (GPIO3) and pin 6
-(GND)** — they are adjacent, so a 2-pin header works.
+- no `config.txt` change, no device-tree overlay, no kernel involvement;
+- no conflict with the Pi's own I2C pins;
+- it works in **both** directions — clean shutdown while running, power-on from
+  off — because the circuit is live in standby (the pads sit at ~3.3 V while the
+  board is powered but off, pulled up through the PMIC).
 
-**Two things to check before committing to the wiring:**
+That last property is the one that matters here: the touchscreen control above
+can halt the bench but cannot start it, so without a physical button a clean
+shutdown leaves you power-cycling at the USB-C end.
 
-- **Does it wake the Pi, not just halt it?** On Pi 4 and earlier, pulling GPIO3
-  low wakes the board from halt, which is the reason that pin is the default.
-  **I have not verified this on a Pi 5**, whose power path goes through a PMIC.
-  Test it: halt the Pi, press the button, see whether it comes back. If it does
-  not, a clean shutdown still leaves you power-cycling at the USB-C end, and the
-  only fix is a switch upstream.
-- **GPIO2/3 are the Pi's own I2C pins** and `dtparam=i2c_arm=on` is set. Nothing
-  appears to use them — the touchscreen reports as `10-0038`, i.e. bus 10, and
-  the Tigard does I2C over USB — but confirm before wiring. Any other pin works
-  via `dtoverlay=gpio-shutdown,gpio_pin=N`, at the cost of the wake behaviour,
-  which only GPIO3 has.
+**Do not reach for `dtoverlay=gpio-shutdown` on a Pi 5.** It is the standard
+answer for Pi 4 and earlier, where firmware wakes the board when GPIO3 is pulled
+low. On Pi 5 the power path goes through the PMIC rather than the SoC, and
+Raspberry Pi's power-button documentation does not mention GPIO3 or the overlay
+at all. It may still *halt* the board, but wake-from-halt should not be assumed —
+and halt-without-wake is the failure mode that leaves the bench unreachable.
+
+(The overlay does ship with this image, at
+`/boot/firmware/current/overlays/gpio-shutdown.dtbo` — note that path, not the
+`/boot/firmware/overlays/` most Pi documentation names. If you ever use it on
+another board, GPIO2/3 are the Pi's own I2C pins and `dtparam=i2c_arm=on` is set
+here; the touchscreen is on bus 10, so bus 1 looks free, but check first.)
 
 ## ArcticBase
 
