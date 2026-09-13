@@ -193,7 +193,7 @@ matches something.
 | `bench_status` | `hardware_bench_status` | low | artifact root present/writable, drive id, device presence — see below |
 | `console_detect_baud` | `hardware_console_detect_baud` | low | ranked `(rate, printable_ratio, framing_errors, sample)` |
 | `console_open` | `hardware_console_open` | medium | session id, resolved device, baud, DTR/RTS state set |
-| `console_read` | `hardware_console_read` | low | `(bytes, next_cursor, dropped)` |
+| `console_read` | `hardware_console_read` | low | `(bytes, next_cursor, dropped, remaining)` — takes `(cursor, limit)`; see §7a |
 | `console_send` | `hardware_console_send` | high | bytes accepted; **pinned** in `workers.yaml` |
 | `console_status` | `hardware_console_status` | low | open?, holder, buffer head, cursor lag, session age |
 | `console_close` | `hardware_console_close` | low | releases the port |
@@ -443,6 +443,63 @@ implies:
 PARE before that repo exists, the "enforced invariant" is silently absent — the
 precise failure §7 exists to fix. The pin edits and the CI install land together
 or not at all.
+
+## 7a. Obligations inherited from the parent designs
+
+These are not new requirements. Each was placed on *this* worker by a design this
+spec depends on, and an earlier draft omitted every one of them.
+
+**Worker-side request logging — the networked-workers design calls it Required.**
+Over stdio, PARE's audit log is a total record of what the worker did, because the
+daemon is the only thing that can reach it. Over HTTP it is not: anything on the
+tailnet can call the worker directly and PARE never sees it. That design's §6 puts
+the remedy in `run_worker` — peer, tool, timestamp, argument hash — and **it is not
+implemented**: there is no logging of any kind in `pare-worker-kit/src`. This is
+the worker where *"after a bricked target, the operator cannot establish whether
+PARE did it"* stops being rhetorical, so phase 1 either implements it in the kit
+or states plainly that the audit trail is incomplete. It does not get to omit it.
+
+**A payload bound on `console_read`, with an existing precedent to copy.** §5
+requires the ring buffer to hold a full boot log, and §4's `console_read` takes
+only a cursor — so one call returns the entire boot log in a single
+`CallToolResult`, into model context and the capture store. `frida_read_hook_events`
+already solved this shape: `since_seq` plus a limit, and a count of what remains
+buffered (`pare-frida-mcp/contract.py:150-153`). `console_read` takes the same
+form: `(cursor, limit)` returning `(bytes, next_cursor, dropped, remaining)`.
+`remaining` is what lets the model decide whether to keep draining without
+guessing.
+
+**`console_send` is undispatchable without an operator attached.** `_await_operator`
+fails closed when no send channel is resolvable (`risk_pool.py:452-458`), and the
+parent's **D8** puts the approval surface at `pare-cli` running **at the bench**.
+So §10's Level 3 "from a PARE conversation" is not precise enough: the conversation
+must be one with a live CLI the operator is sitting in front of, at the bench, or
+every `high` tool blocks. Any unattended use of phase 1 is limited to the
+low-tier read path — and at floor `high` (§7.1) even that prompts, so **phase 1 is
+an attended-only worker by construction**. Better to say that than to discover it.
+
+**`RequiresMountsFor` must not be used on the worker unit.** The parent's §8.4 is
+explicit, and it matters now rather than later because phase 1 writes the unit
+phase 3 inherits: a mount dependency turns an absent artifact drive into a unit
+that never starts, instead of a worker that starts and reports the drive missing.
+
+**`serverInfo` is the only provenance a networked worker has, and it needs naming
+care.** `stamp_version` (`pare-worker-kit/src/pare_worker_kit/serve.py`) resolves
+the version from installed package metadata **keyed by the FastMCP instance's
+name**, so the server must be named after its distribution and installed with
+metadata or the version silently resolves to nothing. Note the limit honestly:
+`client_pool` records `serverInfo` per connection and **never compares it to an
+expected value**, so a redeploy at an unchanged version is invisible and a swapped
+worker is not detectable from the daemon side today. That is the gap §7.1's floor
+exists to bound.
+
+**`console_read` will trip PARE's spin guard, and that is a PARE change this phase
+owns.** `POLL_TOOLS` (`pare/handback.py:19`) is a hardcoded frozenset of exactly
+two frida tools, and `RepeatGuard` hard-blocks after three identical (call,
+result) pairs. Waiting for a board to boot — the primary phase-1 workflow, and the
+remedy B9 names for a quiet line — issues identical `console_read(cursor=N)` calls
+returning identical empty results, and gets blocked. `hardware_console_read` joins
+`POLL_TOOLS`. One line, and without it the worker's main loop does not work.
 
 ## 8. Phase 2 — target power
 
