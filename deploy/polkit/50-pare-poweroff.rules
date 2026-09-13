@@ -1,0 +1,37 @@
+// Let the bench status page halt this Pi without a password prompt.
+//
+// WHY THIS EXISTS. The Pi 5's onboard power button is covered by the bench
+// enclosure, the GPIO header is not reachable through it either, and
+// `pare-bench-status.service` runs as User=pare with no TTY -- so there is no
+// interactive agent to answer a polkit prompt. Without this rule the shutdown
+// control on the status page fails with an authorization error that the
+// operator, standing at a touchscreen with no keyboard, cannot clear.
+//
+// WHY BOTH ACTION IDS. logind picks `power-off-multiple-sessions` instead of
+// `power-off` when another login session exists. The kiosk unit runs with
+// PAMName=login precisely so it gets a real logind session (it needs the seat
+// for DRM and input), so on this machine the multiple-sessions variant is the
+// one that usually fires. Granting only the first produces a control that
+// works on a bare boot and fails once the screen is up -- the worse of the two
+// failure modes, because it looks like it works.
+//
+// WHAT THIS DOES NOT GRANT. Only power-off. Not reboot, not suspend, not
+// hibernate, and nothing for any other user. Scope it back if the status page
+// ever stops being the only caller.
+//
+// THE REACHABILITY ARGUMENT THIS RESTS ON. The status server binds
+// 127.0.0.1:8080 (bench/systemd/pare-bench-status.service), so the endpoint is
+// reachable only from this Pi, and it refuses cross-origin POSTs
+// (_origin_is_same_site in bench/status_server.py). If either of those ever
+// changes, this rule becomes remote unauthenticated power-off -- re-read both
+// before widening the bind or relaxing the origin check.
+polkit.addRule(function(action, subject) {
+    if (subject.user !== "pare") {
+        return undefined;
+    }
+    if (action.id === "org.freedesktop.login1.power-off" ||
+        action.id === "org.freedesktop.login1.power-off-multiple-sessions") {
+        return polkit.Result.YES;
+    }
+    return undefined;
+});

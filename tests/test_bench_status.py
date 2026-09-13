@@ -378,3 +378,90 @@ def test_an_unreachable_host_is_not_mistaken_for_an_absent_workbench():
     def fetch(url, timeout=None):
         raise OSError("connection refused")
     assert probe_workbench_exists(fetch, base_url=SERVER, slug="p") is None
+
+
+# --- the shutdown control ---------------------------------------------------
+#
+# The Pi 5's onboard button is inside the bench enclosure and the GPIO header is
+# not reachable through it either, so this endpoint is the only software route
+# to a clean halt. Its whole safety story is two properties -- a loopback bind
+# and a cross-origin refusal -- so both are tested here rather than asserted in
+# a comment.
+
+def _handler_with(poweroff):
+    """A handler instance whose HTTP plumbing is stubbed out.
+
+    BaseHTTPRequestHandler does its work in __init__, so it cannot be built
+    without a socket. Constructing via __new__ and driving do_POST directly
+    tests the decision logic -- origin check, command invocation, error
+    surfacing -- which is the part that can be wrong.
+    """
+    from bench.status_server import make_handler
+
+    cls = make_handler(server_base=SERVER, expected_slug=None, poweroff=poweroff)
+    h = cls.__new__(cls)
+    h.path = "/power/off"
+    h.sent = []
+    h.headers = {}
+    h._send = lambda body, ctype: h.sent.append((200, body.decode()))
+    h._fail = lambda code, msg: h.sent.append((code, msg))
+    h.send_error = lambda code, *a: h.sent.append((code, "send_error"))
+    return h
+
+
+def test_a_same_origin_post_powers_off():
+    calls = []
+    h = _handler_with(lambda: calls.append("poweroff"))
+    h.headers = {"Origin": "http://127.0.0.1:8080"}
+    h.do_POST()
+    assert calls == ["poweroff"]
+    assert h.sent[0][0] == 200
+
+
+def test_a_post_with_no_origin_header_is_accepted():
+    # A same-origin fetch may omit Origin, and curl-from-the-Pi is the operator,
+    # who can run `systemctl poweroff` directly anyway.
+    calls = []
+    h = _handler_with(lambda: calls.append("poweroff"))
+    h.do_POST()
+    assert calls == ["poweroff"]
+
+
+def test_a_cross_origin_post_is_refused_and_does_not_power_off():
+    # The realistic attacker is a workbench object rendered in the kiosk's
+    # iframe, which is a different origin. This is the check that stops it.
+    calls = []
+    h = _handler_with(lambda: calls.append("poweroff"))
+    h.headers = {"Origin": "http://100.82.222.92:2929"}
+    h.do_POST()
+    assert calls == [], "cross-origin POST must not reach poweroff"
+    code, msg = h.sent[0]
+    assert code == 403
+    assert "100.82.222.92" in msg, "the refused origin must be named, to diagnose it"
+
+
+def test_a_failing_poweroff_surfaces_its_stderr_rather_than_a_bare_500():
+    def boom():
+        raise RuntimeError("Interactive authentication required")
+    h = _handler_with(boom)
+    h.do_POST()
+    code, msg = h.sent[0]
+    assert code == 500
+    assert "Interactive authentication required" in msg
+
+
+def test_only_the_power_path_accepts_a_post():
+    h = _handler_with(lambda: None)
+    h.path = "/status.json"
+    h.do_POST()
+    assert h.sent[0][0] == 404
+
+
+def test_the_page_offers_handoff_as_a_button_and_never_redirects_itself():
+    # Regression: the page used to `location.href = handoff_url` on a 2.5s
+    # timer, which left the only screen carrying the shutdown control visible
+    # for two and a half seconds at a time, with no way back under --kiosk.
+    from bench.status_server import _PAGE
+
+    assert "setTimeout(() => location.href" not in _PAGE
+    assert "OPEN WORKBENCH" in _PAGE

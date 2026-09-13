@@ -423,11 +423,23 @@ _PAGE = """<!doctype html>
  #banner.bad{background:#311;color:#f99}
  #warn{padding:.75rem 1.5rem;background:#332600;color:#fd6;font-size:1.05rem}
  a{color:#8cf}
+ #actions{display:flex;gap:1rem;padding:1rem 1.5rem;border-top:2px solid #333}
+ button{font:inherit;font-size:1.25rem;padding:.9rem 1.4rem;border:2px solid #555;
+        border-radius:.4rem;background:#222;color:#eee;min-height:3.2rem;
+        min-width:11rem;touch-action:manipulation}
+ button:disabled{opacity:.35}
+ #wb{border-color:#8cf;color:#8cf}
+ #pwr{margin-left:auto;border-color:#a44;color:#f99}
+ #pwr.armed{background:#511;color:#fee;border-color:#f66}
 </style>
 <header><h1>PARE BENCH</h1><span id="tick">—</span></header>
 <div id="banner">probing…</div>
 <div id="warn" hidden></div>
 <ul id="probes"></ul>
+<div id="actions">
+  <button id="wb" hidden>OPEN WORKBENCH</button>
+  <button id="pwr">SHUT DOWN</button>
+</div>
 <script>
 let sincePoll = null, base = null;
 function paintTick(){
@@ -444,13 +456,22 @@ async function poll(){
     const banner = document.getElementById('banner');
     if (s.ok) {
       banner.className = 'ok';
-      // Say WHY there is no redirect. Otherwise the screen reads ALL GREEN and
-      // then does nothing, and the operator stands there waiting for a handoff
-      // that is never coming.
+      // Say WHY there is no handoff offered. Otherwise the screen reads ALL
+      // GREEN and then does nothing, and the operator stands there waiting for
+      // a handoff that is never coming.
       banner.textContent = 'ALL GREEN' + (s.handoff_url
-        ? ' — opening workbench…'
+        ? ''
         : (s.handoff_blocked ? ' — ' + s.handoff_blocked : ''));
-      if (s.handoff_url) setTimeout(() => location.href = s.handoff_url, 2500);
+      // HANDOFF IS MANUAL, deliberately. It used to redirect after 2.5s, which
+      // meant this page -- the only screen carrying the shutdown control, and
+      // the only one that works when ArcticBase is down -- was visible for two
+      // and a half seconds at a time. Chromium runs --kiosk under cage: one
+      // client, no window manager, no URL bar, so once the redirect fired
+      // there was no way back without a keyboard. A button costs one tap and
+      // makes Back (Alt+Left) mean "stay here" instead of bouncing forward.
+      const wb = document.getElementById('wb');
+      wb.hidden = !s.handoff_url;
+      wb.onclick = () => { location.href = s.handoff_url; };
     } else {
       banner.className = 'bad';
       banner.textContent = 'FIRST FAILURE: ' + (s.first_failure || 'unknown').toUpperCase();
@@ -472,6 +493,36 @@ async function poll(){
     base = null;
   }
 }
+// SHUTDOWN: arm, then confirm. A bench touchscreen gets brushed by a sleeve,
+// an elbow, a cable being dressed -- a single tap that halts the machine would
+// be wrong roughly as often as it was right. The armed state reverts on its own
+// so a stray tap leaves nothing latched.
+const pwr = document.getElementById('pwr');
+let armTimer = null;
+function disarm(){
+  clearTimeout(armTimer); armTimer = null;
+  pwr.classList.remove('armed'); pwr.textContent = 'SHUT DOWN';
+}
+pwr.onclick = async () => {
+  if (!pwr.classList.contains('armed')) {
+    pwr.classList.add('armed'); pwr.textContent = 'TAP AGAIN TO CONFIRM';
+    armTimer = setTimeout(disarm, 5000);
+    return;
+  }
+  disarm();
+  pwr.disabled = true; pwr.textContent = 'SHUTTING DOWN…';
+  try {
+    const r = await fetch('/power/off', {method:'POST'});
+    if (!r.ok) throw new Error(await r.text());
+  } catch (e) {
+    // Say what went wrong. A dead button on a machine you cannot otherwise
+    // reach is worse than no button, because you stop looking for the cause.
+    pwr.disabled = false; pwr.textContent = 'SHUTDOWN FAILED';
+    document.getElementById('banner').className = 'bad';
+    document.getElementById('banner').textContent = 'SHUTDOWN REFUSED: ' + e.message;
+  }
+};
+
 setInterval(paintTick, 1000);
 setInterval(poll, 10000);
 poll(); paintTick();
@@ -479,8 +530,42 @@ poll(); paintTick();
 """
 
 
-def make_handler(*, server_base: str, expected_slug: str | None):
+POWEROFF_CMD = ("systemctl", "poweroff")
+"""Routed through logind rather than calling /sbin/poweroff directly, so the
+authorization decision is polkit's and is declared in a rule file the operator
+can read -- see deploy/polkit/50-pare-poweroff.rules. Running as `pare`
+(User=pare in the unit) this returns immediately and systemd does the work."""
+
+ALLOWED_ORIGIN = "http://127.0.0.1:8080"
+
+
+def _origin_is_same_site(origin: str | None) -> bool:
+    """Reject a cross-origin POST, which is the whole CSRF defence here.
+
+    The bind is loopback (main() defaults --bind 127.0.0.1), so only something
+    ON this Pi can reach the endpoint at all. That is not sufficient by itself:
+    the thing on this Pi is a Chromium kiosk pointed at ArcticBase, which
+    renders model-authored objects in an iframe with no `sandbox` attribute,
+    from a same-origin URL. The artifacts design leans entirely on markdown
+    being rendered with `html: False` to keep script out of that frame. If that
+    ever regresses -- an upgrade, a plugin that emits raw HTML -- a workbench
+    object could POST to this endpoint and halt the bench mid-dump.
+
+    A browser attaches `Origin` to any cross-origin POST, and the workbench is
+    a different origin (a tailnet host on :2929), so requiring our own origin
+    blocks it. A missing Origin is accepted because a same-origin `fetch` from
+    this page may omit it, and because curl-from-the-Pi is the operator, who
+    can run `systemctl poweroff` anyway.
+    """
+    return origin is None or origin == ALLOWED_ORIGIN
+
+
+def make_handler(*, server_base: str, expected_slug: str | None,
+                 poweroff=None):
     from http.server import BaseHTTPRequestHandler
+
+    run_poweroff = poweroff or (lambda: subprocess.run(
+        POWEROFF_CMD, check=True, capture_output=True, text=True, timeout=10))
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -504,6 +589,33 @@ def make_handler(*, server_base: str, expected_slug: str | None):
                 self._send(_PAGE.encode(), "text/html; charset=utf-8")
             else:
                 self.send_error(404)
+
+        def do_POST(self) -> None:           # noqa: N802  (stdlib naming)
+            if self.path != "/power/off":
+                self.send_error(404)
+                return
+            if not _origin_is_same_site(self.headers.get("Origin")):
+                # 403 with the offending origin named: if this ever fires it is
+                # either a real cross-origin attempt or a misconfiguration, and
+                # both need the value to diagnose.
+                self._fail(403, f"cross-origin POST refused from "
+                                f"{self.headers.get('Origin')!r}")
+                return
+            try:
+                run_poweroff()
+            except Exception as exc:          # noqa: BLE001 - surface anything
+                detail = getattr(exc, "stderr", "") or str(exc)
+                self._fail(500, f"poweroff failed: {detail.strip()[:300]}")
+                return
+            self._send(b"shutting down\n", "text/plain; charset=utf-8")
+
+        def _fail(self, code: int, message: str) -> None:
+            body = message.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def log_message(self, fmt, *args):  # keep the journal readable
             pass
