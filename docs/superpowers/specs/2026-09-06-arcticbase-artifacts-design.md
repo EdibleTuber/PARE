@@ -243,6 +243,22 @@ about a **path** is different: the operator will act on it, and a descriptor nam
     artifact_drive_id: 7c9f-…              # sentinel UUID; see §5.5
 ```
 
+**`artifact_drive_id` is an integrity check, not a secret, and nothing should be
+built on treating it as one.** It lives in `workers.yaml`, which is in this public
+repo — so it is published by design, and it appears in specs, plans and test
+fixtures for the same reason. What it defends against is the operator plugging in
+the **wrong drive**: `os.path.ismount()` cannot tell this project's stick from
+another's, so a dump written to the wrong one would otherwise be silent. Knowing
+the value grants nothing. Exploiting it would require write access to the worker's
+machine *and* the ability to mount a chosen drive at `artifact_root` — and anyone
+holding both has already won without it.
+
+Stated because the opposite mistake is cheap to make and expensive to unwind: a
+later change that treats this as sensitive would either add key management that
+protects nothing (the value and any key would sit on the same machine), or worse,
+lean on its secrecy for a control it cannot support. If a value here ever does
+need to be secret, it does not belong in `workers.yaml`.
+
 **Containment is enforced on the worker.** v1 put symlink resolution on the daemon. It
 cannot go there: the artifact is on `pare-bench` and the daemon has no view of that
 filesystem, so `Path.resolve()` daemon-side resolves against the *wrong* namespace —
