@@ -29,6 +29,7 @@ FILES=(
   "scripts/bench_doctor.sh:$DEST/scripts/bench_doctor.sh"
   "bench/systemd/pare-bench-status.service:$UNIT_DIR/pare-bench-status.service"
   "bench/systemd/pare-bench-kiosk.service:$UNIT_DIR/pare-bench-kiosk.service"
+  "deploy/polkit/50-pare-poweroff.rules:/etc/polkit-1/rules.d/50-pare-poweroff.rules"
 )
 
 if [ ! -d "$REPO/.git" ]; then
