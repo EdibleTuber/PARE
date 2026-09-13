@@ -77,16 +77,40 @@ Opening asserts DTR and RTS, and many boards are wired to reset on DTR. "Just
 looking" can reboot the target. The worker sets DTR/RTS explicitly on open rather
 than inheriting the driver default, and the tool result states which it did.
 
-**B6 — `hardware_console_send` is tier `high` and sits outside the `hardware_write_*`
-pin pattern.**
+**B6 — `console_send` is tier `high`, pinned as `hardware_console_send`, and sits
+outside the flash pin patterns.**
 The existing pins were written for flash: *"anything that writes to a target you
 cannot un-write"*. A console keystroke is not persistent — except when it is, at a
 bootloader prompt. `high` prompts but is session-approvable (`risk_pool.py:414`),
 which is exactly the branch that exists for interactive work; `critical` would mean
 a typed justification per keystroke, and the realistic outcome of that is the
 operator abandoning the tool for `picocom`. The tier encodes **persistence**, not
-direction. Accepted risk, stated plainly: a session-approved console at a
-bootloader prompt can write flash without a fresh prompt.
+direction.
+
+**The accepted risk is larger than an earlier draft stated, and the correct
+statement comes from the key.** `record_session_approval` stores
+`(worker, tool, generation)` and `is_session_approved` looks up the same triple
+(`risk_pool.py:259-267`) — **not the arguments, not the device, not the console
+session.** So one `a` at the prompt means:
+
+- every subsequent `console_send` runs unprompted **with any payload**, not the
+  one the operator saw;
+- the model may `console_close` (low) and `console_open` (medium) a **different**
+  `by-id` device and send to *that* target under the approval granted for the
+  first;
+- it persists for the life of the daemon generation, across close/open cycles —
+  not for the console session, which is how the draft framed it.
+
+What does re-prompt: a generation bump, from `add_spec`/`remove_spec`/`close_all`,
+or `_bump_on_link_loss` (`risk_pool.py:182-206`) on a transport error — which for
+a networked worker fires on any bench-link blip. That is a real mitigation and it
+cuts both ways: a flaky tailnet produces repeated re-approval prompts, which is
+the same habituation pressure §7.1 is trying to measure.
+
+Mitigations available and **not** adopted in phase 1, recorded so the choice is
+visible rather than accidental: expiring session approval at `console_close`,
+bounding `send` payload length, or making `send` `critical` while phase 1 has no
+bulk-write path anyway.
 
 **B7 — Baud is detected, and detection returns evidence rather than a verdict.**
 An earlier draft of this spec deferred autobaud as "a named follow-up" on the
@@ -116,15 +140,34 @@ a Pi for a constant.
 
 ## 4. The tool surface
 
-| Tool | Wire tier | Returns |
-|---|---|---|
-| `hardware_list_devices` | low | adapters present, by `by-id` path and serial |
-| `hardware_console_detect_baud` | low | ranked `(rate, printable_ratio, framing_errors, sample)` |
-| `hardware_console_open` | medium | session id, resolved device, baud, DTR/RTS state set |
-| `hardware_console_read` | low | `(bytes, next_cursor, dropped)` |
-| `hardware_console_send` | high | bytes accepted; **pinned** in `workers.yaml` |
-| `hardware_console_status` | low | open?, holder, buffer head, cursor lag, session age |
-| `hardware_console_close` | low | releases the port |
+**Contract names are bare. The daemon adds the prefix.** `tool_factory.py:52`
+builds `prefixed = f"{worker.name}_{tool_name}"` from the worker's key in
+`workers.yaml`, and `risk.py:126` builds the pin-match target the same way.
+`pare-frida-mcp/contract.py:37` therefore declares `ToolSpec("list_devices", ...)`
+and the operator writes the pin as `frida_execute_script`.
+
+An earlier draft of this table named the tools `hardware_console_send`,
+`hardware_list_devices` and so on. **That would have produced
+`hardware_hardware_console_send` on the wire, and the one pin protecting the one
+dangerous tool in phase 1 would have matched nothing — with no error anywhere**,
+because `RiskGate` validates the tier string and never checks that a pattern
+matches something.
+
+| Contract name | Dispatched as | Wire tier | Returns |
+|---|---|---|---|
+| `list_devices` | `hardware_list_devices` | low | adapters present, by `by-id` path and serial |
+| `bench_status` | `hardware_bench_status` | low | artifact root present/writable, drive id, device presence — see below |
+| `console_detect_baud` | `hardware_console_detect_baud` | low | ranked `(rate, printable_ratio, framing_errors, sample)` |
+| `console_open` | `hardware_console_open` | medium | session id, resolved device, baud, DTR/RTS state set |
+| `console_read` | `hardware_console_read` | low | `(bytes, next_cursor, dropped)` |
+| `console_send` | `hardware_console_send` | high | bytes accepted; **pinned** in `workers.yaml` |
+| `console_status` | `hardware_console_status` | low | open?, holder, buffer head, cursor lag, session age |
+| `console_close` | `hardware_console_close` | low | releases the port |
+
+**`bench_status` is not new work invented here — a consumer is already waiting.**
+`pare/commands/health.py:130-151` says in situ: *"§8.4 puts the live answer behind
+a low-tier `bench_status` tool on the worker, which does not exist yet."* Phase 1
+is the first worker that could provide it, so it does.
 
 Every tool advertises its tier over the wire, and the conformance suite rejects a
 tool that fails to (`_assert_valid_risk_tier_meta`). Every tool declares
@@ -187,7 +230,7 @@ repo would put part of the bench outside that provenance trail.
   hardware:
     endpoint: http://100.97.133.126:8770/mcp   # was: command: <local path>
     transport: streamable_http                 # was: stdio
-    risk_default: low                          # was: high — §7
+    risk_default: high                         # UNCHANGED — §7.1
     autoload: false                            # unchanged, and deliberate
     connect_timeout: 20
     read_timeout: 30
@@ -207,38 +250,117 @@ must not inherit it silently.
 
 ## 7. Reconciling the risk model
 
-Two things `workers.yaml` already declares are wrong for a worker that exists.
+**An earlier draft of this section made two changes together and was wrong about
+both.** It dropped the floor from `high` to `low` and removed all four
+forward-declared pins. The corrected position keeps the floor and keeps most of
+the pins, and the reasoning matters more than the conclusion.
 
-**The floor.** `hardware` is the only worker at `risk_default: high`; frida, static
-and mitm are all `low`. Effective tier is `max(floor, wire, pin)`, so a `high` floor
-prompts on **every** `hardware_console_read` — a wall of approvals to read a boot
-log, and habituation to approving is itself a security failure. The floor cannot be
-selectively lowered, because `max` only raises.
+### 7.1 The floor stays `high`, and the transport change ships alone
 
-That floor was a compensating control for a worker that did not exist: it protected
-against a tool failing to advertise a wire tier. Once the worker exists, the
-conformance assertion enforces advertisement at build time, which is the same
-protection frida relies on at `low` while being able to execute arbitrary JS in a
-live process. **The floor drops to `low`.** The accepted risk is named: a hardware
-tool that somehow shipped without advertising would auto-execute, and conformance
-plus the pins are what stand in the way.
+The draft argued that once the worker exists, the build-time conformance
+assertion replaces the floor. **It does not, for a reason that is checkable:**
+`assert_stdio_conformance` and `assert_streamable_http_conformance`
+(`conformance.py:173`, `:277`) have **no production caller** — a search across all
+five repos outside tests returns only their definitions. They run in CI, in a
+different repo, against whatever that repo built. Nothing runs them against the
+process actually answering on port 8770.
 
-**The pins, and a forcing function that does not fire.**
-`workers.yaml` says a pin matching no tool *"FAILS that test"* once the package is
-installed. **It does not.** `tests/test_risk_overrides_coverage.py:33` holds a
-hardcoded `_CONTRACT_MODULES` of three workers; a pin whose prefix is not an
-*installed and mapped* worker falls into `unchecked` and raises only a
-`UserWarning`. Installing `pare-hardware-mcp` changes nothing until someone edits
-that dict in PARE. The four `hardware_*` pins have therefore been warning, not
-checking, since they were written.
+The frida comparison was not like-for-like either. `_is_local`
+(`risk_pool.py:167-180`) states the difference directly: for stdio *"the daemon
+spawned the child and holds its pipe, so the process behind a connection cannot
+change without a reload"*; for anything networked *"a Pi can reboot, a systemd
+unit can restart, a container can be redeployed, and none of it reaches the
+daemon."* Frida runs at `low` **because it is stdio**. `hardware` would be the
+first worker at `low` where the kernel guarantees nothing.
 
-**Rule adopted: a pin exists if and only if its tool exists.** Phase 1 adds
-`hardware` to `_CONTRACT_MODULES`, removes the four pins that match nothing
-(`hardware_flash_*`, `hardware_erase_*`, `hardware_write_*`, `hardware_glitch_*`),
-and adds `hardware_console_send → high`. Each future pin lands in the same change
-as the tool it protects, where the test can verify it matches. That converts the
-pins from a forward declaration nobody checks into an enforced invariant — and the
-misleading comment in `workers.yaml` goes with it.
+Worse, the draft made both changes in one edit. **The transport change is what
+removes the identity guarantee; the floor change is what removes the compensating
+control for not having it.** They are independent decisions and they ship apart:
+
+1. **Now:** `transport: streamable_http`, floor **stays `high`**.
+2. **Later, separately:** measure how bad the prompt wall on `console_read`
+   actually is in practice, with the pin mechanism in §7.2 genuinely enforced,
+   and lower the floor then if the evidence supports it.
+
+The cost is real and is accepted: at floor `high`, **every** phase-1 tool prompts,
+including `console_read`. Polling a boot log is a wall of approvals, and
+habituation to approving is itself a security failure. That is the thing to
+measure before trading it away — not to trade away first and measure after.
+
+One consequence of keeping the floor: B5's argument that `console_open` should
+prompt actually holds. `medium` never gates on its own (`risk_pool.py:413` tests
+only `high`/`critical`), so at floor `low` the tool the spec says can reboot a
+target would dispatch silently. At floor `high` it prompts.
+
+**Testing note:** `_floor_highwater` is a per-worker ratchet that is never evicted
+(`risk_pool.py:231-244`), so a floor change takes effect on a fresh daemon, not on
+a `/worker reload`. Test it in a fresh daemon or you will misread the result.
+
+### 7.2 Pins are live runtime policy, not forward declarations
+
+The draft removed all four `hardware_*` pins on the grounds that they "have been
+warning, not checking". **That conflates the coverage test with the control, and
+the control was never the test.**
+
+`RiskGate.evaluate` (`risk.py:126-141`) fnmatches every pin against
+`f"{worker}_{tool}"` **at every dispatch**, consulting no registry of known tools.
+`hardware_flash_*: critical` therefore binds a `hardware_flash_dump` the instant
+one appears on the wire, from any source, with nobody having done anything. That
+is the strongest control in the system for a tool PARE has never seen — and the
+daemon registers a Tool class for every entry `tools/list` returns
+(`discovery.py:96-105`), with no allowlist of expected names anywhere.
+
+`tests/test_risk_overrides_coverage.py` is a *spelling* check on pins. It being
+broken is a reason to fix it, not a reason to delete what it failed to check.
+
+**It is also a reversal of two decisions this spec failed to cite:** the
+networked-workers design's **D5** (*"Destructive tools get operator pins, from day
+one… That must be fixed before the hardware worker ships, not after"*) and the
+ArcticBase design's **§15 step 0** (*"Prerequisite — the pins… This lands first or
+nothing else matters"*). Reversing those needs an argument stronger than a broken
+test, and there isn't one.
+
+**What actually changes, and why it is two pins rather than four.** Phase 1 adopts
+a subsystem-first naming scheme (`console_send`, and later `flash_dump`,
+`flash_write`, `glitch_inject`). Under that scheme:
+
+| Pin | Fate | Why |
+|---|---|---|
+| `hardware_flash_*` | **kept** | matches every future flash tool, including `hardware_flash_write` |
+| `hardware_glitch_*` | **kept** | matches every future glitch tool |
+| `hardware_write_*` | **removed** | can never match: a flash write is `hardware_flash_write` |
+| `hardware_erase_*` | **removed** | can never match: an erase is `hardware_flash_erase` |
+
+Two pins are deleted because the naming scheme makes them **unmatchable**, not
+because they were unchecked. The two that remain keep binding tools that do not
+exist yet, which is exactly their job.
+
+Added: `hardware_console_send → high`.
+
+### 7.3 Making the coverage test honest — which needs more than a dict entry
+
+The draft said phase 1 "adds `hardware` to `_CONTRACT_MODULES`". **That alone does
+nothing.** `_tool_targets()` (`tests/test_risk_overrides_coverage.py:44-51`) does
+`importlib.import_module(module)` inside `except ImportError: continue`. The
+hardware worker's package lives in a venv **on the Pi** (§6); it is not importable
+in PARE's environment, so `hardware` never enters `installed`, every
+`hardware_*` pin falls back to `unchecked`, and the run stays green with a
+`UserWarning` — identical to today.
+
+For the entry to mean anything, **PARE's own environment must be able to import
+`pare_hardware_mcp.contract`**. PARE's CI already installs the three worker
+contract packages explicitly from git; this needs the same treatment, which
+implies:
+
+- a published `EdibleTuber/pare-hardware-mcp` repo,
+- a `contract.py` exposing `TOOL_SPECS`, importable **without** `pyserial` or any
+  hardware present, so it installs on a CI runner,
+- an added line in PARE's CI install step.
+
+**Sequencing hazard, stated so it is not walked into:** if the pin edits land in
+PARE before that repo exists, the "enforced invariant" is silently absent — the
+precise failure §7 exists to fix. The pin edits and the CI install land together
+or not at all.
 
 ## 8. Phase 2 — target power
 
@@ -310,12 +432,22 @@ cursor advanced by the number of bytes read, not that it equals 4096.
 
 - **B6's accepted risk**: a session-approved console at a bootloader prompt can
   write flash without a fresh prompt.
-- **Dropping the floor to `low`** removes the backstop against a tool that fails to
-  advertise a tier. Conformance is the replacement, and it is a build-time control,
-  not a runtime one.
-- **Removing the four forward-declared pins** means a future flash tool could ship
-  unpinned. The §7 rule is the mitigation and it is only as good as the discipline
-  of applying it — but a pin that warns instead of checking was never protection.
+- **Keeping the floor at `high` means every phase-1 tool prompts, including
+  `console_read`.** Polling a boot log is a wall of approvals, and habituation to
+  approving is a security failure in its own right. This is the accepted cost of
+  §7.1, and it is the thing to measure before trading away rather than after.
+- **Two pins are removed because the naming scheme makes them unmatchable**
+  (§7.2). If a future tool is ever named `hardware_write_something` rather than
+  `hardware_flash_write`, it ships unpinned. The scheme is the mitigation, and a
+  scheme is only as good as the discipline of applying it.
+- **§7.3's coverage fix depends on a repo that does not exist yet.** Until
+  `pare_hardware_mcp.contract` is importable in PARE's environment, the pins go on
+  warning. The sequencing hazard is named there; it is still a hazard.
+- **Anything that answers on 8770 is trusted.** There is no authentication in the
+  path — `MCPClient.connect` builds a plain HTTP transport with no headers, token
+  or TLS — and `serverInfo` is recorded per connection but never compared against
+  an expected value. The floor and the pins are what bound the damage, which is
+  why §7 keeps both.
 - **`by-id` assertion depends on the operator configuring the right serial.** A
   wrong serial fails closed (no device), which is the correct direction.
 - **The relay's three unknowns (§8)** are unknown at spec time by choice; designing
