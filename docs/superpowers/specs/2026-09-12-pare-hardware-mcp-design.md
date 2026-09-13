@@ -18,7 +18,7 @@ is an empty directory; this is the spec §15 says it gets.
 | Access | `pare` is in `dialout`, `spi`, `i2c`, `gpio`, `plugdev`; opened `ttyUSB0` at 115200 with no udev work |
 | Present | `flashrom`, `pyserial` |
 | Absent | `openocd`, `pyftdi`, **`mcp`** — the worker needs its own venv |
-| Network | `tailscale0` = `100.97.133.126`; port **8770 free** (631, 8080-loopback and tailscale's own ports are all that listen) |
+| Network | `tailscale0` = `100.97.133.126`; port **8770 free**. (Also listening, for completeness: 631 CUPS-via-snap on `0.0.0.0`, 8080 status page on loopback, systemd-resolved's stubs on `127.0.0.53`/`127.0.0.54`, and tailscale's own ports.) |
 | Artifact drive | `/mnt/bench-store`, 116 GiB free, sentinel `0361c41f-e680-4d4e-b9c3-39af8a33d067` |
 | Target | a board with a UART console, in hand |
 | Power switching | **DSD TECH SH-UR04A**, 4-channel USB relay, arriving 2026-09-13 |
@@ -45,7 +45,28 @@ and any tool that interprets target state.
 
 ## 3. Decisions
 
-**B1 — The port is addressed by `by-id`, and the serial number is asserted.**
+**B1 — The port is addressed by `by-id`, and the serial number is asserted — but
+the expected value does *not* live in the trust anchor, and that is a real
+weakening.**
+
+An earlier draft said the expected serial lives in "`workers.yaml`-adjacent worker
+config". **There is no such place for a networked worker.** `WorkerSpec` sets
+`model_config = ConfigDict(extra="forbid")` (`types.py:64`), and `workers.yaml:3-7`
+records the consequence: one unknown key aborts the whole file, leaving no workers
+*and* no `risk_overrides`. And `MCPClient.from_spec` (`client.py:100-113`) passes
+`command`/`args`/`env`/`cwd` **only on the stdio branch** — the HTTP branch
+forwards `endpoint` and the two timeouts and nothing else. No operator-declared
+value reaches a networked worker today.
+
+So the device path and expected serial live in `Environment=` in the systemd unit
+**on the Pi**, next to the code that checks them, under the same uid. That is
+weaker than `artifact_root`, which is deliberately in the file the worker cannot
+touch (`types.py:112-116`), and the difference must be stated rather than implied:
+this defends against a wrong cable, a replugged adapter and a second FTDI device.
+It does **not** defend against a compromised worker, which asserts a serial
+against a value it controls. Closing that gap means a new `WorkerSpec` field and
+plumbing it through the HTTP branch — an `agent_core` change this phase does not
+make.
 `ttyUSBn` is assigned by enumeration order and is not stable across reboots or
 across a second adapter appearing. `workers.yaml`-adjacent worker config names the
 `by-id` path; the worker additionally asserts the resolved device's
@@ -62,11 +83,24 @@ anyone can ask for it. A worker that begins capturing when the model calls a rea
 tool has already missed the thing worth having. The ring buffer is the worker's
 core state.
 
-**B3 — `read` never blocks, so phase 1 holds no request open.**
+**B3 — `read` never blocks. (But `detect_baud` does, so "phase 1 holds no request
+open" is false as an unqualified claim.)**
 `hardware_console_read` returns whatever is buffered *now*, including nothing. This
 is deliberate and it is what keeps every `read_timeout` hazard in the artifact spec
-out of phase 1: a timed-out call that keeps running worker-side, no cancellation on
-the wire, a retry racing the first attempt. Phase 3 reintroduces all of it (§9).
+out of phase 1 **for `read`**: a timed-out call that keeps running worker-side, no
+cancellation on the wire, a retry racing the first attempt.
+
+**`console_detect_baud` is the exception and is phase 1's longest call.** It
+samples the line at each candidate rate (B7, B8), so it holds a request open for
+roughly `sample_duration × candidate_count`, and B9's quiet-line case has no early
+exit — it is slowest exactly when it finds nothing. The spec must therefore bound
+it: a stated candidate list, a stated per-rate sample duration, and a total budget
+that is **derived from and checked against** `read_timeout`, not asserted to fit
+it. Two implementers given no budget will choose differently and one will exceed
+the timeout.
+
+Phase 2 has the same shape: `power_cycle` holds a request open across the
+off-wait-on interval. Phase 3 reintroduces the rest (§9).
 
 **B4 — The port is exclusive; a second `open` is refused, not queued.**
 Serial ports do not multiplex. The refusal names the holder and when it opened. A
@@ -220,9 +254,53 @@ Port **8770**.
 the Pi and should not be.
 
 **The systemd unit lives in PARE**, at `bench/systemd/pare-hardware-mcp.service`,
-because `scripts/bench_deploy.sh` is what places units on the Pi and
-`/opt/pare/DEPLOYED_FROM` is what records the commit that did it. A unit in a third
-repo would put part of the bench outside that provenance trail.
+because `scripts/bench_deploy.sh` is what places units on the Pi.
+
+**But that script cannot deploy this worker as it stands, and an earlier draft
+claimed otherwise.** Three separate gaps, all verified in the script:
+
+- **`FILES` is a hardcoded five-entry array** (`bench_deploy.sh:26-32`). The new
+  unit must be added to it, or `--check` reports *"Everything deployed matches"*
+  while the unit is absent. Cheap — one line — but not automatic.
+- **There is no venv or pip logic anywhere in the repo.** A grep across `scripts/`
+  and `bench/` finds only comments explaining that the status page deliberately
+  has none. The script's whole model is
+  `sha256(repo file) == sha256(deployed file)` → `install -D`. It cannot express
+  "create `/opt/pare-hardware/venv` if absent and install a pinned requirement
+  set". That is new functionality, not a parameter.
+- **It has no concept of a second repo.** `REPO` is a single checkout and every
+  `FILES` source is `$REPO/<path>`. The worker package lives in
+  `pare-hardware-mcp`, so the script cannot hash it, diff it, or stamp it.
+
+**The provenance claim therefore needs narrowing.** `/opt/pare/DEPLOYED_FROM`
+records PARE's HEAD (`bench_deploy.sh:100-104`) — observed on the Pi:
+`a9a4ef7  deployed 2026-09-11T20:49:20Z`. That answers *"which commit of PARE
+shipped the unit file"* and says nothing about the commit inside
+`/opt/pare-hardware/venv`, which is the code that actually drives the target. The
+deliverable is therefore an extended stamp recording the hardware-worker version
+and the `pare-worker-kit` version installed in that venv — not just PARE's SHA.
+Until that exists, the bench's provenance trail has a hole exactly where the
+hardware is.
+
+**Unit directives, which an earlier draft omitted entirely and which are not
+optional here.** `run_worker` raises `SystemExit(2)` on a `WorkerServeError`
+(`serve.py:275`) with no retry, and systemd's default is `Restart=no` — so a unit
+without explicit directives fails **once** and stays dead until a human
+intervenes. That is worse than a crash loop, and it is guaranteed to happen: on
+this Pi `tailscale0` does not get its IPv4 until after chronyd steps the clock
+(§5), so a worker started early in boot finds no address and exits.
+
+The unit needs `Restart=on-failure`, an explicit `RestartSec`, and
+`StartLimitIntervalSec=0` under `[Unit]` — the pattern
+`bench/systemd/pare-bench-status.service` already uses, with a comment explaining
+that a crash loop must not be the reason the screen is blank.
+
+For ordering, **`After=` and `Wants=tailscale-online.target`**, not
+`After=tailscaled.service`: the latter waits only for the daemon process to exist,
+not for it to have an address, which is precisely the gap that produced today's
+outage. `tailscale-wait-online.service` (`ExecStart=/usr/bin/tailscale wait`,
+`WantedBy=tailscale-online.target`) is **already installed on this Pi and
+currently disabled** — enabling it is the intended mechanism, not a workaround.
 
 **`workers.yaml` changes on four axes together:**
 
@@ -234,7 +312,11 @@ repo would put part of the bench outside that provenance trail.
     autoload: false                            # unchanged, and deliberate
     connect_timeout: 20
     read_timeout: 30
-    capability_tags: [hardware, uart, jtag, glitch]
+    capability_tags: [hardware, uart]          # not jtag/glitch — §2 puts both
+                                               # out of scope; tags are operator-
+                                               # facing (commands/worker.py:164)
+                                               # and should not advertise
+                                               # capabilities that do not exist
 ```
 
 `autoload: false` stays: hardware work is occasional and tool schemas cost context
