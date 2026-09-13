@@ -213,8 +213,15 @@ tool that fails to (`_assert_valid_risk_tier_meta`). Every tool declares
 next cursor. `dropped` is the count of bytes lost because the ring wrapped past the
 caller's cursor, and it is **never silently zero** — a boot log with a hole that
 looks complete is worse than an error, because the model will reason confidently
-across the gap. Buffer size is worker configuration, not a per-call argument, and
-the default must hold a full boot log for the class of target in use.
+across the gap. **Buffer size gets a number, because "must hold a full boot log" is a
+requirement with no way to fail.** At 115200 8N1 the line carries 10 bits per
+byte, so 11 520 B/s ≈ 11.25 KiB/s. A talkative embedded boot is 170 KB–675 KB; a
+panic loop or a verbose kernel is several MB per minute; **an hour with nobody
+reading is ~40 MB**. The Pi has 8 GB with ~7.4 GB available (observed), and B4
+caps this at one session per port, so memory is not the constraint — under-sizing
+is. Default **64 MiB** (≈95 minutes at full line rate), worker-configurable, with
+the derivation kept next to the number so a future faster rate can be reasoned
+about rather than guessed.
 
 **Device disappearance.** The adapter can be unplugged and this bench has a
 documented history of USB instability. A read against a vanished device returns a
@@ -223,6 +230,17 @@ hang, and it does **not** return an empty slice — which would be indistinguish
 from "the target is quiet". The session is marked dead and must be reopened; the
 buffer stays readable, because what was captured before the unplug is still
 evidence.
+
+**"Holder" needs a definition, and the orphan case needs a rule.** B4 refuses a
+second `open` and names the holder — but in a single-daemon deployment every call
+arrives from the same place, so the identity that matters is the *session*, not the
+caller: `console_open` returns a session id and `console_status` reports it, its
+age, and its last-read time. The case the draft did not cover is the daemon
+disconnecting while the worker still holds the port. Rule: the worker keeps the
+session and the buffer, and a reconnecting daemon **adopts** it rather than
+force-closing — the capture is the evidence, and silently discarding it on a
+tailnet blip would lose exactly what a bench is for. An explicit `console_close`
+is the only thing that ends a session.
 
 **Worker restart with a port open.** The OS releases the descriptor, so the port
 frees itself, but the buffer is gone. `open` after a restart is a new session with
@@ -237,6 +255,55 @@ Phase 1 timestamps are session metadata and can tolerate it; phase 3's `hashed_a
 is a custody record and cannot. Fitting the RTC battery fixes it at source. The
 bench status page already compares Pi time against the workbench host with a 60 s
 tolerance, so the condition is detectable where it matters.
+
+## 5a. The physical layer, which the worker cannot check and the operator must
+
+An earlier draft of this spec discussed DTR at length and said nothing about any
+of the following. For someone doing Tigard console work for the first time these
+are **more likely** failure modes than the DTR reset, and one of them damages
+hardware.
+
+**The voltage selector is a physical slide switch, and getting it wrong can
+destroy the target.** Tigard supplies 1.8 / 2.5 / 3.3 / 5 V, selected by hand. Set
+it to 5 V against a 3.3 V target and you drive 5 V into its RX pin; set it too low
+and logic highs fall under threshold and you get garbage that looks exactly like a
+wrong baud rate. **The worker cannot read the switch position.** Therefore:
+
+- `list_devices` states that target voltage is operator-set and unverifiable, so
+  the value is never implied anywhere in a tool result.
+- The bring-up checklist puts *"confirm the voltage selector against the target's
+  datasheet"* before the first `console_open`, and phase 2's VTGT read-back (§8) is
+  the only mechanism that could ever close this loop.
+
+**Flow control must be explicit.** If the Tigard is wired for RTS/CTS and the
+target never asserts CTS, `send` hangs or silently drops bytes — and §4's tool
+surface has no way to configure or report it. `console_open` takes an explicit
+flow-control mode, defaulting to none, and `console_status` reports it.
+
+**Ground and crossover.** A missing common ground produces intermittent framing
+errors that look precisely like a wrong baud rate — which means B7's scoring
+(`printable_ratio`, `framing_errors`) will confidently attribute a wiring fault to
+the wrong cause. The detection tool's result therefore names this explicitly when
+every candidate scores poorly: *"no rate scored well; check ground and TX/RX
+crossover before trying more rates."* A wrong crossover is benign by comparison —
+it just produces silence, which B9 already reports honestly.
+
+**Target output is attacker-controlled bytes, and nothing currently treats it that
+way.** A boot log is the single largest untrusted byte stream in this system, and
+it flows into the model's context, the capture store, the `/snapshot` renderer,
+and — via the next call's argument snapshot — the operator's approval prompt. The
+artifact-wiring design applies `_CONTROL_RE` to `path` and `drive_id` for exactly
+this reason: *"an escape sequence rewrites what the operator SEES while
+confirming."* The same reasoning applies here with far more volume, so:
+
+- `console_read` returns target bytes **base64-encoded**, not as raw text. This
+  also settles an ambiguity the draft left open: UART output is arbitrary bytes,
+  MCP content blocks are text, and "return the bytes" would have been implemented
+  three different ways.
+- Any rendering of target output into an operator-facing surface — the approval
+  prompt, the status page, `/snapshot` — strips control characters at the point of
+  rendering, not at the point of capture. **Capture stays byte-exact**, because
+  that is the evidence.
 
 ## 6. Transport and deployment
 
@@ -512,6 +579,31 @@ rather than designed around, because the listing states none of them:
    relay come up open or closed, and does it glitch during enumeration? An
    unplanned cycle during a flash write is how targets are bricked.
 3. **Contact ratings** against the target's supply and inrush.
+4. **Whether it has a usable serial number at all.** CH340 devices commonly ship
+   with blank or duplicated `iSerial`. If it does, B1's "assert the serial"
+   mechanism simply cannot be applied to the relay, and addressing falls back to
+   `by-path` — which is **not** stable if the device moves to a different physical
+   port. A udev rule pinning a project-meaningful symlink is the better mechanism
+   for both devices, and phase 2 should write one rather than relying on the
+   stock `by-id` naming.
+
+**The USB power budget is an open question this bench has been burned by before,
+and it cannot currently be measured.** The bench-state record has an enclosure
+whose spin-up surge exceeded its declared `bMaxPower` and enumerated with no SATA
+target — intermittently, in a way that read exactly like a dying disk. Phase 2 adds
+a relay, and the target may be powered from Tigard's own rail. Observed today:
+Tigard declares `bMaxPower` 500 mA on bus 2; the artifact drive is on bus 4, so
+they are not sharing a single port's rail — but both draw on the Pi's total 5 V
+budget.
+
+Attempts to read the budget all failed on this Pi: `vcgencmd` needs `/dev/vcio`
+(not accessible), the devicetree `usb_max_current_enable` and
+`usb_over_current_detected` properties read all-zero, `config.txt` has no current
+tuning, and `hwmon` exposed nothing readable unprivileged. **So this is recorded as
+unmeasured rather than guessed at.** Before phase 2 goes unattended, check
+`usb_max_current_enable` with an interactive root session, and treat a drive
+dropout during a dump as a power symptom first — the bench's own history says the
+disk is usually not the problem.
 
 **Wiring is a decision, not a detail.** Normally-open means the target
 de-energises if the Pi dies — safe for leaving a board unattended. Normally-closed
@@ -546,6 +638,27 @@ pin under the rule in §7.
   drive on 2026-09-12 — the one value here that must never be typed from memory.
 - **A flash dump is one encapsulated `critical` tool, never exposed primitives**,
   with an operator pin from day one.
+
+## 9a. Diagnosis at the bench
+
+The operator standing at the bench has a touchscreen and no laptop — that is the
+premise the whole kiosk exists for — and **neither existing diagnostic can say
+anything about this worker.** `scripts/bench_doctor.sh` probes a worker port that
+defaults to `9100`, not `8770`, and `bench/status_server.py`'s `PROBE_ORDER` is
+`("network", "arcticbase", "heartbeat", "project")` with no hardware entry.
+
+Worse, the obvious probe is misleading. A port check reports "listening" while the
+console is unusable — the worker process is fine but the session is wedged, the
+adapter has vanished, or `dropped` has been climbing for an hour. Phase 1
+therefore adds:
+
+- a `bench_doctor.sh` probe for **8770**, and
+- a `PROBE_ORDER` entry backed by `bench_status`/`console_status`, surfacing
+  adapter present?, session open?, and whether the last read dropped bytes.
+
+Both read through the loopback status server, which binds `127.0.0.1:8080`
+(verified) — so this adds a diagnosis surface reachable only by someone physically
+at the bench, with no new network exposure.
 
 ## 10. Testing and acceptance
 
