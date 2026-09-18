@@ -206,34 +206,92 @@ async def test_backoff_resets_on_success_not_stays_backed_off():
         assert pane.cursor > 0
 
 
-def _imported_module_roots(path: Path) -> set[str]:
-    """Every top-level module name this file imports, via `ast` (not a
-    substring grep, which a comment mentioning MCP could trip)."""
+#: The package `pare/tui/panes/base.py` lives in, used to resolve a relative
+#: import (`from . import x`, `from .. import x`, ...) to an absolute dotted
+#: path the same way Python's own import machinery would.
+_PANES_PACKAGE = ("pare", "tui", "panes")
+
+
+def _resolve_from_module(level: int, module: str | None) -> str:
+    """Absolute dotted path a `from`-import's `module` resolves to, given
+    `level` (`node.level`: 0 = absolute, 1 = current package, 2 = parent,
+    ...). Mirrors CPython's own relative-import resolution."""
+    if level == 0:
+        return module or ""
+    trim = level - 1
+    bits = _PANES_PACKAGE[: len(_PANES_PACKAGE) - trim] if trim < len(_PANES_PACKAGE) else ()
+    base = ".".join(bits)
+    if module:
+        return f"{base}.{module}" if base else module
+    return base
+
+
+def _all_import_targets(path: Path) -> set[str]:
+    """Every fully-qualified dotted path this file imports, in EVERY
+    spelling `import`/`from ... import ...` can take -- `alias.name`
+    (the actual imported name/submodule), not just the module string, and
+    with relative imports resolved to absolute. This is what closes the
+    gap a module-string-only or root-only check misses: `from
+    pare.tui.sources import mcp_console` has a module string of
+    "pare.tui.sources" (innocuous on its own) and an imported NAME of
+    "mcp_console" -- the name is the part that matters and is exactly what
+    a root/module-string check skips.
+    """
     tree = ast.parse(path.read_text())
-    roots: set[str] = set()
+    targets: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                roots.add(alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            roots.add(node.module.split(".")[0])
-    return roots
+                # covers `import pare.tui.sources.mcp_console [as x]`: the
+                # full dotted path is in alias.name regardless of asname.
+                targets.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            resolved_module = _resolve_from_module(node.level, node.module)
+            if resolved_module:
+                targets.add(resolved_module)
+            for alias in node.names:
+                # covers `from pare.tui.sources import mcp_console [as x]`:
+                # the module string alone ("pare.tui.sources") would pass
+                # any check that stops there -- the imported NAME
+                # ("mcp_console") is what has to be joined on and checked.
+                targets.add(f"{resolved_module}.{alias.name}" if resolved_module else alias.name)
+    return targets
 
 
 def test_pane_base_and_dock_have_no_mcp_import():
+    """Nothing under `pare.tui.sources` other than `base` may be imported by
+    `pare/tui/panes/base.py` -- and no import anywhere in it may be
+    MCP-shaped by name, regardless of which of `import`, `import ... as
+    ...`, or `from ... import ...` (absolute or relative) spelled it.
+
+    Requirement 2 is "the dock must not depend on any concrete source";
+    resolving every import to its full dotted path and checking the actual
+    imported name (not just a top-level root, and not just the `from`
+    module string) is what makes this hold for `from pare.tui.sources
+    import mcp_console` -- the natural way to import a sibling submodule --
+    and not only for `import mcp_console` or `import ...mcp_console...` as
+    a bare root.
+    """
     base_path = Path(__file__).resolve().parent.parent / "pare" / "tui" / "panes" / "base.py"
-    roots = _imported_module_roots(base_path)
-    assert not any("mcp" in root.lower() for root in roots), (
-        f"pare/tui/panes/base.py imports {roots!r} -- the dock and Pane base must not "
+    targets = _all_import_targets(base_path)
+
+    assert not any("mcp" in target.lower() for target in targets), (
+        f"pare/tui/panes/base.py imports {targets!r} -- the dock and Pane base must not "
         "import anything MCP-shaped or any concrete source"
     )
-    # And, narrowly, the two concrete-source modules this task must not
-    # depend on don't exist as importable names at all.
-    tree = ast.parse(base_path.read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            assert "mcp_console" not in node.module
-            assert "fake_console" not in node.module
+
+    sources_prefix = "pare.tui.sources"
+    for target in targets:
+        if target == sources_prefix or not target.startswith(sources_prefix + "."):
+            continue
+        remainder = target[len(sources_prefix) + 1 :]
+        first_segment = remainder.split(".")[0]
+        assert first_segment == "base", (
+            f"pare/tui/panes/base.py imports {target!r} -- only "
+            f"{sources_prefix}.base may be imported; any other submodule under "
+            f"{sources_prefix} (mcp_console, fake_console, or anything future) is a "
+            "concrete source the dock must not depend on"
+        )
 
 
 @pytest.mark.asyncio
