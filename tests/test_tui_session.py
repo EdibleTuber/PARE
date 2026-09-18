@@ -84,9 +84,9 @@ async def test_start_refuses_a_second_reader_task(tmp_path):
         with pytest.raises(RuntimeError):
             await session.start()
     finally:
-        await session.stop()
+        await _bounded(session.stop())
         server.close()
-        await server.wait_closed()
+        await _bounded(server.wait_closed())
 
 
 # --- helpers for the behavioral tests ---------------------------------------
@@ -116,6 +116,17 @@ async def _wait_until(predicate, timeout=2.0, interval=0.01):
     await asyncio.wait_for(poll(), timeout=timeout)
 
 
+_TEARDOWN_TIMEOUT = 2.0
+
+
+async def _bounded(aw, timeout: float = _TEARDOWN_TIMEOUT):
+    """Bound a teardown await (session.stop() / server.wait_closed()) so a
+    future regression that left the transport open fails the test with a
+    TimeoutError instead of hanging the whole suite indefinitely -- the
+    correct path completes in milliseconds, so this bound is generous."""
+    return await asyncio.wait_for(aw, timeout=timeout)
+
+
 # --- ordering -----------------------------------------------------------
 
 
@@ -139,9 +150,9 @@ async def test_messages_reach_a_subscriber_in_arrival_order(tmp_path):
             "three",
         ]
     finally:
-        await session.stop()
+        await _bounded(session.stop())
         server.close()
-        await server.wait_closed()
+        await _bounded(server.wait_closed())
 
 
 async def test_connection_loss_notifies_subscribers(tmp_path):
@@ -163,9 +174,9 @@ async def test_connection_loss_notifies_subscribers(tmp_path):
         assert len(disconnects) == 1
         assert disconnects[0].reason == "eof"
     finally:
-        await session.stop()
+        await _bounded(session.stop())
         server.close()
-        await server.wait_closed()
+        await _bounded(server.wait_closed())
 
 
 # --- a raising subscriber must not wedge the reader --------------------
@@ -195,9 +206,9 @@ async def test_a_raising_subscriber_does_not_stop_later_messages(tmp_path):
         texts = [m.text for m in good_received if isinstance(m, ResponseMessage)]
         assert texts == ["first", "second"]
     finally:
-        await session.stop()
+        await _bounded(session.stop())
         server.close()
-        await server.wait_closed()
+        await _bounded(server.wait_closed())
 
 
 # --- stop() idempotency --------------------------------------------------
@@ -205,8 +216,8 @@ async def test_a_raising_subscriber_does_not_stop_later_messages(tmp_path):
 
 async def test_stop_on_a_never_started_session_does_not_raise(tmp_path):
     session = DaemonSession(tmp_path / "unused.sock", channel_id="c1", cwd="/tmp")
-    await session.stop()
-    await session.stop()
+    await _bounded(session.stop())
+    await _bounded(session.stop())
 
 
 async def test_stop_is_idempotent_after_start(tmp_path):
@@ -222,11 +233,11 @@ async def test_stop_is_idempotent_after_start(tmp_path):
     session = DaemonSession(sock_path, channel_id="c1", cwd="/tmp")
     try:
         await session.start()
-        await session.stop()
-        await session.stop()
+        await _bounded(session.stop())
+        await _bounded(session.stop())
     finally:
         server.close()
-        await server.wait_closed()
+        await _bounded(server.wait_closed())
 
 
 # --- outgoing message stamping -------------------------------------------
@@ -257,9 +268,9 @@ async def test_send_chat_and_send_command_stamp_channel_id_and_cwd(tmp_path):
         await session.send_command("status", "extra")
         await _wait_until(lambda: len(written) >= 2)
     finally:
-        await session.stop()
+        await _bounded(session.stop())
         server.close()
-        await server.wait_closed()
+        await _bounded(server.wait_closed())
 
     import json
 
