@@ -2,20 +2,20 @@
 import pytest
 
 
-@pytest.mark.parametrize("payload", [
-    b"\x1b[2J",            # clear screen
-    b"\x1b[1;1H",          # cursor home
-    b"\x1b]0;pwned\x07",   # set window title (OSC)
-    b"\x07",               # bell
-    b"\x08" * 40,          # backspace run
-    b"\r" * 10,            # carriage-return overwrite
+@pytest.mark.parametrize("payload,unsafe_bytes", [
+    (b"\x1b[2J", ["\x1b"]),            # clear screen
+    (b"\x1b[1;1H", ["\x1b"]),          # cursor home
+    (b"\x1b]0;pwned\x07", ["\x1b", "\x07"]),   # set window title (OSC)
+    (b"\x07", ["\x07"]),               # bell
+    (b"\x08" * 40, ["\x08"]),          # backspace run
+    (b"\r" * 10, ["\r"]),              # carriage-return overwrite
 ])
-def test_control_sequences_do_not_survive(payload):
+def test_control_sequences_do_not_survive(payload, unsafe_bytes):
     from pare.tui.sanitize import for_display
 
     out = for_display(b"before" + payload + b"after")
-    assert "\x1b" not in out
-    assert "\x07" not in out
+    for unsafe_byte in unsafe_bytes:
+        assert unsafe_byte not in out
     assert "before" in out and "after" in out
 
 
