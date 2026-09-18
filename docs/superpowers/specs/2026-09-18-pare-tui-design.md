@@ -322,17 +322,30 @@ transport. It is wiring, not a build:
    states that for `streamable_http`, agent_core forwards only `endpoint`,
    `connect_timeout` and `read_timeout` from `workers.yaml`, and "`env` is a
    stdio-only channel and is never plumbed through." The real values are known —
-   the by-id path above, and serial `TG1119e7`.
+   `PARE_HW_DEVICE` is the **`if01`** by-id path (the UART; see below) and
+   `PARE_HW_EXPECT_SERIAL` is `TG1119e7`.
 3. Flip the `workers.yaml` entry from `command`/`args` to `endpoint` +
    `connect_timeout` + `read_timeout` + `artifact_root`, keeping `autoload:
    false` (required for a networked worker) and `risk_default: high` unchanged.
 4. Update `config.py`'s module docstring, which currently says the worker "is
    still declared `transport: stdio` in workers.yaml" (`:38-39`).
 
-**Open, for the operator at the board:** which of `if00`/`if01` is the UART
-channel. `tests/unit/test_tools_status.py:14-15` uses `if01`, but a test fixture
-is not authority on the physical wiring, and `PARE_HW_EXPECT_SERIAL` guards
-against the wrong *board*, not the wrong *channel*.
+**The UART is `if01`** — the Tigard's channel B. This is settled, and it is what
+`PARE_HW_DEVICE` gets set to: `/dev/serial/by-id/usb-SecuringHardware.com_Tigard_V1.1_TG1119e7-if01-port0`.
+The phase-1 plan uses that device throughout, including in its own manual
+verification steps
+(`docs/superpowers/plans/2026-09-13-pare-hardware-mcp-phase1-worker.md:659`,
+`:1160`), and the worker's tests bake it in (`test_devices.py:11`,
+`test_session.py:33`).
+
+What is **not** settled is whether anything has ever been observed arriving on
+it. `docs/superpowers/2026-09-13-bench-verification.md:68` records "Both Tigard
+channels opened cleanly at 115200 and **both were silent**" — no target was
+transmitting during that pass, and its open item 1 (`:70`) is about that, not
+about which channel the UART is. So the first UART pane to render real bytes is
+also the first confirmation the wiring carries traffic. Expect an empty pane on
+first run to mean "no target powered", not "pane broken", and read
+`console_status`/`alive` rather than inferring from emptiness.
 
 This prerequisite may be landed before or alongside the TUI. The TUI's chat
 surface, pane dock, and logging path are all testable without it; only the UART
