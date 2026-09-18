@@ -13,3 +13,8 @@ __pycache__/
 *.swo
 .*.swp
 .*.swo
+
+# Agent scratch — SDD ledgers/briefs/review packages, and harness worktrees.
+# Both are working state, not source; neither may reach a commit.
+.superpowers/
+.claude/worktrees/
