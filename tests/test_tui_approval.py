@@ -143,6 +143,10 @@ async def test_pane_poller_keeps_making_progress_while_modal_is_open():
         await pilot.pause()
 
 
+def _button_ids(modal: ApprovalModal) -> set[str | None]:
+    return {button.id for button in modal.query(Button)}
+
+
 @pytest.mark.asyncio
 async def test_critical_request_offers_no_session_approval_option():
     app = _make_app()
@@ -174,6 +178,59 @@ async def test_high_request_offers_session_approval_option():
 
         session_button = modal.query_one("#approve-session", Button)
         assert isinstance(session_button, Button)
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_critical_request_offers_only_justify_and_deny():
+    """Fix round 1, Important finding: a critical request must not offer
+    "Approve once" either -- risk_pool.py:481-482 re-checks `if effective ==
+    "critical" and decision.approved and not justification` and silently
+    converts an approve-once decision to a denial server-side, with no
+    signal anywhere in the UI. The decision set actually reachable for a
+    critical request must be exactly {justify, deny}, matching the CLI's
+    `[n/j]` options (agent_core/adapters/cli.py:64) -- never the bare "y"
+    equivalent. Checked as an exact set, not just "approve-once is present":
+    asserting the two forbidden ids are just ABSENT would still pass if
+    other unexpected ids leaked in, and checking only "not in" a query
+    result list also would not have distinguished forbidding one button
+    from forbidding both -- the paired test below (all four for `high`) is
+    what makes this a real two-direction discrimination."""
+    app = _make_app()
+    async with app.run_test() as pilot:
+        app.handle_tool_approval_request(
+            _make_request(effective_tier="critical", declared_tier="critical")
+        )
+        await pilot.pause()
+        modal = app.screen
+        assert isinstance(modal, ApprovalModal)
+
+        assert _button_ids(modal) == {"approve-justified", "deny"}
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_high_request_offers_all_four_decisions():
+    """The other direction of the fix above: a `high` request must still
+    offer the full decision set, so the fix cannot be satisfied by simply
+    never offering approve-once to anyone."""
+    app = _make_app()
+    async with app.run_test() as pilot:
+        app.handle_tool_approval_request(_make_request(effective_tier="high"))
+        await pilot.pause()
+        modal = app.screen
+        assert isinstance(modal, ApprovalModal)
+
+        assert _button_ids(modal) == {
+            "approve-once",
+            "approve-session",
+            "approve-justified",
+            "deny",
+        }
 
         await pilot.press("escape")
         await pilot.pause()

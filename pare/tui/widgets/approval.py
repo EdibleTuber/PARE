@@ -32,11 +32,15 @@ class ApprovalModal(ModalScreen[ToolApprovalResponseMessage]):
 
     The decision set mirrors exactly what the gate accepts
     (`agent_core/workers/risk_pool.py:409-414`): approve once, approve for
-    session, approve with justification, deny. A `critical` request never
-    offers approve-for-session -- the gate's own check is
-    `if effective != "critical" and self.is_session_approved(...)`, so a
-    session grant is never even consulted for a critical tool, and approving
-    a critical tool at all additionally requires a non-empty justification
+    session, approve with justification, deny. A `critical` request offers
+    neither approve-once nor approve-for-session -- the gate re-checks at
+    `risk_pool.py:481-482`: `if effective == "critical" and decision.approved
+    and not justification: decision = DENIED`. An approve-once click on a
+    critical request would be silently converted to a denial server-side
+    with no signal anywhere in the UI, so it must not be offered at all
+    (mirrors `agent_core/adapters/cli.py:64`'s `[n/j]` options for critical
+    -- justify or deny only, never the bare "y" equivalent). Approving a
+    critical tool at all additionally requires a non-empty justification
     (mirrors `agent_core/adapters/cli.py:64-75`'s `bool(justification) if
     is_critical else True`).
     """
@@ -98,8 +102,8 @@ class ApprovalModal(ModalScreen[ToolApprovalResponseMessage]):
                 id="approval-justification",
             )
             with Horizontal(id="approval-buttons"):
-                yield Button("Approve once", id="approve-once", variant="success")
                 if not self.is_critical:
+                    yield Button("Approve once", id="approve-once", variant="success")
                     yield Button(
                         "Approve for session", id="approve-session", variant="success"
                     )
