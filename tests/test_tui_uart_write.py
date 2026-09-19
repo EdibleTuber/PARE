@@ -202,3 +202,154 @@ async def test_uart_pane_has_no_tool_pool_collaborator():
     pane, src, log = await _attached_pane()
     assert not hasattr(pane, "tool_pool")
     assert not hasattr(pane, "_tool_pool")
+
+
+# --- Task 13 (b) closure: `_log_activity` guards its own send -------------
+#
+# A daemon can die BETWEEN the socket going bad and `DaemonSession._read_loop`
+# dispatching `DaemonDisconnected` (which lets the app detach the session).
+# During that window `self._daemon_session.send(msg)` in `_log_activity` can
+# raise -- and it is called from two places:
+#   - `submit()`'s `finally` (a Textual event handler), and
+#   - `_flush_observed()` (from `advance()`, itself scheduled by
+#     `Pane`'s `set_interval` timer callback).
+# An uncaught raise from either would surface via Textual's error paths --
+# `Timer._invoke` catches and logs, but the record is quietly short a batch,
+# and `submit`'s call site relies on the guard the app.py layer adds in
+# `on_input_submitted`. Guarding inside `_log_activity` closes the gap at
+# the smallest scope for both callers.
+
+
+class _FailingSession:
+    """A daemon-session double whose socket has already gone: every `send`
+    raises. Matches the shape `DaemonConnection.send` fails in when the
+    writer is None (agent_core/client.py:53's assert), which is what a
+    real dropped socket looks like from this side."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def send(self, msg: object) -> None:
+        self.attempts += 1
+        raise RuntimeError("socket closed")
+
+
+async def test_flush_observed_survives_a_dead_log_session():
+    """`_flush_observed` runs from a timer callback; a raise here reaches
+    Textual's `Timer._invoke`, which catches and logs but leaves the
+    record short a batch AND surfaces nothing to the operator. Guard the
+    log send instead: the pane keeps polling, and the failure is visible
+    in the marker line."""
+    src = FakeConsoleSource()
+    log = _FailingSession()
+    pane = UartPane(
+        source=src, daemon_session=log, channel_id="ch-1", cwd="/tmp/proj",
+        observed_flush_polls=1,
+    )
+    pane.session = await pane.attach()
+
+    src.feed(b"hello world")
+    # Two advances: the first accumulates+flushes (log.send raises inside
+    # `_log_activity`), the second must still succeed -- the pane cannot
+    # be left in a broken state by one failed log send.
+    await pane.advance()
+    await pane.advance()
+
+    assert log.attempts >= 1, "the send was actually attempted"
+    # Marker on the first failure of a streak (spec R4: "not silent").
+    assert any("log send failed" in text for text, is_marker in pane._lines if is_marker), (
+        "the first failed log send must surface a marker; a persistent daemon-down "
+        "streak must not spam one marker per flush interval"
+    )
+
+
+async def test_submit_survives_a_dead_log_session():
+    """The paired case: `submit`'s `finally` also awaits `_log_activity`;
+    a raise there before Task 13 (b) closure would propagate out of the
+    Enter-key event handler."""
+    src = FakeConsoleSource()
+    log = _FailingSession()
+    pane = UartPane(
+        source=src, daemon_session=log, channel_id="ch-1", cwd="/tmp/proj",
+    )
+    pane.session = await pane.attach()
+
+    # Must not raise -- the whole point of the guard.
+    await pane.submit("hello")
+
+    # The write to the device DID reach the source (that path never touched
+    # the daemon session); only the "sent" log entry did.
+    assert src.sent == [b"hello\n"]
+    assert log.attempts == 1
+
+
+async def test_log_send_failure_streak_marks_only_once():
+    """A daemon that stays down for many flushes must produce one marker,
+    not one per flush -- the marker is a signal, not scrollback noise. The
+    streak-marker flag resets on the next successful send (covered by
+    `test_log_send_failure_marker_resets_after_recovery`)."""
+    src = FakeConsoleSource()
+    log = _FailingSession()
+    pane = UartPane(
+        source=src, daemon_session=log, channel_id="ch-1", cwd="/tmp/proj",
+        observed_flush_polls=1,
+    )
+    pane.session = await pane.attach()
+
+    for chunk in (b"a", b"b", b"c", b"d"):
+        src.feed(chunk)
+        await pane.advance()
+
+    assert log.attempts >= 3, "each flush attempted its send"
+    log_markers = [text for text, is_marker in pane._lines
+                   if is_marker and "log send failed" in text]
+    assert len(log_markers) == 1, (
+        f"expected exactly one 'log send failed' marker over a streak; "
+        f"got {len(log_markers)}: {log_markers}"
+    )
+
+
+class _FlakyThenFineSession:
+    """First send raises; subsequent sends succeed. Models a transient
+    socket blip vs. a persistent down."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.sent: list[object] = []
+
+    async def send(self, msg: object) -> None:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise RuntimeError("socket blip")
+        self.sent.append(msg)
+
+
+async def test_log_send_failure_marker_resets_after_recovery():
+    """The streak flag must clear on the next successful send, so a fresh
+    failure later gets its own marker rather than being silently coalesced
+    with the earlier one."""
+    src = FakeConsoleSource()
+    log = _FlakyThenFineSession()
+    pane = UartPane(
+        source=src, daemon_session=log, channel_id="ch-1", cwd="/tmp/proj",
+        observed_flush_polls=1,
+    )
+    pane.session = await pane.attach()
+
+    src.feed(b"a"); await pane.advance()   # attempt 1: raises, marker
+    src.feed(b"b"); await pane.advance()   # attempt 2: succeeds, flag clears
+
+    # Now break it again -- a subsequent failure must be able to produce
+    # its OWN marker; if the flag never cleared, the second streak would
+    # be silent.
+    async def fail_again(msg):
+        raise RuntimeError("socket closed again")
+    log.send = fail_again  # type: ignore[assignment]
+    src.feed(b"c"); await pane.advance()
+
+    log_markers = [text for text, is_marker in pane._lines
+                   if is_marker and "log send failed" in text]
+    assert len(log_markers) == 2, (
+        f"a recovered-then-failed streak must produce two markers; "
+        f"got {len(log_markers)}"
+    )
