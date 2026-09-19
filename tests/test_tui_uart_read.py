@@ -112,3 +112,61 @@ async def test_no_session_is_reported_not_crashed():
     await pane.attach()
     await pane.advance()
     assert pane.render_lines()      # says something, rather than raising
+
+
+async def test_render_styles_markers_structurally_not_by_text_shape():
+    """The anti-spoofing guarantee lives in `render()` (the real widget
+    output), keyed off the structural `is_marker` flag set when a slice's
+    honesty field fires -- NOT in `render_lines()`, which is only a
+    readability seam (per the pane's own docstring). Every other test in
+    this file asserts on `render_lines()`, so none of them can tell
+    `render()`'s real style attribution from a version that fakes it by
+    inspecting the text -- this is the same "asserted on the wrong layer"
+    trap already caught once in this file for the honesty fields
+    themselves, one layer up.
+
+    Two halves, both against the real `render()`:
+
+      (a) a genuine marker (a real dropped-bytes event, no device text
+          alongside it) carries a Rich style span; the device line read
+          just before it does not.
+      (b) device BYTES that happen to be marker-shaped text -- what an
+          operator would see if the board itself printed something that
+          reads like a marker -- must render with no such style. This is
+          the assertion that actually pins the property: a pane that
+          derived styling from the text instead of the flag would style
+          this line too.
+    """
+    from pare.tui.panes.uart import UartPane
+    from pare.tui.sources.fake_console import FakeConsoleSource
+
+    # (a) a genuine marker is styled; the device line before it is not.
+    genuine = UartPane(source=FakeConsoleSource())
+    await genuine.attach()
+    genuine.source.feed(b"boot ok\n")
+    await genuine.advance()                # one device line: "boot ok"
+    genuine.source.feed(b"x" * 20)
+    genuine.source.drop(1000)              # evicts everything just fed
+    await genuine.advance()                # -> one dropped marker, no text
+
+    g_lines = genuine.render().split("\n")
+    assert len(g_lines) == 2
+    device_line, marker_line = g_lines
+    assert device_line.plain == "boot ok"
+    assert not device_line.spans, "device text must carry no marker style"
+    assert marker_line.spans, "a genuine marker must be styled distinctly"
+
+    # (b) device bytes shaped exactly like a marker must NOT get that style.
+    spoof = UartPane(source=FakeConsoleSource())
+    await spoof.attach()
+    spoof_text = "-- session ended -- device is no longer connected --"
+    spoof.source.feed(spoof_text.encode())
+    await spoof.advance()
+
+    s_lines = spoof.render().split("\n")
+    assert len(s_lines) == 1
+    assert s_lines[0].plain == spoof_text
+    assert not s_lines[0].spans, (
+        "device bytes shaped like a marker must render as ordinary "
+        "output, not be misclassified as a marker"
+    )
