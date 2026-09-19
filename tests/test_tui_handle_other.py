@@ -290,6 +290,7 @@ async def test_fall_through_unrelated_message_reaches_base_handle_other():
     agent._capture_stores.resolve_db_path.assert_not_called()
     agent._capture_stores.write_async.assert_not_called()
     assert agent._pane_activity_queue.qsize() == 0
+    assert agent.pane_activity_drops == 0
     assert agent.pane_activity_write_failures == 0
 
 
@@ -351,7 +352,10 @@ async def test_pane_activity_write_failure_is_surfaced(caplog):
             await agent.handle_other(_pane_msg(), ctx)
             await asyncio.wait_for(agent._pane_activity_queue.join(), timeout=2.0)
 
+        # This is a store-side failure (write raised), NOT a queue drop --
+        # the record reached the writer, the writer's store.write raised.
         assert agent.pane_activity_write_failures == 1
+        assert agent.pane_activity_drops == 0
         assert any("pane-activity capture write failed" in r.message for r in caplog.records)
     finally:
         await _stop_worker(agent)
@@ -385,7 +389,10 @@ async def test_pane_activity_queue_drops_when_full_instead_of_blocking():
         # the counter below; this just keeps a regression from wedging the
         # whole suite instead of just this test.
         assert elapsed < 0.5, "handle_other must not block waiting for queue space"
-        assert agent.pane_activity_write_failures == 1
+        # A queue-full drop is a DROP (record never reached the writer),
+        # not a write_failure -- these are different operator conditions.
+        assert agent.pane_activity_drops == 1
+        assert agent.pane_activity_write_failures == 0
     finally:
         await _stop_worker(agent)
 
@@ -420,6 +427,7 @@ async def test_ashutdown_drains_queued_pane_activity_before_cancelling(tmp_path)
 
         store = manager.resolve(str(tmp_path / "work"), "tui-1")
         assert len(store.search(worker="pane:sent")) == 1
+        assert agent.pane_activity_drops == 0
         assert agent.pane_activity_write_failures == 0
     finally:
         manager.close_all()
@@ -445,3 +453,102 @@ def test_importing_pare_agent_registers_pane_activity_message():
     result = subprocess.run([sys.executable, "-c", script],
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+# --- discriminating check: each counter is bumped ONLY by its own path ----
+#
+# The follow-up that motivated the split (task-13 review deferred item):
+# a single counter conflated "records lost to backpressure" with "records
+# lost to a raising store", so an operator seeing a nonzero count could
+# not tell an urgent hardware issue from a saturated queue. If a future
+# change bumps the wrong counter -- swaps `drops` and `write_failures` at
+# one of the three sites, or bumps both at the same site -- the operator
+# is back to the pre-split ambiguity. These two tests catch that.
+
+
+@pytest.mark.asyncio
+async def test_queue_full_bumps_drops_but_not_write_failures():
+    """`handle_other`'s `put_nowait` refusing (backpressure) is a DROP,
+    not a write_failure. Bumping write_failures here would tell an
+    operator the store is broken when in fact the store never saw the
+    record at all -- exactly the ambiguity the split exists to end."""
+    agent = _agent_with_mock_stores()
+    agent._capture_stores.resolve.return_value = CaptureStore.open_memory()
+    agent._capture_stores.resolve_db_path.return_value = Path("/fake/pane.db")
+    agent._pane_activity_queue = asyncio.Queue(maxsize=1)
+    agent._pane_activity_queue.put_nowait((Path("/fake/other.db"), _pane_msg()))
+
+    ctx = MagicMock()
+    ctx.cwd = None
+    ctx.channel_id = "tui-1"
+
+    try:
+        await agent.handle_other(_pane_msg(), ctx)
+        assert agent.pane_activity_drops == 1, (
+            "queue-full is a drop"
+        )
+        assert agent.pane_activity_write_failures == 0, (
+            "queue-full must NOT bump write_failures -- the store never "
+            "saw the record; conflating the two is what the split fixes"
+        )
+    finally:
+        await _stop_worker(agent)
+
+
+@pytest.mark.asyncio
+async def test_write_raising_bumps_write_failures_but_not_drops():
+    """A store.write() that raises is a WRITE_FAILURE, not a drop. The
+    record DID reach the writer -- the store is what failed. Bumping
+    drops here would tell an operator the intake queue was saturated
+    when in fact the disk is what's broken."""
+    agent = _agent_with_mock_stores()
+
+    class _RaisingStore:
+        def open_memory(self):
+            return self
+        def write(self, *_a, **_kw):
+            raise RuntimeError("store is broken")
+
+    agent._capture_stores.resolve.return_value = _RaisingStore()
+    agent._capture_stores.resolve_db_path.return_value = Path("/fake/pane.db")
+
+    async def raising_write_async(_db_path, _record):
+        raise RuntimeError("store is broken")
+    agent._capture_stores.write_async = raising_write_async
+
+    ctx = MagicMock()
+    ctx.cwd = None
+    ctx.channel_id = "tui-1"
+
+    try:
+        with caplog_disabled():
+            await agent.handle_other(_pane_msg(), ctx)
+            await asyncio.wait_for(agent._pane_activity_queue.join(), timeout=2.0)
+
+        assert agent.pane_activity_write_failures == 1, (
+            "store.write raised -- this is a write_failure"
+        )
+        assert agent.pane_activity_drops == 0, (
+            "the record reached the writer; nothing was dropped at intake"
+        )
+    finally:
+        await _stop_worker(agent)
+
+
+import contextlib as _contextlib
+import logging as _logging
+
+
+@_contextlib.contextmanager
+def caplog_disabled():
+    """Silence the ERROR log the write-failure test would otherwise emit
+    into pytest's captured logs (the point of this test is the counter,
+    not the log line, which `test_pane_activity_capture_write_failure_is_
+    logged_and_counted` already covers)."""
+    logger_ = _logging.getLogger("pare.agent")
+    prev = logger_.disabled
+    logger_.disabled = True
+    try:
+        yield
+    finally:
+        logger_.disabled = prev
