@@ -12,6 +12,7 @@ Extension points:
 from __future__ import annotations
 
 import asyncio
+import base64
 from contextlib import suppress
 import json
 import logging
@@ -45,8 +46,18 @@ from pare.commands.frida_views import Devices, Ps, Apps, Sessions
 from pare.commands.frida_actions import Select, Attach, Detach
 from pare.commands.mitm import Mitm
 from pare.commands.worker import Worker
-from agent_core.capture import CaptureLayer, CaptureStore, SearchCapture, ReadCapture
+from agent_core.capture import CaptureLayer, CaptureRecord, CaptureStore, SearchCapture, ReadCapture
 from pare.capture_store import CaptureStoreManager
+# Importing this is what registers PaneActivityMessage with agent_core's
+# decode_message/encode_message registry (pare/protocol.py's @register_message
+# only runs when the module is imported — see agent_core/protocol/transport.py
+# register_message()/decode_message()). pare/agent.py is imported by every
+# entry point (pare/__main__.py) and virtually every test, and handle_other
+# below needs the class itself for its isinstance() check, so this import
+# cannot be dropped by a refactor without also breaking handle_other outright
+# -- unlike a bare `import pare.protocol` for its side effect alone, which a
+# later cleanup pass could mistake for dead code and delete.
+from pare.protocol import PaneActivityMessage
 from pare.handback import (
     COMMIT_TOOLS, NAME_SEARCH_TOOLS, POLL_TOOLS,
     POLL_FAILURE_LIMIT, is_worker_failure, poll_failure_question,
@@ -90,6 +101,30 @@ class PareAgent(Agent):
     disabled_builtins = frozenset({
         "cat", "head", "tail", "ls", "grep", "find", "read_lines",
     })
+
+    # Bound on the pane-activity hand-off queue (see handle_other / req. R3.2).
+    # A wedged store writer (stalled disk, contended flock) must not let
+    # queued activity grow memory without limit. Chosen generously above any
+    # realistic operator typing/output burst; sized in messages, not bytes,
+    # since a record's body is itself already bounded by the device protocol.
+    _PANE_ACTIVITY_QUEUE_MAXSIZE = 256
+
+    def __init__(self) -> None:
+        super().__init__()
+        # asyncio.Queue() does not require a running loop to construct (it
+        # binds lazily on first await), so this is safe from a bare
+        # PareAgent() built outside an event loop, e.g. in unit tests that
+        # skip setup()/astartup(). The consumer task itself DOES need a
+        # running loop and is started lazily -- see _ensure_pane_activity_worker.
+        self._pane_activity_queue: asyncio.Queue = asyncio.Queue(
+            maxsize=self._PANE_ACTIVITY_QUEUE_MAXSIZE)
+        self._pane_activity_task: asyncio.Task | None = None
+        # Observable failure surface for req. R4 / spec requirement 5: a
+        # write (or a malformed record) that raises is never silent. Counted
+        # here and logged in _pane_activity_worker so the TUI (a later task)
+        # has something to poll/display instead of the failure vanishing
+        # into a background task no one awaits.
+        self.pane_activity_write_failures = 0
 
     @property
     def capture_store(self) -> CaptureStore | None:
@@ -209,6 +244,11 @@ class PareAgent(Agent):
             if self.config.arcticbase_url else None)
         self._sweep_task = asyncio.create_task(
             self._sweep_loop(), name="pare-sweep-heartbeat")
+        # Started here for the same reason as _sweep_task above (needs a
+        # running loop that will outlive this call). handle_other also calls
+        # this lazily on first use, so a bare PareAgent() in a unit test that
+        # skips astartup() still gets a working consumer.
+        self._ensure_pane_activity_worker()
 
     async def _sweep_loop(self) -> None:
         # Sweep FIRST, then sleep. Sleeping first meant a freshly started daemon
@@ -296,6 +336,20 @@ class PareAgent(Agent):
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+            # Unlike the sweep task, cancelling this one outright would
+            # silently drop whatever pane activity is still queued (up to
+            # _PANE_ACTIVITY_QUEUE_MAXSIZE records, already accepted from a
+            # connection that has moved on) -- exactly the silent loss the
+            # bound on the queue exists to make visible instead of hide.
+            # Give the worker a bounded window to actually finish draining
+            # first; only cancel (and count/log whatever didn't make it) once
+            # that window is up.
+            await self._drain_pane_activity_queue(timeout=5.0)
+            pane_task = getattr(self, "_pane_activity_task", None)
+            if pane_task is not None and not pane_task.done():
+                pane_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await pane_task
             if self.worker_manager is not None:
                 # Belt and braces: harmless if PARE never started it, and
                 # correct if some other path did.
@@ -323,6 +377,156 @@ class PareAgent(Agent):
             pb.render_scratchpad(ctx.channel_id),
             pb.render_commands_catalog(),
         ]))
+
+    async def _drain_pane_activity_queue(self, timeout: float) -> None:
+        """Give _pane_activity_worker up to `timeout` seconds to finish
+        whatever is already queued, called from ashutdown before the worker
+        task is cancelled.
+
+        ashutdown cancelling that task outright -- no drain, no log -- was
+        the bug: up to _PANE_ACTIVITY_QUEUE_MAXSIZE already-accepted records
+        would vanish with no counter bump and no message, the exact silent
+        loss the bound on the queue exists to make visible. If the window
+        expires with records still queued, count and log them here instead
+        (req. 5): the operator loses the tail of the log on a slow shutdown,
+        but is told so rather than finding out never.
+        """
+        queue_ = getattr(self, "_pane_activity_queue", None)
+        task = getattr(self, "_pane_activity_task", None)
+        if queue_ is None or task is None or task.done():
+            return
+        # queue_.join() also covers an item already dequeued by the worker
+        # but not yet task_done() (mid-write) -- not just what qsize() can
+        # see -- so no qsize()==0 short-circuit here: an empty, fully-drained
+        # queue makes join() return immediately anyway, at effectively no cost.
+        pending_at_start = queue_.qsize()
+        try:
+            await asyncio.wait_for(queue_.join(), timeout=timeout)
+        except asyncio.TimeoutError:
+            dropped = queue_.qsize()
+            self.pane_activity_write_failures += dropped
+            logger.warning(
+                "shutdown: %d pane-activity record(s) still queued after "
+                "%.1fs drain window (had %d queued at shutdown); dropping",
+                dropped, timeout, pending_at_start)
+
+    def _ensure_pane_activity_worker(self) -> None:
+        """Start the queue consumer if it isn't already running.
+
+        Called from astartup() (normal daemon boot) AND lazily from
+        handle_other (so a unit test that builds a bare PareAgent() without
+        astartup() still gets a working consumer). Idempotent: safe to call
+        from both places, and safe to call again after the task somehow died
+        (task.done()), which would otherwise silently stop draining the queue.
+        """
+        if self._pane_activity_task is None or self._pane_activity_task.done():
+            self._pane_activity_task = asyncio.create_task(
+                self._pane_activity_worker(), name="pare-pane-activity-writer")
+
+    async def _pane_activity_worker(self) -> None:
+        """Drain the queue handle_other feeds and hand each record to
+        CaptureStoreManager.write_async, which does the actual (blocking,
+        sqlite) write on its own dedicated thread -- not on this task, and
+        not on the event loop at all.
+
+        This task exists to bound how much pane activity can be in flight
+        (see handle_other's queue) -- it is NOT what makes the write
+        non-blocking. That guarantee comes from write_async awaiting a
+        Future resolved by a background thread (a real asyncio suspension
+        point), which is what lets THIS task's own await yield the event
+        loop back to the daemon's read loop while the write is in progress.
+        An earlier version of this task called store.write(record) directly
+        here; that only moved the stall from handle_other to this task, since
+        both run on the same event loop and a synchronous sqlite call blocks
+        whichever of them is running it -- see task-3-report.md's fix-round
+        1 writeup and tests/test_tui_handle_other.py's
+        test_slow_pane_write_does_not_stall_approval_routing_after_park.
+        """
+        while True:
+            db_path, msg = await self._pane_activity_queue.get()
+            try:
+                await self._persist_pane_activity(db_path, msg)
+            except Exception:
+                # req. 5 / spec R4: a write that fails must not be silent.
+                # Logged here (not swallowed) and counted on the agent
+                # instance so the app has something durable to check --
+                # a background task's exception otherwise vanishes the
+                # moment nothing awaits it.
+                self.pane_activity_write_failures += 1
+                logger.exception(
+                    "pane-activity capture write failed (session=%s source=%s)",
+                    getattr(msg, "session", "?"), getattr(msg, "source", "?"))
+            finally:
+                self._pane_activity_queue.task_done()
+
+    async def _persist_pane_activity(self, db_path: Path, msg: PaneActivityMessage) -> None:
+        """Decode one PaneActivityMessage into a CaptureRecord and write it
+        via CaptureStoreManager.write_async (its own thread, its own sqlite
+        connection -- see that method's docstring for why). Separated from
+        the loop above only so a test can monkeypatch this one seam (e.g. to
+        inject an artificial delay simulating a slow disk) without
+        reimplementing the queue-draining loop."""
+        raw = base64.b64decode(msg.data_b64)
+        record = CaptureRecord(
+            # "pane:<kind>" groups sent vs. observed activity distinctly in
+            # Snapshot/SearchCapture listings, matching how other CaptureRecord
+            # producers use `worker` as the grouping facet (see
+            # tests/test_snapshot_command.py's worker="frida").
+            worker=f"pane:{msg.kind}",
+            tool=msg.source,
+            session_id=msg.session,
+            launch_ts=getattr(self, "_launch_ts", 0.0),
+            summary=(f"{msg.kind} {len(raw)}B from {msg.source} "
+                     f"[{msg.cursor_start}:{msg.cursor_end}]"),
+            body=raw.decode("utf-8", errors="replace"),
+            rows=1,
+            addrs=[],
+        )
+        await self._capture_stores.write_async(db_path, record)
+
+    async def handle_other(self, msg: object, ctx: HandlerContext) -> None:
+        """Route PaneActivityMessage into the capture store without blocking
+        the daemon's read loop; anything else falls through to the framework
+        default (agent_core/agent.py:147's no-op) so other message types are
+        never swallowed here (req. 3) -- there is exactly one non-PARE-specific
+        thing routed through handle_other today (nothing; PAL's approval
+        routing happens earlier, at daemon.py:128-129, before handle_other is
+        ever reached), but the fall-through still matters for whatever
+        reaches this default next.
+
+        Synchronous by construction: the only work done inline is resolving
+        the store (req. 4, identical to handle_chat/handle_command -- this
+        also has the side effect of taking the project lock / writing
+        .gitignore on first touch, same as chat/command) and a non-blocking
+        queue put. The actual (blocking, sqlite) write happens later, off of
+        BOTH this call and the daemon's event loop entirely -- see
+        CaptureStoreManager.write_async and _pane_activity_worker above.
+        """
+        if not isinstance(msg, PaneActivityMessage):
+            await super().handle_other(msg, ctx)
+            return
+
+        with self._bind_store(ctx):
+            store = self.capture_store
+        if store is None:
+            return
+        db_path = self._capture_stores.resolve_db_path(
+            getattr(ctx, "cwd", None), ctx.channel_id)
+
+        self._ensure_pane_activity_worker()
+        try:
+            self._pane_activity_queue.put_nowait((db_path, msg))
+        except asyncio.QueueFull:
+            # Bounded queue, deliberately: dropped, not blocked. Blocking
+            # put() here would put handle_other right back to awaiting the
+            # wedged writer it exists to avoid -- the exact stall req. 1
+            # forbids. A drop is logged and counted (req. 5) rather than
+            # silently discarded.
+            self.pane_activity_write_failures += 1
+            logger.warning(
+                "pane-activity queue full (maxsize=%d); dropping record for "
+                "session=%s source=%s",
+                self._pane_activity_queue.maxsize, msg.session, msg.source)
 
     async def handle_command(
         self, msg: CommandMessage, ctx: HandlerContext,
