@@ -9,14 +9,32 @@ Prior context: [`docs/superpowers/plans/2026-09-18-pare-tui.md`](../plans/2026-0
 
 ---
 
+## Correction 2026-09-19 (post-review, pre-plan)
+
+An earlier draft claimed "PARE needs zero source changes" and that the async
+ripple was contained to agent_core. The `writing-plans` self-review surfaced
+that this was wrong: `store.get` also becomes async (D4), and it has
+production callers in PARE that I did not inventory during brainstorming.
+Corrected below in D1/D4 and in §3. Additional gap: `CaptureStore.open_memory()`
+uses `sqlite3.connect(":memory:")`, and an in-memory sqlite database exists
+only on the connection that opened it — a writer thread with its own
+connection would get a different, empty database. The design has to skip
+the writer thread for in-memory stores (writes run inline, synchronously).
+Added as §2.5.
+
+The user asked to log this correction plainly rather than silently patch — the
+instinct to read the code before signing off was earned; the spec was
+speculating on a blast radius it hadn't proven. Every citation below is now
+verified against the real files.
+
 ## 1. Decisions
 
 | | Decision | Why |
 |---|---|---|
-| **D1** | `CaptureLayer.maybe_substitute` becomes `async def`. | One production caller (`risk_pool.py:435`), already inside `async def call_tool` — a one-word `await` change. No other consumers: PAL doesn't use CaptureLayer, and PARE never calls `maybe_substitute` directly (it constructs `CaptureLayer` at `pare/agent.py:200` and hands it to `RiskAwareToolPool` at `:211`). The interface reads honestly — a method that does I/O is async. |
+| **D1** | `CaptureLayer.maybe_substitute` becomes `async def`. | One production caller (`risk_pool.py:435`), already inside `async def call_tool` — a one-word `await` change. PAL doesn't use CaptureLayer at all. PARE constructs `CaptureLayer` at `pare/agent.py:200` and hands it to `RiskAwareToolPool` at `:211` but never calls `maybe_substitute` directly — so this specific method's async ripple stops at agent_core. **D4's ripple is different** — see the D4 row. |
 | **D2** | `CaptureStore` owns a dedicated writer thread, one per store. | sqlite connections are thread-affine (`check_same_thread=True`; empirically confirmed during Task 3). A thread that opens *and closes* its connection produces no `ProgrammingError`. One writer per store means one connection dedicated to writes on that db file, coordinating with read connections through WAL. |
 | **D3** | PARE's `CaptureStoreManager.write_async` becomes a thin wrapper delegating to `CaptureStore.write`. Task 3's writer-thread code is removed. | One writer per store means Option A's two-writer arrangement (agent_core's + PARE's) is unnecessary. The Task 3 pattern was correct at the time; its correct home is beside the store it writes to. |
-| **D4** | `store.get(ref)` becomes `async def` and awaits any pending write for that specific ref. | Ordering property (write-before-read of a just-issued ref) becomes explicit and enforceable rather than a latency assumption. Bounded wait: only the write of *that* ref, not the queue. Common case (LLM round-trip elapsed) the write is long done and there's nothing to await. |
+| **D4** | `store.get(ref)` becomes `async def` and awaits any pending write for that specific ref. | Ordering property (write-before-read of a just-issued ref) becomes explicit and enforceable rather than a latency assumption. Bounded wait: only the write of *that* ref, not the queue. Common case (LLM round-trip elapsed) the write is long done and there's nothing to await. **Ripple:** `store.get` has 4 non-test call sites — 1 in agent_core (`capture/tools.py:63`, `ReadCapture.run`, already async) and 3 in PARE. Two PARE call sites are already inside `async def` (`snapshot.py:45,48,58` inside `Snapshot.run`; `agent.py:771` inside `handle_chat`), so they add `await`. One is `pare/handback.py:105` `_rows_from` (sync), whose sole caller `candidate_classes` (`:127`) becomes async too; its only production caller is `handle_chat` (`agent.py:771`), already async. Test-side: `tests/test_handback.py` has ~5 sync test cases calling `candidate_classes` that convert to `async def` + `await`. |
 | **D5** | Writer-queue is unbounded. | The bounded queue in PARE Task 3 was for a background daemon logger where a wedged writer could pile up records forever. Here every `store.write` is on a turn's critical path; if the writer is wedged, one more record is not the problem. Unbounded means no `QueueFull` path to reason about. |
 | **D6** | `agent_core` version bumps 1.10.0 → 1.11.0. | Interface change (sync → async on two public methods). Minor bump is honest — it's a break for anyone calling `maybe_substitute` or `store.get` sync, but the only such consumer inside this ecosystem is agent_core's own test suite. |
 
@@ -63,7 +81,24 @@ Signatures and semantics, not code — code written into prose is unexecuted and
 - If the join times out, logs a warning naming the count of unflushed items. Records are lost; that is honest at shutdown.
 - Closes the writer's owned connection *on the writer thread's `finally`*, never in the caller.
 
-### 2.5 Failure paths (spec R4 spirit — no silent losses)
+### 2.5 In-memory stores
+
+`CaptureStore.open_memory()` uses `sqlite3.connect(":memory:")`. In-memory
+databases exist only on the connection that opened them — a separate writer
+thread opening its own `sqlite3.connect(":memory:")` would get a different,
+empty database, and every test using `open_memory` would break silently.
+
+So `open_memory` does not start a writer thread. Its `write` runs the sqlite
+insert body **inline on the caller's thread** and returns an already-completed
+future for pending-writes bookkeeping (or skips it — no other thread will
+race). The `async def write` signature stays uniform with disk-backed stores
+so callers cannot tell; the difference is contained inside the store.
+
+The alternative (shared-cache URI, `file::memory:?cache=shared&uri=1`) works
+but adds complexity for zero real gain — `open_memory` exists as a test
+substrate, and its callers do not benefit from off-loop writes.
+
+### 2.6 Failure paths (spec R4 spirit — no silent losses)
 
 | Path | What happens today | What must happen |
 |---|---|---|
@@ -80,21 +115,29 @@ Signatures and semantics, not code — code written into prose is unexecuted and
 1. `agent_core/capture/store.py`: add writer thread + pending-writes map to `CaptureStore`; make `write` and `get` async; keep the sync insert body as the writer thread's inline work.
 2. `agent_core/capture/layer.py`: `maybe_substitute` → `async def`, `await`s `store.write`.
 3. `agent_core/workers/risk_pool.py:435`: prepend `await` to the `maybe_substitute` call. Verify nothing else in `_execute_and_audit` broke.
-4. `agent_core/tests/capture/test_layer.py`: rewrite ~10 sites to `async def` + `await`. Mechanical.
-5. `agent_core/tests/capture/test_store.py` / `test_store_disk.py` / `test_retention.py` / `test_search.py`: audit — direct `store.write(...)` calls in these tests need `await` (or a sync test helper if the test itself does not need to be async).
-6. New tests in `test_store.py` (or a new `test_store_async.py`):
+4. `agent_core/capture/tools.py:63`: `ReadCapture.run` (already `async def`) calls `store.get(ref)` — becomes `await store.get(ref)`. One-line change. **Correction 2026-09-19:** this caller was missed in the original draft; adding it here.
+5. `agent_core/tests/capture/test_layer.py`: rewrite ~10 sites to `async def` + `await`. Mechanical.
+6. `agent_core/tests/capture/test_store.py` / `test_store_disk.py` / `test_retention.py` / `test_search.py`: audit — direct `store.write(...)` and `store.get(...)` calls in these tests need `await` (or a sync test helper if the test itself does not need to be async). `store.get` sites verified: `test_store_disk.py:15`, `test_store.py:17`, `test_layer.py:60`, `test_retention.py:16,28,29,39,40`.
+7. New tests in `test_store.py` (or a new `test_store_async.py`):
    - `write` returns a ref that a concurrent `get(ref)` sees after the writer finishes.
    - **The critical one:** an interleaved `get(ref)` before the write commits `await`s the pending-writes future rather than returning `None`. Verify failing against a `get` that reads sqlite directly with no pending-writes check. This is the discriminating test — a version of `get` that doesn't await pending writes returns `None` here and lies to the model as "expired capture".
    - A `write` whose writer raises propagates to a subsequent `get(ref)`.
    - `close()` drains pending writes within the bound and warns past it.
-7. `agent_core/CHANGELOG.md` + version bump to 1.11.0.
+   - `open_memory` writes and reads inline without starting a writer thread — verified by asserting the store has no writer thread attribute (or equivalent structural check) after `write`.
+8. `agent_core/CHANGELOG.md` + version bump to 1.11.0.
 
 **PARE PR (second, consumes agent_core 1.11.0):**
 1. Pin `agent_core @ v1.11.0` in `pyproject.toml`.
 2. `pare/capture_store.py`: remove the Task 3 writer thread; `CaptureStoreManager.write_async` becomes a wrapper: `await store.write(record)`. The per-project `daemon.lock` flock (`capture_store.py:98-105`) stays — it is orthogonal, guards against a second daemon on the same project.
 3. `PareAgent._pane_activity_worker` (`pare/agent.py:450` region): the worker now `await`s `_capture_stores.write_async` which awaits `store.write`. `pane_activity_write_failures` counter behavior unchanged: raised exceptions bump it, queue-full-at-intake bumps `pane_activity_drops` (unchanged), shutdown-drain-timeout bumps `pane_activity_drops` (unchanged; the underlying drain is now `store.close`'s but the counter is bumped from the same manager-level wrapper).
-4. Suite must be green: **475 passed / 3 skipped** baseline (post PR #70) plus whatever counter-tests move around. Per CLAUDE.md: consumer-suite gate is the release condition, not an aspiration.
-5. Remove now-redundant Task 3 tests (the writer-thread-internals ones); keep the ashutdown-drain and QueueFull semantics tests — the behaviour is still contractual, just implemented downstream now.
+4. **`store.get`'s async ripple (correction 2026-09-19):**
+   - `pare/handback.py:105` `_rows_from(result, capture_store) -> list` becomes `async def`; the `capture_store.get(ref)` call at `:116` gains `await`.
+   - `pare/handback.py:127` `candidate_classes(result, pattern, *, capture_store=None)` becomes `async def` (it awaits `_rows_from`).
+   - `pare/agent.py:771` — `candidate_classes(result, pat, capture_store=self.capture_store)` gains `await`. Already inside `async def handle_chat`.
+   - `pare/commands/snapshot.py:45, 48, 58` — three `store.get(...)` calls inside `async def Snapshot.run` gain `await`. `_render` (`:61`) stays sync — it takes a resolved `row`, not the store.
+   - `tests/test_handback.py` — every test calling `candidate_classes` converts to `async def` + `await`. ~5 sites, mechanical, and `asyncio_mode = "auto"` in `pyproject.toml` means no decorator is needed.
+5. Suite must be green: **475 passed / 3 skipped** baseline (post PR #70) plus whatever counter-tests move around. Per CLAUDE.md: consumer-suite gate is the release condition, not an aspiration.
+6. Remove now-redundant Task 3 tests (the writer-thread-internals ones); keep the ashutdown-drain and QueueFull semantics tests — the behaviour is still contractual, just implemented downstream now.
 
 **Order matters:** agent_core PR merges + tag first. PARE PR consumes the tag. Not the other way around. A PARE PR pinning an unreleased agent_core version would fail CI at install time.
 
