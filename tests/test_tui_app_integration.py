@@ -108,3 +108,41 @@ async def test_a_bare_slash_is_not_a_command():
     session = StubSession()
     await parse_input(session, "/")
     assert session.sent == [] or type(session.sent[0]).__name__ == "ChatMessage"
+
+
+async def test_send_approval_response_survives_a_dead_socket():
+    """Fix round 1, Important finding: the daemon can die during the window
+    an operator spends deciding on an approval modal. When it does,
+    `_send_approval_response`'s `await self.session.send(response)` hits a
+    dead socket -- and because this runs inside a Textual screen-dismiss
+    callback, an uncaught exception there propagates into
+    `App._handle_exception`, which EXITS THE WHOLE APP mid-conversation
+    (worse than a stuck modal). This must not happen: the failed send is
+    caught, logged, and surfaced in the transcript instead."""
+    from pathlib import Path
+
+    from agent_core.protocol import ToolApprovalResponseMessage
+
+    from pare.tui.app import PareTUI
+
+    class _DeadSession:
+        """A session whose socket has already died: every send raises,
+        exactly what `DaemonConnection.send` does once the connection is
+        gone (agent_core/client.py:53's `assert self.writer is not None`)."""
+
+        async def send(self, msg: object) -> None:
+            raise RuntimeError("socket closed")
+
+    app = PareTUI(Path("/nonexistent/pare.sock"), "chan-1", "/tmp")
+    app.session = _DeadSession()
+    async with app.run_test() as pilot:
+        # If _send_approval_response does not catch the send failure, this
+        # await raises out of the test -- there is no try/except here on
+        # purpose, so a regression shows up as this test failing, not as a
+        # silently-swallowed app crash.
+        await app._send_approval_response(
+            ToolApprovalResponseMessage(proposal_id="p1", approved=True)
+        )
+        await pilot.pause()
+        # The app is still alive and respondable after the failed send.
+        assert app.is_running

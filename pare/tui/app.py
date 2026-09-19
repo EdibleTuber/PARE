@@ -306,8 +306,28 @@ class PareTUI(App):
     async def _send_approval_response(self, response: ToolApprovalResponseMessage) -> None:
         """Route the modal's decision back through the one DaemonSession
         send path (Task 4) -- the modal itself knows nothing about the
-        session."""
-        await self.session.send(response)
+        session.
+
+        Guarded the same way as `on_input_submitted`'s chat send: the daemon
+        can die during the (possibly long) window the operator spends
+        deciding, so `self.session.send` can hit the same dead-socket
+        failure a chat send can. There it only means the message never went
+        out; here an uncaught exception would propagate out of a Textual
+        screen-dismiss callback and through `App._handle_exception`, which
+        EXITS the whole app -- mid-conversation, right as the operator
+        finishes a decision. Catch it, log it, and surface it in the
+        transcript instead of crashing.
+        """
+        try:
+            await self.session.send(response)
+        except Exception as exc:
+            logger.exception("failed to send approval response")
+            try:
+                self.query_one("#transcript", RichLog).write(
+                    f"[approval response not sent: {exc}]"
+                )
+            except Exception:
+                pass
 
 
 def main() -> None:
