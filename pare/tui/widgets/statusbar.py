@@ -2,7 +2,7 @@
 per-pane source health, the active channel id, and the UART cursor.
 
 `render_for` is the plain-text seam tests assert against -- mirroring
-`UartPane.render_lines()`'s pattern in `pare/tui/panes/uart.py` -- and it is
+`UartPane.snapshot_lines()`'s pattern in `pare/tui/panes/uart.py` -- and it is
 deliberately callable with no live App and no mounted widget: see
 `tests/test_tui_app_integration.py::test_status_bar_reflects_source_failure`,
 which constructs a bare `StatusBar()` and calls `render_for` directly against

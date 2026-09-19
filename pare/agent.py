@@ -119,11 +119,31 @@ class PareAgent(Agent):
         self._pane_activity_queue: asyncio.Queue = asyncio.Queue(
             maxsize=self._PANE_ACTIVITY_QUEUE_MAXSIZE)
         self._pane_activity_task: asyncio.Task | None = None
-        # Observable failure surface for req. R4 / spec requirement 5: a
-        # write (or a malformed record) that raises is never silent. Counted
-        # here and logged in _pane_activity_worker so the TUI (a later task)
-        # has something to poll/display instead of the failure vanishing
-        # into a background task no one awaits.
+        # Observable failure surfaces for req. R4 / spec requirement 5: a
+        # write (or a malformed record) that raises is never silent. Split
+        # into two counters (was one) so an operator can tell the two
+        # failure modes apart -- they mean different things and warrant
+        # different responses:
+        #
+        # - pane_activity_drops: the record never reached the store. Either
+        #   the bounded intake queue was full when handle_other tried to
+        #   put_nowait (backpressure -- writer wedged, or queue too small
+        #   for the record rate), or ashutdown's drain window ran out with
+        #   records still queued (shutting down under load, or a stuck
+        #   writer that never made progress). Both are RECORDS LOST -- data
+        #   the operator should have had is gone.
+        #
+        # - pane_activity_write_failures: the record reached the writer but
+        #   the store.write() raised. Disk full, disk read-only, a corrupt
+        #   sqlite file. The data was never persisted, but the failure is
+        #   about the STORE, not backpressure -- the record entered the
+        #   pipeline correctly.
+        #
+        # A shared counter conflated "records I lost because I can't keep
+        # up" with "records I lost because the disk is broken", so the
+        # operator seeing "pane_activity_write_failures = 40" couldn't
+        # tell an urgent hardware issue from a saturated buffer.
+        self.pane_activity_drops = 0
         self.pane_activity_write_failures = 0
 
     @property
@@ -404,7 +424,11 @@ class PareAgent(Agent):
             await asyncio.wait_for(queue_.join(), timeout=timeout)
         except asyncio.TimeoutError:
             dropped = queue_.qsize()
-            self.pane_activity_write_failures += dropped
+            # Records queued but not flushed before the drain window ran
+            # out: RECORDS LOST, not store-write failures. Count as drops
+            # so this shows up separately from a store that's raising --
+            # they mean different things to an operator.
+            self.pane_activity_drops += dropped
             logger.warning(
                 "shutdown: %d pane-activity record(s) still queued after "
                 "%.1fs drain window (had %d queued at shutdown); dropping",
@@ -520,9 +544,10 @@ class PareAgent(Agent):
             # Bounded queue, deliberately: dropped, not blocked. Blocking
             # put() here would put handle_other right back to awaiting the
             # wedged writer it exists to avoid -- the exact stall req. 1
-            # forbids. A drop is logged and counted (req. 5) rather than
-            # silently discarded.
-            self.pane_activity_write_failures += 1
+            # forbids. Counted as a DROP (the record never reached the
+            # writer), not a write_failure -- a saturated intake queue is
+            # a different operator condition from a store that's raising.
+            self.pane_activity_drops += 1
             logger.warning(
                 "pane-activity queue full (maxsize=%d); dropping record for "
                 "session=%s source=%s",

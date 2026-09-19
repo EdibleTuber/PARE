@@ -30,7 +30,7 @@ async def _pane_after(script):
 
 async def test_plain_output_is_rendered():
     pane, _ = await _pane_after(lambda s: s.feed(b"boot ok\n"))
-    assert "boot ok" in "\n".join(pane.render_lines())
+    assert "boot ok" in "\n".join(pane.snapshot_lines())
 
 
 async def test_dropped_bytes_change_the_render():
@@ -55,20 +55,20 @@ async def test_dropped_bytes_change_the_render():
     clean, _ = await _pane_after(lambda s: s.feed(b"boot ok\n"))
     lossy, _ = await _pane_after(
         lambda s: (s.feed(b"XXXXXboot ok\n"), s.drop(5)))
-    assert lossy.render_lines() != clean.render_lines()
+    assert lossy.snapshot_lines() != clean.snapshot_lines()
 
 
 async def test_a_capture_gap_changes_the_render():
     clean, _ = await _pane_after(lambda s: s.feed(b"abcdef"))
     gapped, _ = await _pane_after(
         lambda s: (s.feed(b"abc"), s.gap(at=3), s.feed(b"def")))
-    assert gapped.render_lines() != clean.render_lines()
+    assert gapped.snapshot_lines() != clean.snapshot_lines()
 
 
 async def test_a_dead_session_changes_the_render():
     live, _ = await _pane_after(lambda s: s.feed(b"x"))
     dead, _ = await _pane_after(lambda s: (s.feed(b"x"), s.die()))
-    assert dead.render_lines() != live.render_lines()
+    assert dead.snapshot_lines() != live.snapshot_lines()
 
 
 async def test_a_clamped_read_changes_the_render():
@@ -84,7 +84,7 @@ async def test_a_clamped_read_changes_the_render():
     await unclamped.attach()
     unclamped.source.feed(b"0123")
     await unclamped.advance()
-    assert pane.render_lines() != unclamped.render_lines()
+    assert pane.snapshot_lines() != unclamped.snapshot_lines()
 
 
 async def test_cursor_advances_across_polls_without_repeating_bytes():
@@ -100,7 +100,7 @@ async def test_cursor_advances_across_polls_without_repeating_bytes():
     await pane.advance()
     src.feed(b"BBB")
     await pane.advance()
-    text = "\n".join(pane.render_lines())
+    text = "\n".join(pane.snapshot_lines())
     assert text.count("AAA") == 1
 
 
@@ -111,15 +111,15 @@ async def test_no_session_is_reported_not_crashed():
     pane = UartPane(source=FakeConsoleSource(session=None))
     await pane.attach()
     await pane.advance()
-    assert pane.render_lines()      # says something, rather than raising
+    assert pane.snapshot_lines()      # says something, rather than raising
 
 
 async def test_render_styles_markers_structurally_not_by_text_shape():
     """The anti-spoofing guarantee lives in `render()` (the real widget
     output), keyed off the structural `is_marker` flag set when a slice's
-    honesty field fires -- NOT in `render_lines()`, which is only a
+    honesty field fires -- NOT in `snapshot_lines()`, which is only a
     readability seam (per the pane's own docstring). Every other test in
-    this file asserts on `render_lines()`, so none of them can tell
+    this file asserts on `snapshot_lines()`, so none of them can tell
     `render()`'s real style attribution from a version that fakes it by
     inspecting the text -- this is the same "asserted on the wrong layer"
     trap already caught once in this file for the honesty fields

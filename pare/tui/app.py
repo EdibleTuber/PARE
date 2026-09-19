@@ -12,8 +12,6 @@ from datetime import datetime
 from agent_core.protocol import ToolApprovalRequestMessage, ToolApprovalResponseMessage
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.geometry import Region
-from textual.widget import Widget
 from textual.widgets import Footer, Header, Input, RichLog
 
 from pare.config import load_config
@@ -26,31 +24,6 @@ from pare.tui.widgets.statusbar import StatusBar
 from pare.tui.widgets.transcript import TurnAccumulator, is_turn_end
 
 logger = logging.getLogger(__name__)
-
-
-class _MountableUartPane(UartPane):
-    """Wiring-layer fix for a pre-existing name collision in Task 9's
-    `pare/tui/panes/uart.py`, not touched here: `UartPane.render_lines(self)
-    -> list[str]` is documented there as "plain-text seam for tests", but
-    Textual's `Widget` base class ALREADY defines `render_lines(self, crop:
-    Region) -> list[Strip]` (textual/widget.py) as the real method the
-    compositor calls to paint a mounted widget. `UartPane` unknowingly
-    shadows it. No earlier test caught this because no earlier test mounts
-    a `UartPane` inside a live, compositing `App` -- `test_tui_uart_read.py`
-    and `test_tui_uart_write.py` construct it standalone; `test_tui_pane_dock
-    .py` drives `PaneDock` against a stub `Pane`, never a real `UartPane`.
-    Composing it into `PareTUI` here is what first triggers a real paint
-    pass, which fails with `TypeError: render_lines() takes 1 positional
-    argument but 2 were given` against the unmodified class.
-
-    This restores the compositor's method under Textual's real signature
-    for exactly the instance mounted into this app, without editing Task
-    9's file. `UartPane.render_lines()` (no `crop`) stays exactly as it
-    was for existing tests that call it directly on a bare `UartPane`.
-    """
-
-    def render_lines(self, crop: Region) -> list:
-        return Widget.render_lines(self, crop)
 
 
 def _new_channel_id() -> str:
@@ -172,7 +145,7 @@ class PareTUI(App):
         flushes. Gating on an actually-established connection avoids it
         without touching Task 4's or Task 9's files.
         """
-        return _MountableUartPane(
+        return UartPane(
             source=FakeConsoleSource(),
             channel_id=self.channel_id,
             cwd=self.cwd,

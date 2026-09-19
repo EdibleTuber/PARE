@@ -18,6 +18,7 @@ requires each of those fields make a visible difference on screen.
 from __future__ import annotations
 
 import base64
+import logging
 from typing import Protocol, runtime_checkable
 
 from rich.text import Text
@@ -26,6 +27,8 @@ from pare.protocol import PaneActivityMessage
 from pare.tui.panes.base import Pane
 from pare.tui.sanitize import for_display
 from pare.tui.sources.base import ConsoleSlice, ConsoleSource
+
+logger = logging.getLogger(__name__)
 
 # Provisional per spec R2: the real interval must come from a round-trip
 # measurement against the DEPLOYED worker, and there is no deployed worker
@@ -59,13 +62,13 @@ class UartPane(Pane):
     """A `Pane` that reads UART console output through a `ConsoleSource`
     and renders it alongside honesty markers for what was NOT captured.
 
-    `render_lines()` is the plain-text seam the tests assert against: each
+    `snapshot_lines()` is the plain-text seam the tests assert against: each
     line is either device text (sanitised through `for_display`, never
     decoded raw) or a marker. Markers are tracked separately from text as a
     `(text, is_marker)` pair rather than recognised by pattern-matching the
     string later -- a marker's distinctness in the actual widget (`render`,
     below) comes from a style applied to a flag the device can never set,
-    not from a text prefix a malicious board could also emit. `render_lines`
+    not from a text prefix a malicious board could also emit. `snapshot_lines`
     still gives markers a distinct textual framing for readability in
     tests/logs, but that framing alone is NOT the security boundary; see
     the module report for the caveat that plain-text framing is inherently
@@ -109,6 +112,15 @@ class UartPane(Pane):
         # `_log_activity` a silent no-op rather than a required argument,
         # so none of that existing construction breaks.
         self._daemon_session = daemon_session
+        # A daemon that has died BUT not yet been detached (a window that
+        # closes shortly after when `DaemonSession._read_loop` dispatches
+        # `DaemonDisconnected` and the app calls `_set_pane_daemon_session
+        # (None)`) can still be non-None here while its socket is gone --
+        # so `_daemon_session.send` in `_log_activity` can raise. Mark the
+        # first such failure so the operator sees the log is short; hold
+        # the flag until a subsequent send succeeds, so a persistent
+        # daemon-down streak produces one marker, not one per flush.
+        self._log_send_failure_marked = False
         self._observed_flush_polls = observed_flush_polls
         # (text, is_marker) pairs, oldest first. is_marker is what makes a
         # line visually distinct in `render()` -- it is never derived from
@@ -309,9 +321,23 @@ class UartPane(Pane):
             channel_id=self.channel_id,
             cwd=self.cwd,
         )
-        await self._daemon_session.send(msg)
+        try:
+            await self._daemon_session.send(msg)
+        except Exception as exc:
+            # Task 13 (b) closed: the socket can die between a real daemon
+            # crash and `DaemonDisconnected` reaching the app, and either
+            # caller (`_flush_observed` from a Textual timer, `submit` from
+            # user input) would otherwise raise uncaught here. R4's "not
+            # silent" is met by `logger.exception` plus a visible marker on
+            # the first failure of a streak.
+            logger.exception("pane activity log send failed (kind=%s)", kind)
+            if not self._log_send_failure_marked:
+                self._mark(f"log send failed: {exc}")
+                self._log_send_failure_marked = True
+        else:
+            self._log_send_failure_marked = False
 
-    def render_lines(self) -> list[str]:
+    def snapshot_lines(self) -> list[str]:
         """Plain-text seam for tests: markers get a distinct framing so a
         human (or a diff) can tell them from device text at a glance, but
         see the class docstring -- the real distinctness guarantee is the
