@@ -90,7 +90,7 @@ async def test_failed_write_is_still_logged_and_shown():
     assert any(is_marker for _, is_marker in pane._lines), (
         "a failed write must surface a visible marker in the pane"
     )
-    rendered = "\n".join(pane.render_lines())
+    rendered = "\n".join(pane.snapshot_lines())
     assert "send failed" in rendered
     assert "device gone" in rendered
 

@@ -59,13 +59,13 @@ class UartPane(Pane):
     """A `Pane` that reads UART console output through a `ConsoleSource`
     and renders it alongside honesty markers for what was NOT captured.
 
-    `render_lines()` is the plain-text seam the tests assert against: each
+    `snapshot_lines()` is the plain-text seam the tests assert against: each
     line is either device text (sanitised through `for_display`, never
     decoded raw) or a marker. Markers are tracked separately from text as a
     `(text, is_marker)` pair rather than recognised by pattern-matching the
     string later -- a marker's distinctness in the actual widget (`render`,
     below) comes from a style applied to a flag the device can never set,
-    not from a text prefix a malicious board could also emit. `render_lines`
+    not from a text prefix a malicious board could also emit. `snapshot_lines`
     still gives markers a distinct textual framing for readability in
     tests/logs, but that framing alone is NOT the security boundary; see
     the module report for the caveat that plain-text framing is inherently
@@ -311,7 +311,7 @@ class UartPane(Pane):
         )
         await self._daemon_session.send(msg)
 
-    def render_lines(self) -> list[str]:
+    def snapshot_lines(self) -> list[str]:
         """Plain-text seam for tests: markers get a distinct framing so a
         human (or a diff) can tell them from device text at a glance, but
         see the class docstring -- the real distinctness guarantee is the
