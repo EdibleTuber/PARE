@@ -41,7 +41,17 @@ class _FakeSession:
         self.sent.append(msg)
 
 
-_POLLER_INTERVAL = 1 / 100  # seconds; 100 ticks/sec nominal
+_POLLER_INTERVAL = 1 / 50   # seconds; 50 ticks/sec nominal. Chosen against a
+                            # shared CI runner's scheduling floor (measured
+                            # ~15 ms/tick on GitHub Actions), which cannot
+                            # sustain a 10 ms interval and produced false
+                            # failures on the 0.7-threshold check even
+                            # without any event-loop block. At 20 ms per
+                            # tick the scheduler keeps up nominally, and the
+                            # discrimination still bites: a 100 ms block in
+                            # the 0.3 s measurement window yields 10 ticks
+                            # vs. 15 nominal (67 %) — below the 70 %
+                            # threshold — and a 150 ms block yields 50 %.
 
 
 class _FakePoller(Static):
