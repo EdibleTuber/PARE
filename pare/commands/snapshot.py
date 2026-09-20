@@ -42,10 +42,10 @@ class Snapshot(Command):
             if not recent:
                 yield ResponseMessage(text="nothing captured yet — run an enumerate tool first")
                 return
-            yield ResponseMessage(text=self._render(store.get(recent[0]["ref"]), rest))
+            yield ResponseMessage(text=self._render(await store.get(recent[0]["ref"]), rest))
             return
 
-        row = store.get(sub)
+        row = await store.get(sub)
         if row is None:
             hits = store.search(text=sub, limit=5)
             if not hits:
@@ -55,7 +55,7 @@ class Snapshot(Command):
                 listing = "\n".join(f'  {h["tool"]} [{h["ref"]}]' for h in hits)
                 yield ResponseMessage(text=f"ambiguous '{sub}' — matches:\n{listing}")
                 return
-            row = store.get(hits[0]["ref"])
+            row = await store.get(hits[0]["ref"])
         yield ResponseMessage(text=self._render(row, rest))
 
     def _render(self, row: dict | None, query: str = "") -> str:

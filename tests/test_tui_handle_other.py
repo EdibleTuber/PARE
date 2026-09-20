@@ -139,7 +139,7 @@ async def test_slow_pane_write_does_not_stall_approval_routing():
     async def fake_write_async(db_path, record):
         order.append("write_start")
         await asyncio.sleep(DELAY)          # simulated slow disk
-        real_backing_store.write(record)
+        await real_backing_store.write(record)
         order.append("write_done")
 
     agent = _agent_with_mock_stores()

@@ -768,7 +768,7 @@ class PareAgent(Agent):
                             if tc.name in NAME_SEARCH_TOOLS:
                                 pat = str((tc.arguments or {}).get("pattern", ""))
                                 if pat:
-                                    name_searches[pat] = candidate_classes(
+                                    name_searches[pat] = await candidate_classes(
                                         result, pat, capture_store=self.capture_store)
                         else:
                             # Identical call already returned the same result too many
