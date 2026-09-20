@@ -30,13 +30,12 @@ from pare.tui.sources.base import ConsoleSlice, ConsoleSource
 
 logger = logging.getLogger(__name__)
 
-# Provisional per spec R2: the real interval must come from a round-trip
-# measurement against the DEPLOYED worker, and there is no deployed worker
-# in this plan -- only FakeConsoleSource, an in-memory double with no I/O
-# latency to measure. This number is picked only to be readable while
-# iterating against the fake. Plan B must replace it with a value derived
-# from a measurement, not inherit this one.
-DEFAULT_UART_POLL_INTERVAL = 0.5
+# Measured 2026-09-20 against pare-bench (100.97.133.126) over tailscale0.
+# Median console_read RTT: 12.01ms, p95: 13.37ms (N=100, direct wire).
+# Floor rule (spec §6.2): p95 * 2 = 26.74ms; clamped to the 0.05s reasonableness
+# floor. Interactive ceiling 0.5s. Matches frida's ~50-100ms expected range.
+# Re-measure when the endpoint, tailscale wire type, or transport changes.
+DEFAULT_UART_POLL_INTERVAL = 0.05
 
 # Observed bytes are batched across this many non-empty polls before being
 # flushed as one PaneActivityMessage -- spec S5/req. 3: a message per poll
