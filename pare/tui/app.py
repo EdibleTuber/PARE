@@ -144,9 +144,22 @@ class PareTUI(App):
         `_poll_tick` the first time the pane's observed-output batch
         flushes. Gating on an actually-established connection avoids it
         without touching Task 4's or Task 9's files.
+
+        Setting `PARE_TUI_HARDWARE_ENDPOINT` at launch swaps
+        `FakeConsoleSource` for `McpConsoleSource(endpoint=...)`; unset
+        leaves the fake as the default so existing tests keep passing
+        without modification. Spec:
+        `docs/superpowers/specs/2026-09-20-bench-integration-design.md` §5.1.
         """
+        endpoint = os.environ.get("PARE_TUI_HARDWARE_ENDPOINT")
+        if endpoint:
+            from pare.tui.sources.mcp_console import McpConsoleSource
+
+            source = McpConsoleSource(endpoint=endpoint)
+        else:
+            source = FakeConsoleSource()
         return UartPane(
-            source=FakeConsoleSource(),
+            source=source,
             channel_id=self.channel_id,
             cwd=self.cwd,
             daemon_session=None,
