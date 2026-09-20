@@ -361,6 +361,31 @@ async def test_attach_returns_none_when_no_session_is_open():
             await source.stop()
 
 
+async def test_attach_self_starts_when_caller_did_not_call_start():
+    """The caller path from `PareTUI.compose` -> `_build_uart_pane` builds
+    the source synchronously; the first async hook is `Pane.on_mount` which
+    calls `source.attach()` directly. There is no place in that chain for
+    an `await source.start()`, so attach() self-starts. Without this,
+    launching `pare-tui` against a real deployed worker crashed with
+    `McpConsoleSourceError: McpConsoleSource is not started` (observed
+    2026-09-20 immediately after pare-hardware-mcp #3 merged and the Pi
+    systemd unit came up).
+    """
+    tools, _ = _make_tools(session="sess-live")
+    async with worker_server(tools) as endpoint:
+        source = McpConsoleSource(endpoint)
+        # Deliberately do NOT call source.start() -- this is the exact
+        # path Pane.on_mount runs.
+        try:
+            assert await source.attach() == "sess-live"
+            # And a subsequent call must still work (start() being
+            # idempotent), matching how the pane would then call read().
+            slice_ = await source.read(cursor=0)
+            assert slice_.alive is True
+        finally:
+            await source.stop()
+
+
 # --- bounded stop ------------------------------------------------------------
 
 class _HangingOwnerSource(McpConsoleSource):

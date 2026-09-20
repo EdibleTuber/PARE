@@ -186,6 +186,14 @@ class McpConsoleSource:
 
     # --- ConsoleSource --------------------------------------------------
     async def attach(self) -> str | None:
+        # `Pane.on_mount` calls attach() as its first source interaction,
+        # and the source is constructed synchronously in `PareTUI.compose`
+        # (`pare/tui/app.py:_build_uart_pane`) -- there is no async hook
+        # between construction and this call for the caller to await
+        # start() in, so attach() self-starts. Idempotent: start() returns
+        # immediately if a live owner is already running.
+        if self._client is None:
+            await self.start()
         payload = await self._call("console_status", {})
         session = payload.get("session") if payload.get("open") else None
         self._session = session
