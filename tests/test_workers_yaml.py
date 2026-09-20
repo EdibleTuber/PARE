@@ -46,8 +46,9 @@ def test_stdio_service_workers_autoload():
     don't silently switch off a worker that was deliberately made unconditional.
 
     frida is no longer in this list -- it moved to the laptop and is networked,
-    so the test above governs it now. hardware is excluded because it is
-    declared-but-unbuilt (see test_hardware_is_declared_but_not_autoloaded).
+    so the test above governs it now. hardware is excluded because it is now
+    networked (see test_networked_workers_never_autoload above); the flip
+    landed 2026-09-20 (spec: 2026-09-20-bench-integration-design.md §5).
     """
     reg = _reg()
     for name in ("static", "mitm"):

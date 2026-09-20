@@ -146,3 +146,35 @@ async def test_send_approval_response_survives_a_dead_socket():
         await pilot.pause()
         # The app is still alive and respondable after the failed send.
         assert app.is_running
+
+
+def test_build_uart_pane_defaults_to_fake_when_env_var_unset(monkeypatch):
+    """Unset env var is the default: FakeConsoleSource, unchanged from Task 9.
+    Regression guard against a future change that silently makes the pane
+    require a live Pi endpoint."""
+    from pathlib import Path
+
+    from pare.tui.app import PareTUI
+    from pare.tui.sources.fake_console import FakeConsoleSource
+
+    monkeypatch.delenv("PARE_TUI_HARDWARE_ENDPOINT", raising=False)
+
+    app = PareTUI(Path("/nonexistent/pare.sock"), "chan-1", "/tmp")
+    pane = app._build_uart_pane()
+    assert isinstance(pane.source, FakeConsoleSource)
+
+
+def test_build_uart_pane_uses_mcp_source_when_env_var_set(monkeypatch):
+    """Set env var -> McpConsoleSource(endpoint=<value>). Constructs the
+    source; does NOT attach (no live transport in tests)."""
+    from pathlib import Path
+
+    from pare.tui.app import PareTUI
+    from pare.tui.sources.mcp_console import McpConsoleSource
+
+    monkeypatch.setenv("PARE_TUI_HARDWARE_ENDPOINT", "http://100.97.133.126:9102/mcp")
+
+    app = PareTUI(Path("/nonexistent/pare.sock"), "chan-1", "/tmp")
+    pane = app._build_uart_pane()
+    assert isinstance(pane.source, McpConsoleSource)
+    assert pane.source.endpoint == "http://100.97.133.126:9102/mcp"

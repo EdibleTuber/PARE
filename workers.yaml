@@ -99,17 +99,17 @@ workers:
   # Declared but NOT connected at boot: hardware work is occasional, and its
   # tool schemas cost context in every turn that isn't doing it. Load it when a
   # target actually has hardware in play:  /worker load hardware
-  # The worker itself is still being built (../pare-hardware-mcp), so a load
-  # today reports spawn_failed — which is the honest answer, and visible in
-  # /worker list rather than a silently absent worker.
-  # NOTE: declared as stdio against a local path because pare-hardware-mcp does
-  # not exist yet. It is designed to run on pare-bench (the Pi) as
-  # transport: streamable_http with an endpoint — see the ArcticBase/artifacts
-  # spec. Change both together; a networked worker also needs autoload: false
-  # (already set), connect_timeout, read_timeout and artifact_root.
+  #
+  # Networked hardware worker on pare-bench (100.97.133.126). Systemd unit
+  # /etc/systemd/system/pare-hardware-mcp.service; deploys from a checkout at
+  # /opt/pare/hardware-mcp/ (see pare-hardware-mcp/scripts/bench_deploy.sh).
+  # risk_default remains high -- the tailnet transport does not relax the
+  # model-containment floor; see the block below.
   hardware:
-    command: /mnt/secondary/projects/PARE/.venv/bin/pare-hardware-mcp
-    transport: stdio
+    endpoint: http://100.97.133.126:9102/mcp
+    transport: streamable_http
+    connect_timeout: 20
+    read_timeout: 60
     # FLOOR — raised from medium. RiskAwareToolPool gates only high and
     # critical (risk_pool.py:386), so a medium floor meant any hardware tool
     # that failed to advertise a wire tier — a half-wired dev build, or a
@@ -117,8 +117,9 @@ workers:
     # bypassing every approval surface. A floor of high means the worst case
     # is a prompt, not a silent flash write.
     risk_default: high
-    autoload: false
+    autoload: false        # REQUIRED for networked workers
     capability_tags: [hardware, uart, jtag, glitch]
+    artifact_root: null    # placeholder; wiring is a separate design
 
   # --- apk_re_agents (Streamable HTTP) — disabled until services run + discovery hardened ---
   # unpacker:
