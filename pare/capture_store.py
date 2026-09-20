@@ -94,7 +94,8 @@ class CaptureStoreManager:
         self._locks[pare_dir] = fh  # held for process lifetime
 
     async def write_async(self, db_path: Path, record: CaptureRecord) -> None:
-        """Delegate to the store's own writer thread (agent_core 1.11.0).
+        """Delegate to the store's own writer thread (agent_core 1.11.0),
+        and wait for the write to actually COMMIT before returning.
 
         Task 3's per-manager writer thread is gone: one writer per store now,
         owned by agent_core.CaptureStore, so a manager holding N stores has
@@ -102,11 +103,26 @@ class CaptureStoreManager:
         That's the correct pattern -- a store owns its connection, so the
         thread that writes to it must too. See
         docs/superpowers/specs/2026-09-19-on-loop-capture-write-design.md D3.
+
+        store.write() itself only enqueues the row and returns `ref`
+        immediately (agent_core capture/store.py:191-208) -- it does NOT wait
+        for the writer thread's INSERT to commit. Task 3's contract (spec
+        R4: "a write that fails must not be silent") requires this method to
+        surface a failed write to its caller (_pane_activity_worker's
+        try/except), which only works if this coroutine doesn't return until
+        the commit (or its failure) has actually happened. store.get(ref)
+        awaits exactly that: the pending-writes future for `ref`, which the
+        writer thread resolves (with an exception, if the INSERT raised)
+        once the row is committed (agent_core capture/store.py:210-214). The
+        extra indexed SELECT this costs is cheap relative to a silently
+        dropped write, and none of it blocks the event loop -- the future is
+        set from the writer thread via call_soon_threadsafe.
         """
         store = self._cache.get(db_path)
         if store is None:
             raise RuntimeError(f"write_async before resolve for {db_path}")
-        await store.write(record)
+        ref = await store.write(record)   # returns once enqueued, not once committed
+        await store.get(ref)              # awaits the pending-writes future -> commit (or raises)
 
     def close_all(self) -> None:
         for store in self._cache.values():
