@@ -102,7 +102,7 @@ def _pattern_stem(pattern: str) -> str:
     return p.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
 
 
-def _rows_from(result: str, capture_store) -> list:
+async def _rows_from(result: str, capture_store) -> list:
     try:
         d = json.loads(result)
     except (TypeError, ValueError):
@@ -113,7 +113,7 @@ def _rows_from(result: str, capture_store) -> list:
     if isinstance(d, dict):
         ref = (d.get("captured") or {}).get("ref") or d.get("ref")
     if ref and capture_store is not None:
-        rec = capture_store.get(ref)
+        rec = await capture_store.get(ref)
         if rec and rec.get("body"):
             try:
                 inner = json.loads(rec["body"])
@@ -124,14 +124,14 @@ def _rows_from(result: str, capture_store) -> list:
     return []
 
 
-def candidate_classes(result: str, pattern: str, *, capture_store=None) -> set[str]:
+async def candidate_classes(result: str, pattern: str, *, capture_store=None) -> set[str]:
     """Distinct dotted class names referenced in a grep result whose simple name
     contains `pattern`. Scans L...; tokens across each row (class/insn/match)."""
     out: set[str] = set()
     stem = _pattern_stem(pattern)
     if not stem:            # empty pattern must not match everything
         return out
-    for row in _rows_from(result, capture_store):
+    for row in await _rows_from(result, capture_store):
         blob = json.dumps(row) if not isinstance(row, str) else row
         for tok in _LTOKEN.findall(blob):
             dotted = normalize_class(tok)

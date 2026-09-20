@@ -139,7 +139,7 @@ async def test_slow_pane_write_does_not_stall_approval_routing():
     async def fake_write_async(db_path, record):
         order.append("write_start")
         await asyncio.sleep(DELAY)          # simulated slow disk
-        real_backing_store.write(record)
+        await real_backing_store.write(record)
         order.append("write_done")
 
     agent = _agent_with_mock_stores()
@@ -200,8 +200,9 @@ async def test_slow_pane_write_does_not_stall_approval_routing_after_park(monkey
     line fed. This is what actually exercises whether _pane_activity_worker's
     write is off the event loop.
 
-    The injected delay is a REAL blocking time.sleep on CaptureStore.write
-    (not asyncio.sleep): the bug this test exists to catch is a *synchronous*
+    The injected delay is a REAL blocking time.sleep, run via the store's
+    _pre_write_hook on its writer thread (not asyncio.sleep): the bug this
+    test exists to catch is a *synchronous*
     sqlite call blocking whichever thread runs it. An earlier version of
     _pane_activity_worker called store.write(record) directly on the worker
     task -- deferring the write off handle_other, but not off the event loop,
@@ -217,13 +218,19 @@ async def test_slow_pane_write_does_not_stall_approval_routing_after_park(monkey
     proposal_id, fut = await _register_pending_approval(agent)
 
     DELAY = 0.4
-    real_write = CaptureStore.write
-
-    def slow_write(self, record):
-        time.sleep(DELAY)                   # genuinely blocking -- not asyncio.sleep
-        return real_write(self, record)
-
-    monkeypatch.setattr(CaptureStore, "write", slow_write)
+    # Pre-resolve (and cache) the store the pane message below will write
+    # to, then arm its writer-thread hook -- the seam agent_core 1.11.0
+    # provides for exactly this (agent_core capture/store.py's _writer_loop
+    # calls _pre_write_hook on the WRITER thread, at the top of every insert
+    # iteration). Monkeypatching CaptureStore.write wholesale, as this test
+    # used to do under Task 3's pre-1.11.0 design (when write() itself ran
+    # the blocking sqlite call PARE's own writer thread owned), would instead
+    # run the injected delay on the CALLER's thread/task -- store.write() is
+    # now just the async enqueue method (spec Sec 2.1), and replacing it
+    # entirely bypasses the writer-thread isolation this test exists to
+    # verify, rather than exercising it.
+    store = manager.resolve(str(tmp_path / "work"), "tui-1")
+    store._pre_write_hook = lambda: time.sleep(DELAY)  # genuinely blocking -- not asyncio.sleep
 
     daemon = Daemon(agent)
     reader = asyncio.StreamReader()

@@ -13,9 +13,9 @@ class _Ctx:
     def __init__(self, agent): self.agent = agent
 
 
-def _store():
+async def _store():
     s = CaptureStore.open_memory()
-    s.write(CaptureRecord(worker="frida", tool="enumerate_processes", session_id=None,
+    await s.write(CaptureRecord(worker="frida", tool="enumerate_processes", session_id=None,
                           launch_ts=1.0, summary="2 processes",
                           body=json.dumps([{"pid": 1, "name": "init"}, {"pid": 9, "name": "zygote"}]),
                           rows=2, addrs=[]))
@@ -28,19 +28,19 @@ async def _collect(agen):
 
 @pytest.mark.asyncio
 async def test_snapshot_list_shows_recent_captures():
-    out = await _collect(Snapshot().run("list", _Ctx(_Agent(_store()))))
+    out = await _collect(Snapshot().run("list", _Ctx(_Agent(await _store()))))
     assert "enumerate_processes" in out[0].text
 
 
 @pytest.mark.asyncio
 async def test_snapshot_default_renders_latest_rows():
-    out = await _collect(Snapshot().run("", _Ctx(_Agent(_store()))))
+    out = await _collect(Snapshot().run("", _Ctx(_Agent(await _store()))))
     assert "zygote" in out[0].text and "init" in out[0].text
 
 
 @pytest.mark.asyncio
 async def test_snapshot_query_filters_rows():
-    out = await _collect(Snapshot().run(" zygote", _Ctx(_Agent(_store()))))  # leading space -> sub="", rest="zygote"
+    out = await _collect(Snapshot().run(" zygote", _Ctx(_Agent(await _store()))))  # leading space -> sub="", rest="zygote"
     assert "zygote" in out[0].text and "init" not in out[0].text
 
 
@@ -57,7 +57,7 @@ async def test_snapshot_renders_real_frida_envelope_as_rows():
     unwrap it to per-process rows, not one mangled cell. Regression for the
     infer_rows annotated-list fix."""
     s = CaptureStore.open_memory()
-    s.write(CaptureRecord(
+    await s.write(CaptureRecord(
         worker="frida", tool="enumerate_processes", session_id=None, launch_ts=1.0,
         summary="2 processes",
         body=json.dumps({"summary": "2 processes",

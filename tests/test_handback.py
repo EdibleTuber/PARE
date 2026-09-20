@@ -20,8 +20,8 @@ def test_normalize_class_smali_to_dotted():
     assert normalize_class(f"{PKG}.Foo") == f"{PKG}.Foo"  # dotted passes through
 
 
-def test_candidate_classes_from_referenced_type_not_class_column():
-    got = candidate_classes(_GREP_RESULT, "OMTG_DATAST_001_SQLite")
+async def test_candidate_classes_from_referenced_type_not_class_column():
+    got = await candidate_classes(_GREP_RESULT, "OMTG_DATAST_001_SQLite")
     assert got == {
         f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted",
         f"{PKG}.OMTG_DATAST_001_SQLite_Not_Encrypted",
@@ -30,7 +30,7 @@ def test_candidate_classes_from_referenced_type_not_class_column():
     assert not any("MyActivity" in c for c in got)
 
 
-def test_candidate_classes_matches_qualified_smali_pattern():
+async def test_candidate_classes_matches_qualified_smali_pattern():
     """Live regression (smoke test 1): gemma greps the FULLY-QUALIFIED pattern
     `Lsg/.../OMTG_DATAST_001_SQLite`, not the bare name — which never appeared as a
     substring of a class simple name, so disambiguation silently didn't fire. Every
@@ -45,12 +45,12 @@ def test_candidate_classes_matches_qualified_smali_pattern():
         f"{LPKG}/OMTG_DATAST_001_SQLite;",           # smali-qualified with ;
         f"{PKG}.OMTG_DATAST_001_SQLite",             # dotted-qualified
     ):
-        assert candidate_classes(_GREP_RESULT, pat) == expected, f"pattern {pat!r}"
+        assert await candidate_classes(_GREP_RESULT, pat) == expected, f"pattern {pat!r}"
 
 
-def test_candidate_classes_empty_pattern_yields_nothing():
+async def test_candidate_classes_empty_pattern_yields_nothing():
     """An empty stem must not match everything."""
-    assert candidate_classes(_GREP_RESULT, "") == set()
+    assert await candidate_classes(_GREP_RESULT, "") == set()
 
 
 def test_near_duplicate_arms_on_qualified_pattern():
@@ -62,27 +62,27 @@ def test_near_duplicate_arms_on_qualified_pattern():
     assert near_duplicate(cands, f"{LPKG}/OMTG_DATAST_001_SQLite;") is True
 
 
-def test_candidate_classes_is_a_dumb_extractor_framework_noise_filtered_downstream():
+async def test_candidate_classes_is_a_dumb_extractor_framework_noise_filtered_downstream():
     # a grep whose only class token is a framework class named like the pattern
     rows = [{"class": f"{LPKG}/Foo;", "method": "m",
              "insn": "invoke-virtual v0, Landroid/database/sqlite/SQLiteDatabase;->rawQuery", "match": "SQLiteDatabase"}]
     res = json.dumps({"rows": rows})
     # extraction is dumb; a lone framework class never arms disambiguation — the near_duplicate >=2 gate (Task 3) filters it.
-    assert candidate_classes(res, "SQLiteDatabase") == {"android.database.sqlite.SQLiteDatabase"}
+    assert await candidate_classes(res, "SQLiteDatabase") == {"android.database.sqlite.SQLiteDatabase"}
 
 
-def test_candidate_classes_keeps_exact_name_app_class():
+async def test_candidate_classes_keeps_exact_name_app_class():
     rows = [{"class": f"{LPKG}/MyActivity;", "method": "start",
              "insn": f"const-class v0, {LPKG}/MainActivity;", "match": "MainActivity"}]
     res = json.dumps({"rows": rows})
-    assert candidate_classes(res, "MainActivity") == {f"{PKG}.MainActivity"}
+    assert await candidate_classes(res, "MainActivity") == {f"{PKG}.MainActivity"}
 
 
-def test_candidate_classes_reads_capture_stub_when_ref_present():
+async def test_candidate_classes_reads_capture_stub_when_ref_present():
     class _Store:
-        def get(self, ref): return {"body": _GREP_RESULT}
+        async def get(self, ref): return {"body": _GREP_RESULT}
     stub = json.dumps({"summary": "grep_smali: 2 row(s)", "captured": {"ref": "abc"}, "hint": "read_capture"})
-    got = candidate_classes(stub, "OMTG_DATAST_001_SQLite", capture_store=_Store())
+    got = await candidate_classes(stub, "OMTG_DATAST_001_SQLite", capture_store=_Store())
     assert f"{PKG}.OMTG_DATAST_001_SQLite_Encrypted" in got
 
 
