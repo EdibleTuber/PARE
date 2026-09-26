@@ -409,7 +409,7 @@ def test_default_lock_lives_beside_the_socket(sock_dir, tmp_path):
     assert sock_path.exists()
 
 
-# --- a starting daemon (bound, not yet listening): spec Correction 2026-09-26 --
+# --- a starting daemon (bound, not yet listening): spec §3 ------------------
 
 
 def _bind_without_listen(path: Path) -> socket.socket:

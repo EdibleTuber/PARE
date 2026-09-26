@@ -29,7 +29,7 @@ class StatusBar(Static):
     """Renders one status line from ambient connection state plus whatever
     panes it is handed.
 
-    Connection state (`daemon_connected`, `channel_id`) is set by the app as
+    Connection state (`daemon_state`, `channel_id`) is set by the app as
     the daemon connection and active channel change; per-pane health and
     cursor come from the `panes` argument to `render_for` on each refresh --
     `Pane` already tracks `healthy`/`last_error`/`cursor` (`pare/tui/panes/

@@ -11,8 +11,7 @@ block; the TUI awaits them on a worker thread.
    `FileNotFoundError` -> absent, go on.
    `ConnectionRefusedError` does NOT by itself mean stale: agent_core's
    `Daemon.serve` binds the socket and defers `listen()` until `astartup()`
-   returns, so a *starting* daemon refuses too (spec, "Correction
-   2026-09-26"). A refused path still listed in /proc/net/unix is a daemon
+   returns, so a *starting* daemon refuses too (spec §3). A refused path still listed in /proc/net/unix is a daemon
    that has bound but not yet listened: never spawn, never unlink -- poll
    for it to start listening (`attached`) or give up (`failed`). Only a
    refused socket that the kernel no longer lists is stale. If /proc/net/unix
@@ -410,7 +409,7 @@ def _spawn_locked(
 
     # 7. Popen. The lock fd is non-inheritable (os.open default) and Popen's
     # close_fds=True default keeps it out of the child either way -- a daemon
-    # holding spawn.lock would wedge every later launch.
+    # holding pare-spawn.lock would wedge every later launch.
     env = os.environ.copy()
     env["PARE_SOCKET_PATH"] = str(socket_path)
     popen_kwargs: dict[str, Any] = {
