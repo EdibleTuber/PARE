@@ -11,9 +11,18 @@ a list of panes, asserting only that the healthy and failed renders DIFFER
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from textual.widgets import Static
 
 from pare.tui.panes.base import Pane
+
+DaemonState = Literal["up", "down", "spawn-failed"]
+_DAEMON_LABELS: dict[str, str] = {
+    "up": "daemon:up",
+    "down": "daemon:DOWN",
+    "spawn-failed": "daemon:spawn-failed",
+}
 
 
 class StatusBar(Static):
@@ -30,20 +39,46 @@ class StatusBar(Static):
     def __init__(
         self,
         *,
-        daemon_connected: bool = False,
+        daemon_state: DaemonState = "down",
         channel_id: str = "",
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
+        # Backwards-compat: accept daemon_connected as a keyword; True -> "up".
+        daemon_connected: bool | None = None,
     ) -> None:
         super().__init__(name=name, id=id, classes=classes)
-        self.daemon_connected = daemon_connected
+        if daemon_connected is not None:
+            daemon_state = "up" if daemon_connected else "down"
+        self.daemon_state = daemon_state
         self.channel_id = channel_id
+
+    @property
+    def daemon_state(self) -> DaemonState:
+        return self._daemon_state
+
+    @daemon_state.setter
+    def daemon_state(self, value: DaemonState) -> None:
+        if value not in _DAEMON_LABELS:
+            raise ValueError(
+                f"invalid daemon_state {value!r}; expected one of "
+                f"{sorted(_DAEMON_LABELS)}"
+            )
+        self._daemon_state = value
+
+    @property
+    def daemon_connected(self) -> bool:
+        """Backwards-compat: True iff daemon_state == 'up'."""
+        return self.daemon_state == "up"
+
+    @daemon_connected.setter
+    def daemon_connected(self, value: bool) -> None:
+        self.daemon_state = "up" if value else "down"
 
     def render_for(self, panes: list[Pane]) -> str:
         """Pure text: no widget lookups, no DOM -- safe to call on an
         unmounted, even un-composed, StatusBar instance."""
-        daemon = "daemon:up" if self.daemon_connected else "daemon:DOWN"
+        daemon = _DAEMON_LABELS[self.daemon_state]
         channel = f"channel:{self.channel_id or '-'}"
         if not panes:
             panes_text = "panes:none"

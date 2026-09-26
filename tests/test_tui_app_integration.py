@@ -85,6 +85,34 @@ async def test_status_bar_reflects_source_failure():
     assert failed != healthy
 
 
+def test_status_bar_renders_spawn_failed_distinctly():
+    from pare.tui.widgets.statusbar import StatusBar
+    up = StatusBar(); up.daemon_state = "up"
+    down = StatusBar(); down.daemon_state = "down"
+    failed = StatusBar(); failed.daemon_state = "spawn-failed"
+
+    up_text = up.render_for([])
+    down_text = down.render_for([])
+    failed_text = failed.render_for([])
+
+    # Three distinct labels
+    assert up_text != down_text
+    assert up_text != failed_text
+    assert down_text != failed_text
+    assert "spawn-failed" in failed_text.lower() or "spawn_failed" in failed_text.lower()
+
+
+def test_status_bar_daemon_connected_backwards_compat():
+    """Legacy callers still writing daemon_connected: bool get the same
+    render they did before (up when True, down when False)."""
+    from pare.tui.widgets.statusbar import StatusBar
+    sb = StatusBar()
+    sb.daemon_connected = True
+    assert "up" in sb.render_for([]).lower()
+    sb.daemon_connected = False
+    assert "down" in sb.render_for([]).lower()
+
+
 async def test_a_leading_slash_sends_a_command_not_a_chat():
     """Spec section 2.2: slash commands keep their wire form. Sending "/worker
     list" as chat would put it in front of the model instead of the registry."""
