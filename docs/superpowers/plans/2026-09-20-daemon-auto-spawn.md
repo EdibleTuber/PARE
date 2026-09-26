@@ -27,6 +27,7 @@
 - **C2 — the child is told where to bind.** `detect_or_spawn` sets `PARE_SOCKET_PATH=str(socket_path)` in the child's env on top of `os.environ.copy()`, so the path it polls and the path the daemon binds are the same by construction rather than by shared defaults.
 - **C3 — Task 1's test code is a sketch.** The `_spawn_hook` signature is the implementer's call (the Interfaces block and the test bodies disagree, and the Shim is referenced outside its scope). Any test path that reaches `killpg` uses a real subprocess started with `start_new_session=True`; a shim with a fake PID must never reach `killpg`.
 - **C4 — Task 3's tests never reap a stranger.** Tests monkeypatch both `detect_or_spawn` and `reap` at the `pare.tui.app` import site and pass a tmp `daemon_log_dir`. A faked `pid=12345` reaching the real `reap` would `killpg` whatever process group owns that PID.
+- **C5 — skip auto-spawn on a systemd-managed host (user ruling, 2026-09-26).** In `main()`, if `systemctl --user is-enabled pare-daemon` exits 0, do not auto-spawn: pass `auto_spawn=False`, and if the attach fails, write `[systemd-managed pare-daemon is not accepting connections — systemctl --user status pare-daemon]` to the transcript. Reason: agent_core unlinks and rebinds the socket on every start, so a systemd restart would orphan a TUI-spawned daemon. A missing `systemctl` binary counts as "no unit".
 
 ---
 
