@@ -206,6 +206,9 @@ class PareTUI(App):
         self._daemon_spawn_failed = False
         self._daemon_connect_task: asyncio.Task | None = None
         self._daemon_spawn_future: asyncio.Future | None = None
+        # _record_spawn runs at most once per spawn future (done-callback, or
+        # the unmount path when the callback has not run yet).
+        self._spawn_recorded = False
         # Construction only -- no connection is opened here. `on_mount`
         # starts it and subscribes to its message stream once the app is
         # actually running.
@@ -341,15 +344,33 @@ class PareTUI(App):
                 )
 
     async def _spawn_then_connect(self, start) -> None:
-        spawned = await self._detect_or_spawn_daemon()
-        await self._connect(start, spawned=spawned)
+        # Nothing awaits this task on the happy path, so an exception escaping
+        # it would never be retrieved and the UI would sit on "checking..."
+        # and daemon:DOWN forever. Surface it instead. (CancelledError is not
+        # an Exception and still propagates.)
+        try:
+            spawned = await self._detect_or_spawn_daemon()
+            await self._connect(start, spawned=spawned)
+        except Exception as exc:
+            logger.exception("daemon spawn/connect task failed")
+            self._daemon_spawn_failed = True
+            self._write_transcript(f"[daemon spawn failed: {type(exc).__name__}: {exc}]")
         self._refresh_status_bar()
 
     def _record_spawn(self, fut: asyncio.Future) -> None:
         """Done-callback on the detect_or_spawn future: record an owned PID
         the moment the thread returns, whoever (if anyone) is awaiting it --
         so a spawn that completes after the connect task was cancelled is
-        still reaped by on_unmount."""
+        still reaped by on_unmount.
+
+        Idempotent: asyncio runs done-callbacks one loop step after the
+        result is set, so `_reap_owned_daemon` also calls this for a future
+        that is done but whose callback may not have run. Only the first
+        call records; a late callback cannot resurrect an already-reaped PID.
+        """
+        if self._spawn_recorded or not fut.done():
+            return
+        self._spawn_recorded = True
         if fut.cancelled() or fut.exception() is not None:
             return
         result = fut.result()
@@ -379,6 +400,7 @@ class PareTUI(App):
                 spawn_cmd=_daemon_command(),
             ),
         )
+        self._spawn_recorded = False
         fut.add_done_callback(self._record_spawn)
         self._daemon_spawn_future = fut
         try:
@@ -428,11 +450,18 @@ class PareTUI(App):
         SIGTERM/SIGKILL timeouts), so it too runs on a thread. Any failure is
         logged and never crashes the exit."""
         fut = self._daemon_spawn_future
-        if fut is not None and not fut.done():
-            try:
-                await fut
-            except Exception:
-                pass  # _record_spawn already ignored it; nothing is owned
+        if fut is not None:
+            if not fut.done():
+                try:
+                    # Shielded, like the await in _detect_or_spawn_daemon: a
+                    # cancel reaching the executor future would mark it
+                    # cancelled while the thread runs on, dropping the PID.
+                    await asyncio.shield(fut)
+                except Exception:
+                    pass  # nothing is owned
+            # The done-callback may not have run yet (it is scheduled one
+            # loop step after set_result): read the PID from the future.
+            self._record_spawn(fut)
         pid, self._daemon_owned_pid = self._daemon_owned_pid, None
         if pid is None:
             return

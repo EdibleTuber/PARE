@@ -223,12 +223,14 @@ class _LifecycleSession:
     def __init__(self, *, start_ok: bool) -> None:
         self.start_ok = start_ok
         self.started = False
+        self.start_calls = 0
         self.subscribers: list = []
 
     def subscribe(self, handler) -> None:
         self.subscribers.append(handler)
 
     async def start(self) -> None:
+        self.start_calls += 1
         if not self.start_ok:
             raise FileNotFoundError(2, "No such file or directory")
         self.started = True
@@ -358,6 +360,7 @@ async def test_spawn_failure_shows_reason_and_spawn_failed_state(monkeypatch, tm
         assert "daemon spawn failed: did not accept a connection within 5s" in text
         # The existing start/except path ran, and the bar says spawn-failed,
         # not the ambiguous DOWN.
+        assert app.session.start_calls == 1
         assert app.session.started is False
         bar = app.query_one("#status-bar")
         assert bar.daemon_state == "spawn-failed"
@@ -583,3 +586,45 @@ async def test_detect_or_spawn_gets_the_resolved_daemon_command(monkeypatch, tmp
     async with app.run_test() as pilot:
         await _mount_auto_spawn(app, pilot)
     assert seen == [["/x/pare-daemon"]]
+
+
+async def test_a_spawn_resolved_before_its_callback_ran_is_still_reaped(monkeypatch, tmp_path):
+    """Review S1: asyncio runs done-callbacks one loop step after
+    set_result. If unmount reaches the reap in that step, fut.done() is True
+    but _record_spawn has not run -- the PID must come from the future."""
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    _, reap_calls, _ = _patch_lifecycle(monkeypatch, None)
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    fut = asyncio.get_running_loop().create_future()
+    fut.add_done_callback(app._record_spawn)
+    app._daemon_spawn_future = fut
+    fut.set_result(
+        DaemonSpawnResult(mode="spawned", pid=4242, log_path=None, error=None)
+    )
+    # No yield between set_result and the reap: the callback is still queued.
+    await app._reap_owned_daemon()
+    assert reap_calls == [4242]
+    await asyncio.sleep(0)  # let the queued callback run
+    assert app._daemon_owned_pid is None  # and it does not resurrect the PID
+
+
+async def test_an_exception_in_the_spawn_task_is_surfaced(monkeypatch, tmp_path):
+    """Review N1: an exception escaping the background spawn task must not
+    leave the UI on "checking..." and daemon:DOWN forever."""
+    from pare.tui import app as app_module
+
+    detect_calls, _, transcript = _patch_lifecycle(monkeypatch, None)
+
+    def broken_command():
+        raise TypeError("expected str, bytes or os.PathLike object, not NoneType")
+
+    monkeypatch.setattr(app_module, "_daemon_command", broken_command)
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    async with app.run_test() as pilot:
+        await _mount_auto_spawn(app, pilot)
+        assert any(
+            w.startswith("[daemon spawn failed: TypeError: expected str") for w in transcript
+        )
+        assert app.query_one("#status-bar").daemon_state == "spawn-failed"
+    assert detect_calls == []
