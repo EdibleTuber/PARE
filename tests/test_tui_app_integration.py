@@ -588,6 +588,10 @@ async def test_detect_or_spawn_gets_the_resolved_daemon_command(monkeypatch, tmp
     monkeypatch.setattr(app_module, "detect_or_spawn", fake_detect)
     monkeypatch.setattr(app_module, "reap", lambda pid, **kw: "not_owned")
     monkeypatch.setattr(app_module, "_daemon_command", lambda: ["/x/pare-daemon"])
+    monkeypatch.setattr(
+        app_module, "resolve_spawn_cwd",
+        lambda env: app_module.SpawnCwd(cwd=None, error=None),
+    )
     app = _make_auto_spawn_app(tmp_path, start_ok=True)
     async with app.run_test() as pilot:
         await _mount_auto_spawn(app, pilot)
@@ -753,6 +757,9 @@ async def test_sighup_handler_is_registered_and_requests_exit(monkeypatch, tmp_p
         monkeypatch,
         DaemonSpawnResult(mode="attached", pid=None, log_path=None, error=None),
     )
+    # Independent of an inherited SIGHUP disposition (e.g. `nohup pytest`
+    # leaves it SIG_IGN, and the app correctly declines to install then).
+    monkeypatch.setattr(signal, "getsignal", lambda sig: signal.SIG_DFL)
     loop = asyncio.get_running_loop()
     registered: dict = {}
     removed: list = []
@@ -805,9 +812,12 @@ async def test_sighup_handler_really_restores_sig_dfl_after_exit(monkeypatch, tm
         monkeypatch,
         DaemonSpawnResult(mode="attached", pid=None, log_path=None, error=None),
     )
-    assert signal.getsignal(signal.SIGHUP) == signal.SIG_DFL
-    app = _make_auto_spawn_app(tmp_path, start_ok=True)
-    async with app.run_test() as pilot:
-        await _mount_auto_spawn(app, pilot)
-        assert signal.getsignal(signal.SIGHUP) != signal.SIG_DFL
-    assert signal.getsignal(signal.SIGHUP) == signal.SIG_DFL
+    inherited = signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    try:
+        app = _make_auto_spawn_app(tmp_path, start_ok=True)
+        async with app.run_test() as pilot:
+            await _mount_auto_spawn(app, pilot)
+            assert signal.getsignal(signal.SIGHUP) != signal.SIG_DFL
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGHUP, inherited)
