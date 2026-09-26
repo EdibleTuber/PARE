@@ -257,12 +257,14 @@ def detect_or_spawn(
     startup_timeout: float = 5.0,
     lock_dir: Path | None = None,
     spawn_cmd: list[str] | None = None,
+    spawn_cwd: Path | None = None,
     _spawn_hook: SpawnHook | None = None,
 ) -> DaemonSpawnResult:
     """Blocking. Callers await it on a thread.
 
-    `spawn_cmd` defaults to `["pare-daemon"]`. The lock lives at
-    `(lock_dir or socket_path.parent) / "pare-spawn.lock"`.
+    `spawn_cmd` defaults to `["pare-daemon"]`. `spawn_cwd` is the child's
+    working directory (Popen `cwd=`); None inherits the caller's. The lock
+    lives at `(lock_dir or socket_path.parent) / "pare-spawn.lock"`.
     """
     socket_path = Path(socket_path)
     log_dir = Path(log_dir)
@@ -322,6 +324,7 @@ def detect_or_spawn(
         try:
             return _spawn_locked(
                 socket_path, log_dir, cmd, spawn,
+                spawn_cwd=spawn_cwd,
                 connect_timeout=connect_timeout,
                 startup_timeout=startup_timeout,
             )
@@ -350,6 +353,7 @@ def _spawn_locked(
     cmd: list[str],
     spawn: SpawnHook,
     *,
+    spawn_cwd: Path | None,
     connect_timeout: float,
     startup_timeout: float,
 ) -> DaemonSpawnResult:
@@ -416,6 +420,8 @@ def _spawn_locked(
         "start_new_session": True,
         "env": env,
     }
+    if spawn_cwd is not None:
+        popen_kwargs["cwd"] = str(spawn_cwd)
     try:
         try:
             child = spawn(cmd, popen_kwargs)

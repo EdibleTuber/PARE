@@ -592,3 +592,50 @@ def test_waiting_on_a_starting_daemon_needs_no_lock(sock_dir, tmp_path):
         lock_dir.chmod(0o700)
         starting.close()
     assert result.mode == "attached"
+
+
+# --- spawn_cwd (final review B1) -----------------------------------------------
+
+CWD_DAEMON = r"""
+import os, socket, sys, time
+with open(sys.argv[1], "w") as f:
+    f.write(os.getcwd())
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(os.environ["PARE_SOCKET_PATH"])
+s.listen(8)
+time.sleep(30)
+"""
+
+
+def test_spawn_cwd_is_the_childs_working_directory(sock_dir, tmp_path):
+    """The child really runs in spawn_cwd (production Popen path, no hook):
+    pare-daemon resolves its relative workers.yaml default against it."""
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    cwd_out = tmp_path / "child-cwd.txt"
+    assert Path.cwd().resolve() != workdir.resolve()
+    result = detect_or_spawn(
+        sock_dir / "cwd.sock", tmp_path / "logs",
+        spawn_cmd=[sys.executable, "-c", CWD_DAEMON, str(cwd_out)],
+        spawn_cwd=workdir,
+    )
+    try:
+        assert result.mode == "spawned", result.error
+        assert Path(cwd_out.read_text()).resolve() == workdir.resolve()
+    finally:
+        if result.pid:
+            assert reap(result.pid, sigterm_timeout=3) == "exited_clean"
+
+
+def test_without_spawn_cwd_the_child_inherits_ours(sock_dir, tmp_path):
+    cwd_out = tmp_path / "child-cwd.txt"
+    result = detect_or_spawn(
+        sock_dir / "cwd.sock", tmp_path / "logs",
+        spawn_cmd=[sys.executable, "-c", CWD_DAEMON, str(cwd_out)],
+    )
+    try:
+        assert result.mode == "spawned", result.error
+        assert Path(cwd_out.read_text()).resolve() == Path.cwd().resolve()
+    finally:
+        if result.pid:
+            assert reap(result.pid, sigterm_timeout=3) == "exited_clean"

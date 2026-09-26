@@ -263,6 +263,12 @@ def _patch_lifecycle(monkeypatch, result=None, *, detect=None, reap_raises=False
 
     monkeypatch.setattr(app_module, "detect_or_spawn", fake_detect)
     monkeypatch.setattr(app_module, "reap", fake_reap)
+    # Independent of the checkout's workers.yaml and the caller's env; tests
+    # of the resolution itself override this.
+    monkeypatch.setattr(
+        app_module, "resolve_spawn_cwd",
+        lambda env: app_module.SpawnCwd(cwd=None, error=None),
+    )
     transcript = _record_transcript(monkeypatch)
     return detect_calls, reap_calls, transcript
 
@@ -628,3 +634,180 @@ async def test_an_exception_in_the_spawn_task_is_surfaced(monkeypatch, tmp_path)
         )
         assert app.query_one("#status-bar").daemon_state == "spawn-failed"
     assert detect_calls == []
+
+
+# --- spawn_cwd resolution (final review B1) ---
+
+
+def test_resolve_spawn_cwd_respects_an_explicit_workers_yaml_path(tmp_path):
+    from pare.tui.app import SpawnCwd, resolve_spawn_cwd
+
+    (tmp_path / "workers.yaml").write_text("")
+    env = {"PARE_WORKERS_YAML_PATH": "/abs/workers.yaml"}
+    assert resolve_spawn_cwd(env, repo_root=tmp_path) == SpawnCwd(cwd=None, error=None)
+
+
+def test_resolve_spawn_cwd_uses_the_repo_root_holding_workers_yaml(tmp_path):
+    from pare.tui.app import SpawnCwd, resolve_spawn_cwd
+
+    (tmp_path / "workers.yaml").write_text("")
+    assert resolve_spawn_cwd({}, repo_root=tmp_path) == SpawnCwd(cwd=tmp_path, error=None)
+
+
+def test_resolve_spawn_cwd_without_workers_yaml_is_an_error(tmp_path):
+    from pare.tui.app import resolve_spawn_cwd
+
+    r = resolve_spawn_cwd({}, repo_root=tmp_path)
+    assert r.cwd is None
+    assert "workers.yaml not found" in r.error
+    assert "PARE_WORKERS_YAML_PATH" in r.error
+
+
+def test_resolve_spawn_cwd_default_root_is_the_installed_repo():
+    """Default repo_root mirrors the systemd unit's WorkingDirectory."""
+    from pathlib import Path
+
+    import pare
+    from pare.tui.app import resolve_spawn_cwd
+
+    root = Path(pare.__file__).resolve().parents[1]
+    r = resolve_spawn_cwd({})
+    if (root / "workers.yaml").exists():
+        assert r.cwd == root
+    else:
+        assert r.error is not None
+
+
+async def test_resolved_spawn_cwd_reaches_detect_or_spawn(monkeypatch, tmp_path):
+    from pare.tui import app as app_module
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    seen: list = []
+
+    def fake_detect(socket_path, log_dir, **kwargs):
+        seen.append(kwargs.get("spawn_cwd", "<missing>"))
+        return DaemonSpawnResult(mode="attached", pid=None, log_path=None, error=None)
+
+    _patch_lifecycle(monkeypatch, None)
+    monkeypatch.setattr(app_module, "detect_or_spawn", fake_detect)
+    monkeypatch.setattr(
+        app_module, "resolve_spawn_cwd",
+        lambda env: app_module.SpawnCwd(cwd=tmp_path, error=None),
+    )
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    async with app.run_test() as pilot:
+        await _mount_auto_spawn(app, pilot)
+    assert seen == [tmp_path]
+
+
+async def test_unresolvable_workers_yaml_fails_fast_without_spawning(monkeypatch, tmp_path):
+    from pare.tui import app as app_module
+
+    detect_calls, reap_calls, transcript = _patch_lifecycle(monkeypatch, None)
+    monkeypatch.setattr(
+        app_module, "resolve_spawn_cwd",
+        lambda env: app_module.SpawnCwd(
+            cwd=None, error="workers.yaml not found — set PARE_WORKERS_YAML_PATH"),
+    )
+    app = _make_auto_spawn_app(tmp_path, start_ok=False)
+    async with app.run_test() as pilot:
+        await _mount_auto_spawn(app, pilot)
+        assert (
+            "[daemon spawn failed: workers.yaml not found — set PARE_WORKERS_YAML_PATH]"
+            in transcript
+        )
+        assert app.query_one("#status-bar").daemon_state == "spawn-failed"
+        assert app.session.start_calls == 1  # a running daemon may still be attached
+    assert detect_calls == []
+    assert reap_calls == []
+
+
+async def test_unresolvable_workers_yaml_still_attaches_to_a_running_daemon(
+    monkeypatch, tmp_path
+):
+    from pare.tui import app as app_module
+
+    detect_calls, _, transcript = _patch_lifecycle(monkeypatch, None)
+    monkeypatch.setattr(
+        app_module, "resolve_spawn_cwd",
+        lambda env: app_module.SpawnCwd(cwd=None, error="workers.yaml not found"),
+    )
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    async with app.run_test() as pilot:
+        await _mount_auto_spawn(app, pilot)
+        assert any(w.startswith("[attached to running") for w in transcript)
+        assert not any("spawn failed" in w for w in transcript)
+        assert app.query_one("#status-bar").daemon_state == "up"
+    assert detect_calls == []
+
+
+# --- SIGHUP (final review S1) ---
+
+
+async def test_sighup_handler_is_registered_and_requests_exit(monkeypatch, tmp_path):
+    import signal
+
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    _patch_lifecycle(
+        monkeypatch,
+        DaemonSpawnResult(mode="attached", pid=None, log_path=None, error=None),
+    )
+    loop = asyncio.get_running_loop()
+    registered: dict = {}
+    removed: list = []
+    monkeypatch.setattr(
+        loop, "add_signal_handler",
+        lambda sig, cb, *a: registered.__setitem__(sig, cb),
+    )
+    monkeypatch.setattr(loop, "remove_signal_handler", lambda sig: removed.append(sig))
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    exits: list = []
+    async with app.run_test() as pilot:
+        await _mount_auto_spawn(app, pilot)
+        assert signal.SIGHUP in registered
+        monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(a))
+        registered[signal.SIGHUP]()
+        assert exits == [()]
+    assert removed == [signal.SIGHUP]
+
+
+async def test_sighup_handler_does_not_clobber_an_existing_one(monkeypatch, tmp_path):
+    import signal
+
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    _patch_lifecycle(
+        monkeypatch,
+        DaemonSpawnResult(mode="attached", pid=None, log_path=None, error=None),
+    )
+    monkeypatch.setattr(signal, "getsignal", lambda sig: (lambda *a: None))
+    loop = asyncio.get_running_loop()
+    registered: dict = {}
+    monkeypatch.setattr(
+        loop, "add_signal_handler",
+        lambda sig, cb, *a: registered.__setitem__(sig, cb),
+    )
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    async with app.run_test() as pilot:
+        await _mount_auto_spawn(app, pilot)
+    assert registered == {}
+
+
+async def test_sighup_handler_really_restores_sig_dfl_after_exit(monkeypatch, tmp_path):
+    """No fakes on the loop: after the app exits, SIGHUP is back to default
+    in this (the test) process."""
+    import signal
+
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    _patch_lifecycle(
+        monkeypatch,
+        DaemonSpawnResult(mode="attached", pid=None, log_path=None, error=None),
+    )
+    assert signal.getsignal(signal.SIGHUP) == signal.SIG_DFL
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    async with app.run_test() as pilot:
+        await _mount_auto_spawn(app, pilot)
+        assert signal.getsignal(signal.SIGHUP) != signal.SIG_DFL
+    assert signal.getsignal(signal.SIGHUP) == signal.SIG_DFL
