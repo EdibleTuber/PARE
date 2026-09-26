@@ -1,5 +1,7 @@
 # Daemon Auto-Spawn for pare-tui — Implementation Plan
 
+> **HISTORICAL RECORD — NOT A SOURCE OF TRUTH.** This plan was executed on 2026-09-26 and is kept only as a record of what was planned. Parts of it were superseded during execution, and some of its text describes bugs that were fixed. **Do not implement or review from it.** The authoritative sources are the living spec, [`docs/superpowers/specs/2026-09-20-daemon-auto-spawn-design.md`](../specs/2026-09-20-daemon-auto-spawn-design.md), and the code: `pare/tui/daemon_lifecycle.py`, `pare/tui/app.py`, `pare/tui/widgets/statusbar.py`. Superseded statements in the Task 1 contract are marked inline with **SUPERSEDED**; other stale text (for example the test counts and the "awaited in `on_mount`" wiring) is not marked.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `pare-tui` auto-spawn a `pare-daemon` on launch when none is running, kill it on exit, and attach cleanly (no reap) when one is already running.
@@ -66,9 +68,9 @@
       *,
       connect_timeout: float = 0.25,
       startup_timeout: float = 5.0,
-      lock_dir: Path | None = None,        # default: log_dir; lock lives at lock_dir / "spawn.lock"
-      spawn_cmd: list[str] = ["pare-daemon"],
-      _spawn_hook: Callable[[list[str], Path], subprocess.Popen] | None = None,
+      lock_dir: Path | None = None,        # default: log_dir; lock lives at lock_dir / "spawn.lock"   <-- SUPERSEDED — see spec §4: (lock_dir or socket_path.parent) / "pare-spawn.lock"
+      spawn_cmd: list[str] = ["pare-daemon"],   # <-- SUPERSEDED — see spec §2.2/§4.4: default is None (= ["pare-daemon"]); the app always passes pare-daemon beside sys.executable
+      _spawn_hook: Callable[[list[str], Path], subprocess.Popen] | None = None,   # <-- SUPERSEDED — see spec §2.2: Callable[[list[str], dict[str, Any]], Popen]; also a spawn_cwd kwarg exists
   ) -> DaemonSpawnResult:
       """Blocking. Callers await it on a thread."""
 
@@ -77,7 +79,7 @@
       *,
       sigterm_timeout: float = 5.0,
       sigkill_timeout: float = 2.0,
-  ) -> Literal["exited_clean", "killed", "abandoned"]:
+  ) -> Literal["exited_clean", "killed", "abandoned"]:   # <-- SUPERSEDED — see spec §5.2: four values, adds "not_owned"; only PIDs this module spawned are signalled
       """Blocking. SIGTERM the process group; escalate to SIGKILL on timeout;
       return the outcome. Never raises for a stale PID (already-exited)."""
   ```
@@ -91,14 +93,14 @@ The plan below describes the FUNCTION CONTRACT and the TESTABLE PROPERTIES. It d
 
 1. **Probe:** try `socket.socket(AF_UNIX).connect(str(socket_path))` with `settimeout(connect_timeout)`. On success, `close()` the probe socket and return `DaemonSpawnResult(mode="attached", pid=None, log_path=None, error=None)`.
 2. **Categorize the failure:**
-   - `FileNotFoundError` OR `ConnectionRefusedError` → socket is absent or stale; proceed to spawn.
+   - ~~`FileNotFoundError` OR `ConnectionRefusedError` → socket is absent or stale; proceed to spawn.~~ **SUPERSEDED — see spec §3. Refused ≠ stale:** agent_core binds before `listen()`, so a starting daemon refuses too. Refused + path listed in `/proc/net/unix` (or unreadable) = starting: wait, never spawn, never unlink. Refused + not a socket = failed. Only refused + a socket + not listed = stale. Implementing this line as written reintroduces the bug that unlinks a restarting daemon's socket.
    - `PermissionError` → return `mode="failed", error=f"permission denied: {socket_path}"`; do NOT spawn.
    - Anything else (e.g. `IsADirectoryError`) → return `mode="failed", error=f"{type(exc).__name__}: {exc}"`; do NOT spawn.
 3. **Ensure `log_dir` exists** (`mkdir(mode=0o700, parents=True, exist_ok=True)`). If this fails, use `subprocess.PIPE` fallback path (see step 6 log-open behavior).
-4. **Acquire flock:** open `(lock_dir or log_dir) / "spawn.lock"` for writing (`O_CREAT | O_WRONLY`); attempt `fcntl.flock(fd, LOCK_EX | LOCK_NB)`.
+4. **Acquire flock:** ~~open `(lock_dir or log_dir) / "spawn.lock"`~~ **SUPERSEDED — see spec §4: the lock is `(lock_dir or socket_path.parent) / "pare-spawn.lock"`.** Open it for writing (`O_CREAT | O_WRONLY`); attempt `fcntl.flock(fd, LOCK_EX | LOCK_NB)`.
    - Got lock: proceed as spawner (steps 5-7).
    - `BlockingIOError`: someone else is spawning. Fall through to the *concurrent-wait* path (step 8).
-5. **Under lock — reap stale socket if present:** if `socket_path.exists()` AND another `connect()` attempt still fails, `os.unlink(socket_path)`.
+5. **Under lock — reap stale socket if present:** ~~if `socket_path.exists()` AND another `connect()` attempt still fails, `os.unlink(socket_path)`.~~ **SUPERSEDED — see spec §4 step 3:** unlink only if a fresh connect was refused AND the path is a socket AND `/proc/net/unix` does not list it (re-checked here, immediately before the unlink); a listed path is a starting daemon and is waited on, never unlinked.
 6. **Under lock — open log:** temp path `log_dir / f"daemon-spawning-{uuid.uuid4().hex}.log"`, `open(temp_path, "w")`. If open fails (`OSError`), null the log_fh and set `pipe_fallback=True`.
 7. **Under lock — Popen:**
    ```python
@@ -119,6 +121,8 @@ The plan below describes the FUNCTION CONTRACT and the TESTABLE PROPERTIES. It d
 9. **Concurrent-wait path** (step 4 fallthrough): with the flock owned by someone else, do NOT reap or spawn. Poll `socket_path.connect()` every 100ms up to `startup_timeout`. Success → return `mode="attached"`. Timeout → return `mode="failed", error="concurrent spawn timed out"`. Do not hold the flock lookup fd open — release its `open(...)` handle before returning.
 
 **Behavioral contract of `reap(pid, sigterm_timeout, sigkill_timeout)`:**
+
+**SUPERSEDED — see spec §5.2:** `reap` signals only a PID this module spawned and still holds the `Popen` for; any other PID returns `"not_owned"` with no signal (a bare `killpg(getpgid(pid))` can hit a reused PID). Group signals are sent only to a child leading its own group that is not ours.
 
 1. `os.killpg(os.getpgid(pid), SIGTERM)` — if `ProcessLookupError` or `PermissionError` (already dead / not ours), return `"exited_clean"` (idempotent — reap is called on shutdown, "already gone" is success).
 2. Poll `os.waitpid(pid, os.WNOHANG)` every 50ms up to `sigterm_timeout`. Non-zero return → return `"exited_clean"`.
