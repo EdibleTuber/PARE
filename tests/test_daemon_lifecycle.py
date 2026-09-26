@@ -30,9 +30,11 @@ from pare.tui.daemon_lifecycle import DaemonSpawnResult, detect_or_spawn, reap
 # A stand-in daemon: binds whatever PARE_SOCKET_PATH says (the value the
 # module must pass), optionally records its env, then idles.
 FAKE_DAEMON = r"""
-import os, socket, sys, time
+import os, signal, socket, sys, time
 delay = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0
 env_out = sys.argv[2] if len(sys.argv) > 2 else ""
+if len(sys.argv) > 3 and sys.argv[3] == "ignore-term":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)  # before bind => before "spawned"
 if env_out:
     with open(env_out, "w") as f:
         f.write(os.environ.get("PARE_SOCKET_PATH", "<unset>"))
@@ -45,8 +47,10 @@ time.sleep(30)
 """
 
 
-def fake_daemon_cmd(delay: float = 0.0, env_out: Path | None = None) -> list[str]:
-    return [sys.executable, "-c", FAKE_DAEMON, str(delay), str(env_out or "")]
+def fake_daemon_cmd(delay: float = 0.0, env_out: Path | None = None,
+                    ignore_term: bool = False) -> list[str]:
+    return [sys.executable, "-c", FAKE_DAEMON, str(delay), str(env_out or ""),
+            "ignore-term" if ignore_term else ""]
 
 
 @pytest.fixture
@@ -236,12 +240,15 @@ def test_log_open_failure_falls_back_to_pipe(sock_dir, tmp_path, real_hook):
     locked.chmod(0o000)
     try:
         result = detect_or_spawn(
-            sock_dir / "x.sock", locked / "logs", lock_dir=tmp_path / "lock",
+            sock_dir / "x.sock", locked / "logs",  # default lock: beside the socket
             spawn_cmd=["sh", "-c", "echo oops >&2; exit 2"],
             _spawn_hook=real_hook,
         )
     finally:
         locked.chmod(0o700)
+    assert (sock_dir / "pare-spawn.lock").exists()
+    assert len(real_hook.calls) == 1  # the child really ran, on a PIPE
+    assert real_hook.calls[0][1]["stdout"] is subprocess.PIPE
     assert result.mode == "failed"
     assert result.log_path is None
     assert "code 2" in result.error
@@ -272,7 +279,7 @@ def test_unopenable_lock_fails_without_touching_stale_socket(sock_dir, tmp_path)
 
 def _hold_lock(lock_dir: Path) -> int:
     lock_dir.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_dir / "spawn.lock", os.O_CREAT | os.O_WRONLY, 0o600)
+    fd = os.open(lock_dir / "pare-spawn.lock", os.O_CREAT | os.O_WRONLY, 0o600)
     import fcntl
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     return fd
@@ -356,7 +363,7 @@ def test_lock_is_released_after_every_outcome(sock_dir, tmp_path, real_hook):
     detect_or_spawn(sock_dir / "y.sock", tmp_path / "logs", lock_dir=tmp_path,
                     startup_timeout=0.2, spawn_cmd=["sleep", "30"],
                     _spawn_hook=real_hook)
-    fd = os.open(tmp_path / "spawn.lock", os.O_WRONLY)
+    fd = os.open(tmp_path / "pare-spawn.lock", os.O_WRONLY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # raises if still held
     finally:
@@ -389,49 +396,199 @@ def test_concurrent_spawn_only_one_spawns(sock_dir, tmp_path, real_hook):
                 reap(r.pid, sigterm_timeout=3)
 
 
-# --- reap --------------------------------------------------------------------
+def test_default_lock_lives_beside_the_socket(sock_dir, tmp_path):
+    sock_path = sock_dir / "stale.sock"
+    make_stale_socket(sock_path)
+    fd = _hold_lock(sock_dir)  # sock_dir / "pare-spawn.lock"
+    try:
+        result = detect_or_spawn(sock_path, tmp_path / "logs",
+                                 startup_timeout=0.3, _spawn_hook=never_called)
+    finally:
+        os.close(fd)
+    assert result.error == "concurrent spawn timed out"
+    assert sock_path.exists()
 
 
-def test_reap_sigterm_terminates_a_normal_child(children):
+# --- a starting daemon (bound, not yet listening): spec Correction 2026-09-26 --
+
+
+def _bind_without_listen(path: Path) -> socket.socket:
+    """What agent_core's Daemon.serve looks like during astartup()."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(str(path))
+    return s
+
+
+def test_starting_daemon_is_not_unlinked_or_competed_with(sock_dir, tmp_path):
+    sock_path = sock_dir / "starting.sock"
+    starting = _bind_without_listen(sock_path)
+    try:
+        inode = os.stat(sock_path).st_ino
+        result = detect_or_spawn(sock_path, tmp_path / "logs", lock_dir=tmp_path,
+                                 startup_timeout=0.4, _spawn_hook=never_called)
+        assert result.mode == "failed"
+        assert "is starting but did not accept connections within 0.4s" in result.error
+        assert os.stat(sock_path).st_ino == inode  # same socket, not unlinked
+
+        # The same daemon finishing astartup() inside the timeout -> attached.
+        timer = threading.Timer(0.3, starting.listen, args=(1,))
+        timer.start()
+        try:
+            result = detect_or_spawn(sock_path, tmp_path / "logs", lock_dir=tmp_path,
+                                     startup_timeout=3.0, _spawn_hook=never_called)
+        finally:
+            timer.join()
+        assert result.mode == "attached"
+        assert os.stat(sock_path).st_ino == inode
+    finally:
+        starting.close()
+
+
+def test_starting_daemon_recheck_under_the_lock(sock_dir, tmp_path, monkeypatch):
+    # First probe sees a stale leftover. Before we take the lock, a lock-less
+    # starter (the systemd unit) unlinks it and binds a fresh socket, not yet
+    # listening. The check immediately before the unlink must catch that.
+    import fcntl
+    sock_path = sock_dir / "restart.sock"
+    make_stale_socket(sock_path)
+    starters: list[socket.socket] = []
+    starter_inode: list[int] = []
+    real_flock = fcntl.flock
+
+    def systemd_restarts_first(fd, op):
+        if op & fcntl.LOCK_EX and not starters:
+            os.unlink(sock_path)
+            starters.append(_bind_without_listen(sock_path))
+            starter_inode.append(os.stat(sock_path).st_ino)
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(daemon_lifecycle.fcntl, "flock", systemd_restarts_first)
+    try:
+        result = detect_or_spawn(sock_path, tmp_path / "logs", lock_dir=tmp_path,
+                                 startup_timeout=0.3, _spawn_hook=never_called)
+        assert starters, "flock wrapper never ran"
+        assert result.mode == "failed"
+        assert "is starting" in result.error
+        assert os.stat(sock_path).st_ino == starter_inode[0]  # not unlinked
+    finally:
+        for s in starters:
+            s.close()
+
+
+def test_unreadable_proc_net_unix_fails_closed(sock_dir, tmp_path, monkeypatch):
+    sock_path = sock_dir / "stale.sock"
+    make_stale_socket(sock_path)
+    monkeypatch.setattr(daemon_lifecycle, "_PROC_NET_UNIX", str(tmp_path / "missing"))
+    assert daemon_lifecycle._bound_in_kernel(sock_path) is None
+    result = detect_or_spawn(sock_path, tmp_path / "logs", lock_dir=tmp_path,
+                             startup_timeout=0.3, _spawn_hook=never_called)
+    assert result.mode == "failed"
+    assert "could not read" in result.error
+    assert sock_path.exists()  # not unlinked
+
+
+def test_bound_in_kernel_matches_the_path_column_exactly(sock_dir):
+    spaced = sock_dir / "a b.sock"
+    s1 = _bind_without_listen(spaced)
+    abstract = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    abstract_name = str(sock_dir / "abstract.sock")
+    abstract.bind("\0" + abstract_name)  # listed as "@<name>"
+    stale = sock_dir / "stale.sock"
+    make_stale_socket(stale)
+    try:
+        assert daemon_lifecycle._bound_in_kernel(spaced) is True
+        assert daemon_lifecycle._bound_in_kernel(sock_dir / "a b") is False  # prefix
+        assert daemon_lifecycle._bound_in_kernel(sock_dir / "b.sock") is False  # suffix
+        assert daemon_lifecycle._bound_in_kernel(Path(abstract_name)) is False
+        assert daemon_lifecycle._bound_in_kernel(stale) is False  # closed leftover
+    finally:
+        s1.close()
+        abstract.close()
+
+
+# --- reap ----------------------------------------------------------------------
+
+
+def _spawn_owned(sock_dir, tmp_path, hook, **kw) -> int:
+    result = detect_or_spawn(sock_dir / "owned.sock", tmp_path / "logs",
+                             spawn_cmd=fake_daemon_cmd(**kw), _spawn_hook=hook)
+    assert result.mode == "spawned", result.error
+    return result.pid
+
+
+def test_reap_sigterm_terminates_an_owned_child(sock_dir, tmp_path, real_hook):
+    pid = _spawn_owned(sock_dir, tmp_path, real_hook)
+    assert reap(pid, sigterm_timeout=3.0) == "exited_clean"
+    (child,) = real_hook.children
+    assert child.returncode == -signal.SIGTERM
+    assert pid not in daemon_lifecycle._owned
+
+
+def test_reap_escalates_to_sigkill(sock_dir, tmp_path, real_hook):
+    pid = _spawn_owned(sock_dir, tmp_path, real_hook, ignore_term=True)
+    assert reap(pid, sigterm_timeout=0.3, sigkill_timeout=3.0) == "killed"
+    (child,) = real_hook.children
+    assert child.returncode == -signal.SIGKILL
+
+
+def test_reap_of_already_exited_owned_child_is_clean(sock_dir, tmp_path, real_hook):
+    pid = _spawn_owned(sock_dir, tmp_path, real_hook)
+    os.kill(pid, signal.SIGKILL)  # our own child; the PID is held as a zombie
+    os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+    assert reap(pid, sigterm_timeout=1.0) == "exited_clean"
+    assert reap(pid) == "not_owned"  # second reap: already reaped, no signal
+
+
+def test_reap_refuses_a_pid_it_did_not_spawn(children):
     child = subprocess.Popen(["sleep", "30"], start_new_session=True)
     children.append(child)
-    assert reap(child.pid, sigterm_timeout=2.0) == "exited_clean"
-    assert child.poll() is not None
+    assert reap(child.pid, sigterm_timeout=0.5) == "not_owned"
+    time.sleep(0.1)
+    assert child.poll() is None  # untouched
+    os.killpg(child.pid, signal.SIGKILL)  # our own session-leader child
+    child.wait(timeout=5)
 
 
-def test_reap_escalates_to_sigkill(children):
-    child = subprocess.Popen(
-        [sys.executable, "-c",
-         "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-         "print('ready', flush=True); time.sleep(30)"],
-        stdout=subprocess.PIPE, start_new_session=True,
-    )
-    children.append(child)
-    assert child.stdout.readline() == b"ready\n"  # handler installed
-    child.stdout.close()
-    assert reap(child.pid, sigterm_timeout=0.3, sigkill_timeout=2.0) == "killed"
-    assert child.poll() is not None
-
-
-def test_reap_of_already_exited_child_is_clean(children):
-    child = subprocess.Popen(["true"], start_new_session=True)
-    children.append(child)
-    # Wait for exit WITHOUT reaping: the zombie keeps the PID from being reused.
-    os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
-    assert reap(child.pid, sigterm_timeout=1.0) == "exited_clean"
-
-
-def test_reap_never_killpgs_a_child_outside_its_own_group(children, monkeypatch):
-    # A child left in OUR process group must be signalled alone. killpg is
-    # patched to record-and-refuse, so a broken guard can't hit pytest's group.
+def test_reap_never_killpgs_a_child_outside_its_own_group(
+        sock_dir, tmp_path, children, monkeypatch):
+    # An owned child left in OUR process group must be signalled alone. killpg
+    # is patched to record-and-refuse, so a broken guard can't hit pytest's group.
     killpg_calls: list = []
 
     def fake_killpg(pgid, sig):
         killpg_calls.append((pgid, sig))
         raise AssertionError("killpg on a non-leader")
 
+    def same_group_hook(cmd, popen_kwargs):
+        kwargs = dict(popen_kwargs, start_new_session=False)
+        child = subprocess.Popen(cmd, **kwargs)
+        children.append(child)
+        return child
+
+    pid = _spawn_owned(sock_dir, tmp_path, same_group_hook)
+    assert os.getpgid(pid) == os.getpgrp()
     monkeypatch.setattr(daemon_lifecycle.os, "killpg", fake_killpg)
-    child = subprocess.Popen(["sleep", "30"])  # no new session: shares our pgid
-    children.append(child)
-    assert reap(child.pid, sigterm_timeout=2.0) == "exited_clean"
+    assert reap(pid, sigterm_timeout=3.0) == "exited_clean"
     assert killpg_calls == []
+
+
+def test_waiting_on_a_starting_daemon_needs_no_lock(sock_dir, tmp_path):
+    # Attaching never needs the spawn lock, so an unopenable lock must not
+    # stop us waiting for a starting daemon.
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    sock_path = sock_dir / "starting.sock"
+    starting = _bind_without_listen(sock_path)
+    lock_dir = tmp_path / "lock"
+    lock_dir.mkdir()
+    lock_dir.chmod(0o500)
+    timer = threading.Timer(0.3, starting.listen, args=(1,))
+    timer.start()
+    try:
+        result = detect_or_spawn(sock_path, tmp_path / "logs", lock_dir=lock_dir,
+                                 startup_timeout=3.0, _spawn_hook=never_called)
+    finally:
+        timer.join()
+        lock_dir.chmod(0o700)
+        starting.close()
+    assert result.mode == "attached"

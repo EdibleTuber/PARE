@@ -8,16 +8,26 @@ block; the TUI awaits them on a worker thread.
 `detect_or_spawn(socket_path, log_dir)`:
 
 1. Probe `socket_path` with `connect()`. Success -> `attached`.
-   `FileNotFoundError` / `ConnectionRefusedError` -> absent or stale, go on.
-   `PermissionError` or anything else -> `failed`, never spawn.
-2. Take a non-blocking `flock` on `<lock_dir>/spawn.lock`. If another process
-   (or thread) holds it, do not reap or spawn: poll the socket up to
-   `startup_timeout` and return `attached`, or `failed` ("concurrent spawn
-   timed out").
+   `FileNotFoundError` -> absent, go on.
+   `ConnectionRefusedError` does NOT by itself mean stale: agent_core's
+   `Daemon.serve` binds the socket and defers `listen()` until `astartup()`
+   returns, so a *starting* daemon refuses too (spec, "Correction
+   2026-09-26"). A refused path still listed in /proc/net/unix is a daemon
+   that has bound but not yet listened: never spawn, never unlink -- poll
+   for it to start listening (`attached`) or give up (`failed`). Only a
+   refused socket that the kernel no longer lists is stale. If /proc/net/unix
+   can't be read we fail closed and treat the socket as possibly starting.
+   `PermissionError`, a non-socket at the path, or anything else -> `failed`,
+   never spawn.
+2. Take a non-blocking `flock` on `socket_path.parent / "pare-spawn.lock"`
+   (or `lock_dir / "pare-spawn.lock"`). If another process (or thread) holds
+   it, do not reap or spawn: poll the socket up to `startup_timeout` and
+   return `attached`, or `failed` ("concurrent spawn timed out").
 3. Under the lock: probe again. A connect that now succeeds means a
    concurrent spawner finished between our probe and our lock -> `attached`.
-   `ConnectionRefusedError` -> the file is a dead daemon's leftover; unlink it.
-   The unlink happens ONLY here: lock held AND a fresh connect just refused.
+   Refused -> the starting-vs-stale check is repeated immediately before the
+   unlink. The unlink happens ONLY here: lock held AND a fresh connect just
+   refused AND the path is a socket AND the kernel does not list it.
 4. Open a temp log, Popen the daemon in its own session
    (`start_new_session=True`) with `PARE_SOCKET_PATH` set to `socket_path`,
    rename the log to `daemon-<pid>.log`. If the log can't be opened, the
@@ -29,9 +39,10 @@ block; the TUI awaits them on a worker thread.
 
 The flock is released and its fd closed on every return path.
 
-`reap(pid)`: SIGTERM the process group, escalate to SIGKILL after
-`sigterm_timeout`, give up after `sigkill_timeout`. An already-gone PID is
-`exited_clean`.
+`reap(pid)`: only for a PID this module spawned and has not yet reaped;
+any other PID is a no-op returning `not_owned` (the PID may have been reused
+by an unrelated process). SIGTERM the process group, escalate to SIGKILL
+after `sigterm_timeout`, give up after `sigkill_timeout`.
 
 Signalling safety: every `killpg` in this module first checks that the target
 is the leader of its own process group (`getpgid(pid) == pid`) and that the
@@ -61,6 +72,8 @@ _REAP_POLL_INTERVAL = 0.05
 _TIMEOUT_TERM_WAIT = 2.0
 _TIMEOUT_KILL_WAIT = 2.0
 _PIPE_TAIL_BYTES = 4096
+_PROC_NET_UNIX = "/proc/net/unix"
+_LOCK_NAME = "pare-spawn.lock"
 
 # Popen objects for children we spawned and have not reaped yet. Holding the
 # reference stops `subprocess`'s own `_cleanup()` from reaping the child
@@ -109,6 +122,55 @@ def _not_a_socket(socket_path: Path) -> bool:
         return not stat.S_ISSOCK(os.lstat(socket_path).st_mode)
     except FileNotFoundError:
         return False
+
+
+def _bound_in_kernel(socket_path: Path) -> bool | None:
+    """Is some live socket bound to exactly this path?
+
+    Reads /proc/net/unix: seven fixed columns, then the bound path, which may
+    contain spaces (so split at most 7 times and keep the rest verbatim).
+    Abstract sockets appear as `@name` and can never equal an absolute
+    filesystem path. A dead daemon's leftover file is not listed (its socket
+    was closed); a daemon between bind() and listen() is.
+
+    Returns None if the file can't be read -- callers must then assume the
+    socket may be live (fail closed: no unlink).
+    """
+    wanted = {os.fsencode(str(socket_path)), os.fsencode(os.path.abspath(socket_path))}
+    try:
+        with open(_PROC_NET_UNIX, "rb") as f:
+            lines = f.read().split(b"\n")
+    except OSError:
+        return None
+    for line in lines[1:]:  # header first
+        parts = line.split(None, 7)
+        if len(parts) == 8 and parts[7] in wanted:
+            return True
+    return False
+
+
+def _wait_for_starting_daemon(
+    socket_path: Path, connect_timeout: float, startup_timeout: float,
+    listed: bool | None,
+) -> DaemonSpawnResult:
+    """A daemon (probably) bound but not yet listening: never spawn or unlink;
+    wait for it to accept."""
+    deadline = time.monotonic() + startup_timeout
+    while True:
+        if _probe_ok(socket_path, connect_timeout):
+            return _attached()
+        if time.monotonic() >= deadline:
+            if listed is None:
+                return _failed(
+                    f"daemon at {socket_path} may be starting (could not read "
+                    f"{_PROC_NET_UNIX}) and did not accept connections within "
+                    f"{startup_timeout:g}s; not removing it"
+                )
+            return _failed(
+                f"daemon at {socket_path} is starting but did not accept "
+                f"connections within {startup_timeout:g}s"
+            )
+        time.sleep(_POLL_INTERVAL)
 
 
 def _probe_ok(socket_path: Path, timeout: float) -> bool:
@@ -200,7 +262,7 @@ def detect_or_spawn(
     """Blocking. Callers await it on a thread.
 
     `spawn_cmd` defaults to `["pare-daemon"]`. The lock lives at
-    `(lock_dir or log_dir) / "spawn.lock"`.
+    `(lock_dir or socket_path.parent) / "pare-spawn.lock"`.
     """
     socket_path = Path(socket_path)
     log_dir = Path(log_dir)
@@ -216,6 +278,11 @@ def detect_or_spawn(
     except ConnectionRefusedError:
         if _not_a_socket(socket_path):
             return _failed(f"socket_path is not a socket: {socket_path}")
+        listed = _bound_in_kernel(socket_path)
+        if listed is not False:
+            return _wait_for_starting_daemon(
+                socket_path, connect_timeout, startup_timeout, listed,
+            )
     except PermissionError:
         return _failed(f"permission denied: {socket_path}")
     except OSError as exc:
@@ -228,14 +295,16 @@ def detect_or_spawn(
     except OSError:
         pass
 
-    # 4. Lock. Without a lock we must not unlink anything, so an unopenable
-    # lock file is a failure, not a reason to spawn unserialized.
-    lock_path = (Path(lock_dir) if lock_dir is not None else log_dir) / "spawn.lock"
-    if lock_dir is not None:
-        try:
-            Path(lock_dir).mkdir(mode=0o700, parents=True, exist_ok=True)
-        except OSError:
-            pass
+    # 4. Lock, next to the socket it guards (not in log_dir, so an unwritable
+    # log_dir still reaches the PIPE fallback). Without a lock we must not
+    # unlink anything, so an unopenable lock file is a failure, not a reason
+    # to spawn unserialized.
+    lock_parent = Path(lock_dir) if lock_dir is not None else socket_path.parent
+    lock_path = lock_parent / _LOCK_NAME
+    try:
+        lock_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        pass
     try:
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
     except OSError as exc:
@@ -294,10 +363,17 @@ def _spawn_locked(
     except FileNotFoundError:
         pass
     except ConnectionRefusedError:
-        # Lock held AND a fresh connect was just refused: stale leftover --
-        # provided it is actually a socket.
+        # Lock held AND a fresh connect was just refused. Stale only if it is
+        # a socket AND the kernel no longer lists it -- re-checked here,
+        # immediately before the unlink, because a lock-less starter (the
+        # systemd unit) may have bound since our first probe.
         if _not_a_socket(socket_path):
             return _failed(f"socket_path is not a socket: {socket_path}")
+        listed = _bound_in_kernel(socket_path)
+        if listed is not False:
+            return _wait_for_starting_daemon(
+                socket_path, connect_timeout, startup_timeout, listed,
+            )
         try:
             os.unlink(socket_path)
             reaped_stale = True
@@ -414,30 +490,10 @@ def _terminate_child(child: subprocess.Popen) -> None:
         pass
 
 
-def _exited(pid: int) -> bool:
-    """True once pid is gone. Reaps it if it is our child."""
-    with _owned_lock:
-        child = _owned.get(pid)
-    if child is not None:
-        return child.poll() is not None
-    try:
-        done, _ = os.waitpid(pid, os.WNOHANG)
-        return done != 0
-    except ChildProcessError:
-        # Not our child: fall back to a liveness check.
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-        return False
-
-
-def _wait_exited(pid: int, timeout: float) -> bool:
+def _wait_exited(child: subprocess.Popen, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while True:
-        if _exited(pid):
+        if child.poll() is not None:
             return True
         if time.monotonic() >= deadline:
             return False
@@ -449,21 +505,30 @@ def reap(
     *,
     sigterm_timeout: float = 5.0,
     sigkill_timeout: float = 2.0,
-) -> Literal["exited_clean", "killed", "abandoned"]:
+) -> Literal["exited_clean", "killed", "abandoned", "not_owned"]:
     """Blocking. SIGTERM the process group; escalate to SIGKILL on timeout;
-    return the outcome. Never raises for a stale PID (already-exited)."""
+    return the outcome. Never raises for a stale PID (already-exited).
+
+    Signals only a PID this module spawned and still holds the Popen for.
+    Holding the Popen keeps the child's zombie -- and so its PID -- ours until
+    it is waited on here, so the PID cannot have been reused. Any other PID
+    (never ours, or already reaped) returns `not_owned` without a signal.
+    """
+    with _owned_lock:
+        child = _owned.get(pid)
+    if child is None:
+        return "not_owned"
     try:
-        if not _signal_group(pid, signal.SIGTERM):
-            _exited(pid)  # reap a zombie if it is ours
+        if child.poll() is not None:
             return "exited_clean"
-        if _wait_exited(pid, sigterm_timeout):
+        _signal_group(pid, signal.SIGTERM)
+        if _wait_exited(child, sigterm_timeout):
             return "exited_clean"
         _signal_group(pid, signal.SIGKILL)
-        if _wait_exited(pid, sigkill_timeout):
+        if _wait_exited(child, sigkill_timeout):
             return "killed"
-        return "abandoned"
+        return "abandoned"  # stays in _owned: still ours, still alive
     finally:
-        with _owned_lock:
-            child = _owned.get(pid)
-            if child is not None and child.returncode is not None:
+        if child.returncode is not None:
+            with _owned_lock:
                 _owned.pop(pid, None)
