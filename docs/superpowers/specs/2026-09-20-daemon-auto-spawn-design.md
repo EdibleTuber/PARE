@@ -233,3 +233,18 @@ Seven cases against `detect_or_spawn`:
 ## 10. Code in this document
 
 None, deliberately. This is a lifecycle + concurrency design (Popen ordering, flock semantics, signal propagation, socket-state transitions) — exactly the class where CLAUDE.md says code in prose is unexecuted, remote from real files, and authoritative-looking enough to be transcribed past defects. The plan lands the code against `pare/tui/daemon_lifecycle.py` and its neighbors, with real imports and real tests running.
+
+---
+
+## Correction 2026-09-26 (supersedes §3, §4 step 1 and step 2a, §4.1 lock location)
+
+Task 1's review found that "`connect()` refused means stale" is wrong for this daemon. agent_core's `DaemonServer.serve` (`agent_core/daemon.py`) binds the socket and deliberately defers `listen()` until `agent.astartup()` returns, so a *starting* daemon refuses connections too. It also unlinks the socket path unconditionally before binding. On agenthost `pare-daemon` runs as a user systemd unit with `Restart=always`, so a TUI launched during a restart would have unlinked the starting daemon's socket and spawned a competitor. The first daemon would keep running with its workers loaded, and nothing could reach it.
+
+Corrected rule:
+- **Refused, and the path IS listed in `/proc/net/unix`:** a daemon has bound but not yet started listening, so it is starting. Do not spawn and do not unlink. Poll `connect()` up to `startup_timeout`. Success means `attached`; timeout means `failed` ("daemon at <path> is starting but did not accept connections within Xs").
+- **Refused, and the path is NOT listed in `/proc/net/unix`:** stale leftover. Reap under the flock and spawn, as before.
+- The same distinction is re-checked under the flock, immediately before any unlink.
+
+The lock file moves from `log_dir` to `socket_path.parent / "pare-spawn.lock"`, next to the socket it guards. That keeps an unwritable `log_dir` on the §4.1 pipe fallback instead of failing the lock.
+
+`reap()` signals only PIDs this process spawned (tracked in the module); any other PID is a no-op returning `"not_owned"`. The pgid guard alone does not protect against PID reuse.
