@@ -206,3 +206,380 @@ def test_build_uart_pane_uses_mcp_source_when_env_var_set(monkeypatch):
     pane = app._build_uart_pane()
     assert isinstance(pane.source, McpConsoleSource)
     assert pane.source.endpoint == "http://100.97.133.126:9102/mcp"
+
+
+# --- Daemon auto-spawn wiring (plan 2026-09-20-daemon-auto-spawn, Task 3) ---
+#
+# Every test here monkeypatches BOTH `detect_or_spawn` and `reap` at the
+# `pare.tui.app` import site (plan C4): a faked pid=12345 must never reach
+# the real `reap`, and nothing may spawn a real daemon or write into the
+# real ~/.local/state/pare/.
+
+
+class _LifecycleSession:
+    """A session double with the subscribe/start/stop surface on_mount
+    needs; `start` either connects or raises like a missing socket."""
+
+    def __init__(self, *, start_ok: bool) -> None:
+        self.start_ok = start_ok
+        self.started = False
+        self.subscribers: list = []
+
+    def subscribe(self, handler) -> None:
+        self.subscribers.append(handler)
+
+    async def start(self) -> None:
+        if not self.start_ok:
+            raise FileNotFoundError(2, "No such file or directory")
+        self.started = True
+
+    async def stop(self) -> None:
+        pass
+
+    async def send(self, msg) -> None:
+        pass
+
+
+def _patch_lifecycle(monkeypatch, result=None, *, detect=None, reap_raises=False):
+    """Install fakes; return (detect_calls, reap_calls, transcript_writes)."""
+    from pare.tui import app as app_module
+
+    detect_calls: list = []
+    reap_calls: list = []
+
+    def fake_detect(socket_path, log_dir, **kwargs):
+        detect_calls.append((socket_path, log_dir))
+        if detect is not None:
+            return detect()
+        return result
+
+    def fake_reap(pid, **kwargs):
+        reap_calls.append(pid)
+        if reap_raises:
+            raise RuntimeError("reap blew up")
+        return "exited_clean"
+
+    monkeypatch.setattr(app_module, "detect_or_spawn", fake_detect)
+    monkeypatch.setattr(app_module, "reap", fake_reap)
+    transcript = _record_transcript(monkeypatch)
+    return detect_calls, reap_calls, transcript
+
+
+def _record_transcript(monkeypatch) -> list[str]:
+    """Record every write that reaches the #transcript RichLog widget. Its
+    rendered `lines` wrap at 80 columns mid-path, so assert on the writes."""
+    from textual.widgets import RichLog
+
+    writes: list[str] = []
+    original = RichLog.write
+
+    def spy(self, content, *args, **kwargs):
+        # RichLog defers writes made before its size is known and replays
+        # them through write() later; count each write once, on replay.
+        if self.id == "transcript" and getattr(self, "_size_known", True):
+            writes.append(str(content))
+        return original(self, content, *args, **kwargs)
+
+    monkeypatch.setattr(RichLog, "write", spy)
+    return writes
+
+
+async def _mount_auto_spawn(app, pilot) -> None:
+    """Wait for the background spawn+connect task on_mount started."""
+    assert app._daemon_connect_task is not None
+    await app._daemon_connect_task
+    await pilot.pause()
+
+
+def _make_auto_spawn_app(tmp_path, *, start_ok: bool, **kwargs):
+    from pathlib import Path
+
+    from pare.tui.app import PareTUI
+
+    app = PareTUI(
+        Path("/nonexistent/pare.sock"), "chan-1", "/tmp",
+        auto_spawn=True, daemon_log_dir=tmp_path / "logs", **kwargs,
+    )
+    app.session = _LifecycleSession(start_ok=start_ok)
+    return app
+
+
+async def test_spawned_daemon_is_announced_and_reaped_on_exit(monkeypatch, tmp_path):
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    log_path = tmp_path / "logs" / "daemon-12345.log"
+    detect_calls, reap_calls, transcript = _patch_lifecycle(
+        monkeypatch,
+        DaemonSpawnResult(mode="spawned", pid=12345, log_path=log_path, error=None),
+    )
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    async with app.run_test(size=(240, 40)) as pilot:
+        await _mount_auto_spawn(app, pilot)
+        text = "\n".join(transcript)
+        assert "PID 12345" in text
+        assert str(log_path) in text
+        assert "attached to running" not in text
+        assert app.query_one("#status-bar").daemon_state == "up"
+        assert reap_calls == []  # not before exit
+    assert detect_calls == [(app.socket_path, tmp_path / "logs")]
+    assert reap_calls == [12345]
+
+
+async def test_attached_daemon_is_announced_and_not_reaped(monkeypatch, tmp_path):
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    detect_calls, reap_calls, transcript = _patch_lifecycle(
+        monkeypatch,
+        DaemonSpawnResult(mode="attached", pid=None, log_path=None, error=None),
+    )
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    async with app.run_test(size=(240, 40)) as pilot:
+        await _mount_auto_spawn(app, pilot)
+        assert "[attached to running pare-daemon at /nonexistent/pare.sock]" in transcript
+        assert app.query_one("#status-bar").daemon_state == "up"
+    assert len(detect_calls) == 1
+    assert reap_calls == []
+
+
+async def test_spawn_failure_shows_reason_and_spawn_failed_state(monkeypatch, tmp_path):
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    _, reap_calls, transcript = _patch_lifecycle(
+        monkeypatch,
+        DaemonSpawnResult(
+            mode="failed", pid=None, log_path=tmp_path / "logs" / "daemon-9.log",
+            error="did not accept a connection within 5s -- see /x/daemon-9.log",
+        ),
+    )
+    app = _make_auto_spawn_app(tmp_path, start_ok=False)
+    async with app.run_test(size=(240, 40)) as pilot:
+        await _mount_auto_spawn(app, pilot)
+        text = "\n".join(transcript)
+        assert "daemon spawn failed: did not accept a connection within 5s" in text
+        # The existing start/except path ran, and the bar says spawn-failed,
+        # not the ambiguous DOWN.
+        assert app.session.started is False
+        bar = app.query_one("#status-bar")
+        assert bar.daemon_state == "spawn-failed"
+        app._refresh_status_bar()  # the 1s timer's path keeps it
+        assert bar.daemon_state == "spawn-failed"
+    assert reap_calls == []
+
+
+async def test_captured_tail_goes_on_its_own_transcript_line(monkeypatch, tmp_path):
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    _, _, transcript = _patch_lifecycle(
+        monkeypatch,
+        DaemonSpawnResult(
+            mode="failed", pid=None, log_path=None,
+            error="exited during startup, code 1 -- no log; captured tail below\n"
+                  "ImportError: boom",
+        ),
+    )
+    app = _make_auto_spawn_app(tmp_path, start_ok=False)
+    async with app.run_test(size=(240, 40)) as pilot:
+        await _mount_auto_spawn(app, pilot)
+        lines = transcript
+        assert any(l.startswith("[daemon spawn failed: exited during startup, code 1")
+                   for l in lines)
+        assert "[ImportError: boom]" in lines
+
+
+async def test_without_auto_spawn_nothing_is_detected_or_spawned(monkeypatch, tmp_path):
+    """C1: the default constructor -- what every other test uses -- must
+    never reach detect_or_spawn."""
+    from pathlib import Path
+
+    from pare.tui.app import PareTUI
+
+    detect_calls, reap_calls, transcript = _patch_lifecycle(monkeypatch, None)
+    app = PareTUI(Path("/nonexistent/pare.sock"), "chan-1", "/tmp")
+    app.session = _LifecycleSession(start_ok=False)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.query_one("#status-bar").daemon_state == "down"
+    assert detect_calls == []
+    assert reap_calls == []
+
+
+async def test_systemd_managed_attach_failure_names_the_unit(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from pare.tui.app import SYSTEMD_ATTACH_FAILED, PareTUI
+
+    detect_calls, _, transcript = _patch_lifecycle(monkeypatch, None)
+    app = PareTUI(
+        Path("/nonexistent/pare.sock"), "chan-1", "/tmp",
+        systemd_managed=True, daemon_log_dir=tmp_path,
+    )
+    app.session = _LifecycleSession(start_ok=False)
+    async with app.run_test(size=(240, 40)) as pilot:
+        await pilot.pause()
+        assert SYSTEMD_ATTACH_FAILED in transcript
+        assert app.query_one("#status-bar").daemon_state == "down"
+    assert detect_calls == []
+
+
+async def test_exit_during_an_in_flight_spawn_still_reaps_it(monkeypatch, tmp_path):
+    """The spawn lane runs in the background so the UI is live meanwhile.
+    Quitting before detect_or_spawn returns must not orphan the daemon it
+    goes on to start: on_unmount waits the spawn out and reaps its PID."""
+    import threading
+
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_detect():
+        entered.set()
+        release.wait(10)
+        return DaemonSpawnResult(
+            mode="spawned", pid=12345, log_path=tmp_path / "l.log", error=None,
+        )
+
+    _, reap_calls, transcript = _patch_lifecycle(monkeypatch, detect=slow_detect)
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    async with app.run_test() as pilot:
+        await asyncio.to_thread(entered.wait, 5)
+        assert app._daemon_owned_pid is None  # still in flight
+        # Release the spawn only after the exit has begun.
+        threading.Timer(0.3, release.set).start()
+    assert reap_calls == [12345]
+
+
+async def test_a_reap_failure_does_not_break_exit(monkeypatch, tmp_path):
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    _, reap_calls, transcript = _patch_lifecycle(
+        monkeypatch,
+        DaemonSpawnResult(mode="spawned", pid=12345, log_path=None, error=None),
+        reap_raises=True,
+    )
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    async with app.run_test(size=(240, 40)) as pilot:
+        await _mount_auto_spawn(app, pilot)
+        assert any("logs at none" in w for w in transcript)
+    assert reap_calls == [12345]
+
+
+# --- launch_policy: main()'s spawn decision (plan C5, spec §8) ---
+
+
+class _FakeRun:
+    def __init__(self, *, returncode=None, raises=None):
+        self.returncode = returncode
+        self.raises = raises
+        self.calls: list = []
+
+    def __call__(self, argv, **kwargs):
+        import subprocess
+
+        self.calls.append(argv)
+        if self.raises is not None:
+            raise self.raises
+        return subprocess.CompletedProcess(argv, self.returncode)
+
+
+def test_launch_policy_enabled_systemd_unit_disables_auto_spawn():
+    from pare.tui.app import LaunchPolicy, launch_policy
+
+    run = _FakeRun(returncode=0)
+    assert launch_policy({}, run) == LaunchPolicy(auto_spawn=False, systemd_managed=True)
+    assert run.calls == [["systemctl", "--user", "is-enabled", "pare-daemon"]]
+
+
+def test_launch_policy_no_unit_auto_spawns():
+    from pare.tui.app import LaunchPolicy, launch_policy
+
+    assert launch_policy({}, _FakeRun(returncode=1)) == LaunchPolicy(
+        auto_spawn=True, systemd_managed=False
+    )
+
+
+def test_launch_policy_missing_systemctl_counts_as_no_unit():
+    from pare.tui.app import LaunchPolicy, launch_policy
+
+    run = _FakeRun(raises=FileNotFoundError(2, "No such file", "systemctl"))
+    assert launch_policy({}, run) == LaunchPolicy(auto_spawn=True, systemd_managed=False)
+
+
+def test_launch_policy_env_opt_out():
+    from pare.tui.app import LaunchPolicy, launch_policy
+
+    env = {"PARE_TUI_NO_AUTO_SPAWN": "1"}
+    assert launch_policy(env, _FakeRun(returncode=1)) == LaunchPolicy(
+        auto_spawn=False, systemd_managed=False
+    )
+    # The unit check still wins its transcript hint under the opt-out.
+    assert launch_policy(env, _FakeRun(returncode=0)) == LaunchPolicy(
+        auto_spawn=False, systemd_managed=True
+    )
+
+
+def test_launch_policy_hung_systemctl_fails_closed():
+    import subprocess
+
+    from pare.tui.app import LaunchPolicy, launch_policy
+
+    run = _FakeRun(raises=subprocess.TimeoutExpired(["systemctl"], 5))
+    assert launch_policy({}, run) == LaunchPolicy(auto_spawn=False, systemd_managed=False)
+
+
+def test_main_builds_the_app_from_launch_policy(monkeypatch):
+    """main() passes the policy through; the app is not actually run."""
+    from pare.tui import app as app_module
+
+    built: list = []
+
+    class _RecordingApp:
+        def __init__(self, *args, **kwargs):
+            built.append(kwargs)
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr(app_module, "PareTUI", _RecordingApp)
+    monkeypatch.setattr(
+        app_module, "launch_policy",
+        lambda env: app_module.LaunchPolicy(auto_spawn=False, systemd_managed=True),
+    )
+    app_module.main()
+    assert built == [{"auto_spawn": False, "systemd_managed": True}]
+
+
+def test_daemon_command_prefers_the_sibling_of_this_interpreter(monkeypatch, tmp_path):
+    """A venv's pare-tui run without activation has no pare-daemon on PATH;
+    the spawn must use the one installed beside the running interpreter."""
+    from pare.tui import app as app_module
+
+    exe = tmp_path / "python3"
+    exe.write_text("")
+    daemon = tmp_path / "pare-daemon"
+    daemon.write_text("#!/bin/sh\n")
+    daemon.chmod(0o755)
+    monkeypatch.setattr(app_module.sys, "executable", str(exe))
+    assert app_module._daemon_command() == [str(daemon)]
+
+    daemon.unlink()
+    assert app_module._daemon_command() == ["pare-daemon"]
+
+
+async def test_detect_or_spawn_gets_the_resolved_daemon_command(monkeypatch, tmp_path):
+    from pare.tui import app as app_module
+    from pare.tui.daemon_lifecycle import DaemonSpawnResult
+
+    seen: list = []
+
+    def fake_detect(socket_path, log_dir, **kwargs):
+        seen.append(kwargs.get("spawn_cmd"))
+        return DaemonSpawnResult(mode="attached", pid=None, log_path=None, error=None)
+
+    monkeypatch.setattr(app_module, "detect_or_spawn", fake_detect)
+    monkeypatch.setattr(app_module, "reap", lambda pid, **kw: "not_owned")
+    monkeypatch.setattr(app_module, "_daemon_command", lambda: ["/x/pare-daemon"])
+    app = _make_auto_spawn_app(tmp_path, start_ok=True)
+    async with app.run_test() as pilot:
+        await _mount_auto_spawn(app, pilot)
+    assert seen == [["/x/pare-daemon"]]
