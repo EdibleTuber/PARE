@@ -21,6 +21,13 @@
 - The status bar's third state is spelled `daemon:spawn-failed` (with hyphen), distinct from `daemon:up` and `daemon:DOWN`.
 - Plan-supplied code below is a sketch. Deviating to fix a defect is correct — say so in your task report.
 
+## Pre-flight corrections (2026-09-26, supersede task text where they conflict)
+
+- **C1 — spawning is opt-in on the app.** `PareTUI.__init__` gains `auto_spawn: bool = False` and `daemon_log_dir: Path | None = None`. Only `main()` passes `auto_spawn=True`, and not when `PARE_TUI_NO_AUTO_SPAWN=1`. Without this, every existing test that mounts `PareTUI(Path("/nonexistent/pare.sock"), ...)` via `run_test()` would Popen a real `pare-daemon`, wait out the startup timeout, and write into the real `~/.local/state/pare/`.
+- **C2 — the child is told where to bind.** `detect_or_spawn` sets `PARE_SOCKET_PATH=str(socket_path)` in the child's env on top of `os.environ.copy()`, so the path it polls and the path the daemon binds are the same by construction rather than by shared defaults.
+- **C3 — Task 1's test code is a sketch.** The `_spawn_hook` signature is the implementer's call (the Interfaces block and the test bodies disagree, and the Shim is referenced outside its scope). Any test path that reaches `killpg` uses a real subprocess started with `start_new_session=True`; a shim with a fake PID must never reach `killpg`.
+- **C4 — Task 3's tests never reap a stranger.** Tests monkeypatch both `detect_or_spawn` and `reap` at the `pare.tui.app` import site and pass a tmp `daemon_log_dir`. A faked `pid=12345` reaching the real `reap` would `killpg` whatever process group owns that PID.
+
 ---
 
 ## File Structure
