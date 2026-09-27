@@ -15,12 +15,26 @@
 # Usage:
 #   ./bench_doctor.sh                       # uses the defaults below
 #   PARE_SERVER=http://100.82.222.92:2929 PARE_ARTIFACT_ROOT=/mnt/bench-store \
-#     WORKER_PORT=9100 ./bench_doctor.sh
+#     WORKER_PORT=9102 ./bench_doctor.sh
 set -u   # NOT -e: a failing probe is a result to report, not a reason to stop.
 
 SERVER="${PARE_SERVER:-http://100.82.222.92:2929}"
 ARTIFACT_ROOT="${PARE_ARTIFACT_ROOT:-/mnt/bench-store}"
-WORKER_PORT="${WORKER_PORT:-9100}"
+# The worker's port is whatever its installed unit declares -- read it from
+# there rather than hardcoding it here, so the two cannot drift (a hardcoded
+# 9100 reported a healthy worker on 9102 as down). WORKER_PORT overrides.
+if [ -n "${WORKER_PORT:-}" ]; then
+  WORKER_PORT_SOURCE="from WORKER_PORT"
+else
+  unit_env="$(systemctl show pare-hardware-mcp -p Environment --value 2>/dev/null)" || unit_env=""
+  WORKER_PORT="$(printf '%s\n' $unit_env | sed -n 's/^AGENT_WORKER_PORT=\([0-9][0-9]*\)$/\1/p' | head -n1)"
+  if [ -n "$WORKER_PORT" ]; then
+    WORKER_PORT_SOURCE="from the pare-hardware-mcp unit"
+  else
+    WORKER_PORT=9102
+    WORKER_PORT_SOURCE="default -- a guess: no pare-hardware-mcp unit declares AGENT_WORKER_PORT"
+  fi
+fi
 DRIVE_ID_FILE="${ARTIFACT_ROOT}/.bench-store-id"
 
 pass() { printf '  \033[32mOK  \033[0m %s\n' "$1"; }
@@ -70,7 +84,7 @@ else
 fi
 
 # --- 4. the worker ----------------------------------------------------------
-echo "4. worker on this Pi (port $WORKER_PORT)"
+echo "4. worker on this Pi (port $WORKER_PORT, $WORKER_PORT_SOURCE)"
 if command -v ss >/dev/null 2>&1; then
   if ss -tln 2>/dev/null | grep -q ":${WORKER_PORT}\b"; then
     pass "something is listening on :$WORKER_PORT"

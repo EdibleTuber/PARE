@@ -150,12 +150,33 @@ The home URL is `http://127.0.0.1:8080/` — the Pi's **own** page, never one se
 by `agenthost`. §8.1: cold-boot the Pi with the server down and a remote home URL
 shows Chromium's own interstitial, in kiosk mode, to someone holding two probes.
 
-## 5. The artifact drive — NOT POSSIBLE YET
+## 5. The artifact drive — DONE 2026-09-27
 
-There is no external drive attached: `lsblk` shows only the 59 GB SD card
-(`/boot/firmware` + `/`), and `/mnt/bench-store` is not a mountpoint. Nothing to
-mount until a drive is plugged in, so this section is for when one is.
+**Current drive:** a 1 TB SATA SSD (`ID_SERIAL=SSD_AA000000000000001798`) in an
+**Innostor IS621** USB enclosure (`1f75:0621`), on a blue USB 3 port at 5000M,
+driver `usb-storage`. `/dev/sda1`, ext4, `LABEL=bench-store`,
+`UUID=62060d01-e036-4222-8162-4f70bf80768d`, 891 GiB free, owned by `pare`,
+`.bench-store-id` = `b2657680-9f16-4918-9195-ef3ba17da924`. It replaced the 128 GB
+NVMe the Sep 11 notes describe; the pre-change fstab is kept at
+`/etc/fstab.bak-20260927-085059`.
 
+**Verified before trusting it** — this bridge destroyed a filesystem at
+SuperSpeed in Sep (see `docs/superpowers/2026-09-11-bench-state.md`, a 7200 rpm
+spinner that also had power trouble), so it was tested rather than assumed:
+nine 1 MiB markers written across the full device and read back with caches
+dropped (no capacity wrap), then 2 × 4 GiB of random data written through ext4,
+checksummed as written, caches dropped, read back matching, `e2fsck -fn` clean, and
+no `DID_ERROR`/`JBD2`/reset lines in the kernel log. ~200 MB/s write, ~243 MB/s
+read. If it ever logs I/O errors under load, move it to a black USB 2 port (480M)
+before suspecting the SSD.
+
+**The Pi's coreutils are uutils (Rust).** `dd`, `head` and friends are the uutils
+0.8 builds; GNU's are installed as `gnudd`, `gnuhead`, `gnusha256sum`, …. uutils
+`dd` failed a raw-device write with `oflag=direct conv=fsync` (`IO error: Invalid
+input`) while the kernel log was clean — use the `gnu*` tools for any raw-device
+work, and check `readlink -f $(command -v dd)` before blaming hardware.
+
+To set up a replacement drive, the shape is:
 
 `/etc/fstab`, and `nofail` is not optional (§8.4) — without it a Pi booted at the
 bench with the drive unplugged drops to an emergency shell, which is a brick on a
@@ -183,13 +204,17 @@ Five probes, naming which of the five candidates is at fault. It is deliberately
 daemon-independent and dependency-free, so it works in the state you most need it —
 the daemon being down, or the status page itself having failed.
 
-Expect probes 4 (worker on `:9100`) and 5 (drive) to fail until
-`pare-hardware-mcp` exists and a drive is mounted. That is step 5.
+All five should pass. Probe 4 reads the worker's port from the installed
+`pare-hardware-mcp` unit (`AGENT_WORKER_PORT`, 9102 today) and says where the
+number came from; `WORKER_PORT=` overrides it. Probe 4 only proves something is
+listening — a wedged console session still shows OK there.
 
 ## What is NOT done by this
 
-- **`pare-hardware-mcp`** does not exist yet — `/mnt/secondary/projects/pare-hardware-mcp`
-  is an empty directory. Nothing listens on `:9100` and no tool produces an artifact.
+- **Artifacts are not wired.** `pare-hardware-mcp` runs on this Pi (port 9102,
+  deployed by its own `scripts/bench_deploy.sh`), and the drive is mounted, but
+  `workers.yaml` still declares `artifact_root: null`, so no tool produces an
+  artifact yet. Wiring is `docs/superpowers/specs/2026-09-12-artifact-wiring-design.md`.
 - Do **not** add `RequiresMountsFor` to that worker's unit when you write it (§8.4).
   With the drive absent the unit never starts, the port never listens, and
   `/worker list` prints `UNREACHABLE` — the same string it prints for "the Pi is
