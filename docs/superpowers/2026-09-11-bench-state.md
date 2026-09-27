@@ -1,5 +1,11 @@
 # Bench state, 2026-09-11
 
+> **Snapshot, 2026-09-11.** The drive described below was replaced on 2026-09-27 by a
+> 1 TB SSD (new UUID and sentinel), and `pare-hardware-mcp` now exists and runs on
+> this Pi on port 9102. The current state lives in `bench/INSTALL.md` §5-§6; this
+> file is kept as the record of how the bench got here (the rejected-drive notes
+> below are still the reason the new drive was tested before it was trusted).
+
 Written before a context clear. **Every value here was read from the machine, not
 recalled** — and each section names the command that re-reads it, because a
 snapshot rots and a command does not.
