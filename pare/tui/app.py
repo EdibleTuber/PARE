@@ -332,6 +332,10 @@ class PareTUI(App):
         self._layout_index = 0
         self._live_render_task: asyncio.Task | None = None
         self._live_dirty = False
+        # Bumped whenever the live text is committed to the transcript: a
+        # render that started before the bump shows a reply that is already
+        # in the transcript, so it must not reveal the live block.
+        self._live_generation = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -674,17 +678,21 @@ class PareTUI(App):
             else:
                 self._write_entry(entry.text)
         if entries:
+            self._live_generation += 1
             self._sync_live_reply()
 
     def _sync_live_reply(self) -> None:
-        """Show `self._turn.live` in the live widget. Hide/show is immediate;
-        the Markdown re-render is coalesced onto one task, since
-        `Markdown.update` is async and tokens arrive faster than it runs."""
+        """Show `self._turn.live` in the live widget. The Markdown re-render
+        is coalesced onto one task, since `Markdown.update` is async and
+        tokens arrive faster than it runs. Hiding is immediate; showing
+        waits for that render (see `_render_live_reply`), so the block is
+        never revealed still holding the previous, committed reply."""
         try:
             scroll = self.query_one("#live-scroll", VerticalScroll)
         except Exception:
             return
-        scroll.set_class(bool(self._turn.live), "-streaming")
+        if not self._turn.live:
+            scroll.remove_class("-streaming")
         self._live_dirty = True
         if self._live_render_task is None or self._live_render_task.done():
             self._live_render_task = asyncio.create_task(self._render_live_reply())
@@ -695,12 +703,16 @@ class PareTUI(App):
             scroll = self.query_one("#live-scroll", VerticalScroll)
             while self._live_dirty:
                 self._live_dirty = False
+                text, generation = self._turn.live, self._live_generation
                 # update(), not append(): append() computes its offsets
                 # before taking the widget lock, so overlapping un-awaited
                 # appends corrupt the document. A whole-text update is
                 # always correct, and coalescing keeps it cheap.
-                await live.update(self._turn.live)
-                scroll.scroll_end(animate=False)
+                await live.update(text)
+                if text and generation == self._live_generation:
+                    # What was rendered belongs to the reply still live.
+                    scroll.add_class("-streaming")
+                    scroll.scroll_end(animate=False)
         except Exception:
             logger.exception("failed to render the in-progress reply")
 
@@ -735,6 +747,9 @@ class PareTUI(App):
             self.handle_tool_approval_request(msg)
             return
         if isinstance(msg, DaemonDisconnected):
+            # The turn cannot finish: keep what streamed, and start the
+            # next turn with clean dedup state.
+            self._commit(self._turn.end_turn())
             self._daemon_connected = False
             self._set_pane_daemon_session(None)
             self._refresh_status_bar()

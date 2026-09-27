@@ -10,6 +10,7 @@ tmp `tui_config_path` (nothing touches the real ~/.config).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -328,13 +329,14 @@ async def test_changing_the_layout_rewraps_the_existing_transcript(tmp_path):
         session.deliver(ResponseMessage(text=words))
         await pilot.pause()
         log = app.query_one("#transcript", RichLog)
+        settle = log.REWRAP_DEBOUNCE + 0.2       # the re-wrap is debounced
         for _ in range(2):                      # -> 1:2, the narrowest chat
             await pilot.press(LAYOUT_KEY)
-        await pilot.pause()
+        await pilot.pause(settle)
         narrow = log.scrollable_content_region.width
         assert max(len(l) for l in _lines(app)) <= narrow
         await pilot.press(LAYOUT_KEY)           # -> dock hidden, widest
-        await pilot.pause()
+        await pilot.pause(settle)
         wide = log.scrollable_content_region.width
         assert wide > narrow
         assert max(len(l) for l in _lines(app)) > narrow
@@ -509,3 +511,175 @@ async def test_status_bar_has_its_own_row_above_the_footer(tmp_path):
         assert bar.height == 1
         assert not bar.overlaps(footer), (bar, footer)
         assert bar.y == footer.y - 1
+
+
+# --- Fix round 1 -----------------------------------------------------------
+
+
+def _painted(live) -> str:
+    """What the live Markdown widget would paint: its mounted blocks. Not
+    `source`, which update() sets the moment it is called."""
+    from textual.widgets._markdown import MarkdownBlock
+
+    return " ".join(str(b._content) for b in live.query(MarkdownBlock))
+
+
+async def test_a_terminal_drag_replays_the_transcript_once(tmp_path):
+    """S1(a): every width change used to replay the whole history on the
+    event loop; a 10-step drag replayed 10 times. Debounced: once, at the
+    final width. The debounce is widened here so a slow runner's gaps
+    between steps cannot split the drag in two (the mechanism is what is
+    under test, not the constant)."""
+    from pare.tui.widgets.transcript import TranscriptLog
+
+    session = _Session()
+    app = _make_app(tmp_path, session)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        log = app.query_one("#transcript", TranscriptLog)
+        log.REWRAP_DEBOUNCE = 1.0
+        session.deliver(ResponseMessage(text=" ".join(f"word{i}" for i in range(80))))
+        await pilot.pause()
+        replays: list[int] = []
+        original = log._rewrap
+        log._rewrap = lambda: (replays.append(1), original())[1]
+        for step in range(10):
+            await pilot.resize_terminal(140 - 4 * (step + 1), 40)
+        # A write inside the debounce window is recorded and survives the replay.
+        session.deliver(ResponseMessage(text="written mid-drag"))
+        await pilot.pause(1.5)
+        assert len(replays) == 1
+        lines = _lines(app)
+        assert max(len(l) for l in lines) <= log.scrollable_content_region.width
+        _index(lines, "written mid-drag")
+        _index(lines, "word79")
+
+
+async def test_transcript_history_is_bounded_and_drops_the_oldest(tmp_path):
+    """S1(b): history and the rendered lines share one cap."""
+    from pare.tui.widgets.transcript import TranscriptLog
+
+    session = _Session()
+    app = _make_app(tmp_path, session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        log = app.query_one("#transcript", TranscriptLog)
+        cap = log.HISTORY_LIMIT
+        assert log.max_lines == cap
+        for i in range(cap + 50):
+            session.deliver(ResponseMessage(text=f"entry-{i}"))
+        await pilot.pause()
+        assert len(log._history) == cap
+        assert len(log.lines) <= cap
+        await pilot.resize_terminal(100, 40)
+        await pilot.pause(log.REWRAP_DEBOUNCE + 0.3)
+        lines = _lines(app)
+        assert len(lines) <= cap
+        stripped = [l.strip() for l in lines]
+        assert "entry-0" not in stripped and "entry-49" not in stripped
+        assert stripped.count("entry-50") == 1
+        assert stripped.count(f"entry-{cap + 49}") == 1
+
+
+async def test_disconnect_mid_stream_commits_the_partial_reply(tmp_path):
+    """N2: a dropped connection used to leave the partial answer stranded
+    in the live block, and its tokens in the dedup state."""
+    from pare.tui.session import DaemonDisconnected
+
+    session = _Session()
+    app = _make_app(tmp_path, session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        session.deliver(StreamChunkMessage(token="half an"), StreamChunkMessage(token=" answer"))
+        session.deliver(DaemonDisconnected(reason="EOF"))
+        await pilot.pause()
+        _index(_lines(app), "half an answer")
+        assert not app.query_one("#live-scroll").has_class("-streaming")
+        # The next turn starts clean: an identical, unstreamed response is
+        # not suppressed as a duplicate of the dead turn's stream.
+        session.deliver(ResponseMessage(text="half an answer"))
+        await pilot.pause()
+        assert sum("half an answer" in l for l in _lines(app)) == 2
+
+
+async def test_a_new_stream_never_shows_the_previous_reply(tmp_path):
+    """N1: the show class used to go on before the live widget's update()
+    ran, so a new stream's first frame showed the last reply's text."""
+    from textual.widgets import Markdown
+
+    session = _Session()
+    app = _make_app(tmp_path, session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        scroll = app.query_one("#live-scroll")
+        live = app.query_one("#live-reply", Markdown)
+        session.deliver(StreamChunkMessage(token="OLD REPLY TEXT"))
+        await pilot.pause()
+        assert live.source == "OLD REPLY TEXT"          # rendered and shown
+        session.deliver(ResponseMessage(text="OLD REPLY TEXT"))
+        session.deliver(StreamChunkMessage(token="new"))
+        # Check every state the screen can paint until the new text lands.
+        for _ in range(20):
+            if scroll.has_class("-streaming"):
+                assert "OLD" not in live.source, live.source
+                assert "OLD" not in _painted(live), _painted(live)
+            await asyncio.sleep(0)
+        await pilot.pause()
+        assert scroll.has_class("-streaming") and live.source == "new"
+
+
+async def test_a_render_in_flight_at_commit_does_not_reveal_the_old_reply(tmp_path):
+    """N1, the in-flight variant: the reply is committed while the live
+    widget is still rendering it. When that render lands it must not show
+    the block, because its text is already in the transcript."""
+    from textual.widgets import Markdown
+
+    session = _Session()
+    app = _make_app(tmp_path, session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        scroll = app.query_one("#live-scroll")
+        live = app.query_one("#live-reply", Markdown)
+        session.deliver(StreamChunkMessage(token="OLD REPLY TEXT"))
+        await asyncio.sleep(0)            # the render task starts its update()
+        assert app._live_render_task is not None and not app._live_render_task.done()
+        session.deliver(ResponseMessage(text="OLD REPLY TEXT"))
+        session.deliver(StreamChunkMessage(token="new"))
+        for _ in range(200):
+            if scroll.has_class("-streaming"):
+                assert "OLD" not in _painted(live), _painted(live)
+                if "new" in _painted(live):
+                    break
+            await asyncio.sleep(0.001)
+        await pilot.pause()
+        assert scroll.has_class("-streaming") and live.source == "new"
+
+
+async def test_history_keeps_only_entries_still_on_screen(tmp_path):
+    """S1(b) with long replies: an entry cap alone still replays up to
+    HISTORY_LIMIT multi-line entries (measured: 4.6 s for 1,500 long
+    replies). Entries whose lines have all scrolled out of the log are
+    dropped, so a replay renders about one log's worth of lines."""
+    from pare.tui.widgets.transcript import TranscriptLog
+
+    session = _Session()
+    app = _make_app(tmp_path, session)
+    ten_lines = "\n\n".join(f"para {k}" for k in range(5))   # 5 paras + 4 gaps
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        log = app.query_one("#transcript", TranscriptLog)
+        cap = log.HISTORY_LIMIT
+        start = len(log.lines)
+        session.deliver(ResponseMessage(text=f"reply first\n\n{ten_lines}"))
+        per_entry = len(log.lines) - start
+        assert per_entry >= 9
+        for i in range(cap // 3):
+            session.deliver(ResponseMessage(text=f"reply {i}\n\n{ten_lines}"))
+        await pilot.pause()
+        assert len(log.lines) == cap
+        assert len(log._history) <= cap // per_entry + 1
+        # And a replay shows the same tail it had before.
+        before = _lines(app)[-50:]
+        await pilot.resize_terminal(118, 40)
+        await pilot.pause(log.REWRAP_DEBOUNCE + 0.3)
+        assert _lines(app)[-50:] == before
