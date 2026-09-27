@@ -269,8 +269,9 @@ class PareTUI(App):
         display: none;
     }
 
+    /* In normal flow after #main-area, not docked: the Footer docks bottom,
+       and two bottom docks share one row (the Footer painted over this). */
     StatusBar {
-        dock: bottom;
         height: 1;
         background: $panel;
     }

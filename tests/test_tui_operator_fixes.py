@@ -481,3 +481,31 @@ def test_app_default_config_path_comes_from_the_environment(tmp_path, monkeypatc
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     app = PareTUI(Path("/x.sock"), "c", "/tmp")
     assert app.tui_config_path == tmp_path / "pare" / "tui.json"
+
+
+async def test_status_bar_has_its_own_row_above_the_footer(tmp_path):
+    """StatusBar and Footer both used to `dock: bottom`, so they shared the
+    last row and the Footer painted over the status bar -- the operator never
+    saw daemon:up/DOWN/spawn-failed or the pane summary."""
+    from pathlib import Path
+
+    from textual.widgets import Footer
+
+    from pare.tui.app import PareTUI
+
+    app = PareTUI(Path("/nonexistent/pare.sock"), "chan-1", "/tmp",
+                  tui_config_path=tmp_path / "tui.json")
+
+    class _NoDaemon:
+        def subscribe(self, handler): pass
+        async def start(self): raise ConnectionRefusedError()
+        async def stop(self): pass
+
+    app.session = _NoDaemon()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        bar = app.query_one("#status-bar").region
+        footer = app.query_one(Footer).region
+        assert bar.height == 1
+        assert not bar.overlaps(footer), (bar, footer)
+        assert bar.y == footer.y - 1
