@@ -5,16 +5,27 @@ docs/superpowers/specs/2026-09-18-pare-tui-design.md.
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
 import os
+import signal
+import subprocess
+import sys
+import threading
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from typing import Callable, Mapping
 
 from agent_core.protocol import ToolApprovalRequestMessage, ToolApprovalResponseMessage
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Input, RichLog
 
+import pare
 from pare.config import load_config
+from pare.tui.daemon_lifecycle import detect_or_spawn, reap
 from pare.tui.panes.base import PaneDock
 from pare.tui.panes.uart import UartPane
 from pare.tui.session import DaemonDisconnected, DaemonSession
@@ -30,6 +41,117 @@ def _new_channel_id() -> str:
     """A fresh channel per launch, so a session starts clean instead of
     replaying cli-default. Mirrors pare/cli.py:_new_channel_id."""
     return datetime.now().strftime("tui-%Y%m%d-%H%M%S")
+
+
+SYSTEMD_ATTACH_FAILED = (
+    "[systemd-managed pare-daemon is not accepting connections — "
+    "systemctl --user status pare-daemon]"
+)
+
+
+def _daemon_command() -> list[str]:
+    """The `pare-daemon` installed beside this interpreter, else the bare
+    name for a PATH lookup. `.venv/bin/pare-tui` is routinely run without
+    activating the venv, and then `pare-daemon` is not on PATH (checked on
+    agenthost: a plain PATH does not resolve it), so the bare name alone
+    would fail every spawn with ENOENT."""
+    sibling = Path(sys.executable).parent / "pare-daemon"
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return [str(sibling)]
+    return ["pare-daemon"]
+
+
+@dataclass(frozen=True)
+class SpawnCwd:
+    """Where a TUI-spawned daemon runs. `error` set means: do not spawn."""
+
+    cwd: Path | None
+    error: str | None
+
+
+def resolve_spawn_cwd(
+    env: Mapping[str, str], repo_root: Path | None = None
+) -> SpawnCwd:
+    """The spawned daemon's working directory.
+
+    pare-daemon loads `workers_yaml_path`, default the RELATIVE
+    "workers.yaml" (pare/config.py), resolved against its cwd. The systemd
+    unit pins WorkingDirectory to the repo root; a TUI-spawned daemon would
+    otherwise inherit wherever the operator launched pare-tui and exit at
+    startup (final review B1).
+
+    - `PARE_WORKERS_YAML_PATH` set: the operator's choice; cwd unchanged.
+    - `<repo root>/workers.yaml` exists: run there, as the systemd unit does.
+    - Neither: an error -- the caller must not spawn.
+
+    The daemon's cwd is only a fallback for messages that carry none
+    (pare/capture_store.py, pare/tools/publish_finding.py); the TUI stamps
+    its own cwd on every message (pare/tui/session.py, panes/uart.py).
+    """
+    if env.get("PARE_WORKERS_YAML_PATH"):
+        return SpawnCwd(cwd=None, error=None)
+    root = repo_root if repo_root is not None else Path(pare.__file__).resolve().parents[1]
+    if (root / "workers.yaml").is_file():
+        return SpawnCwd(cwd=root, error=None)
+    return SpawnCwd(
+        cwd=None,
+        error=f"workers.yaml not found in {root} — set PARE_WORKERS_YAML_PATH",
+    )
+
+
+@dataclass(frozen=True)
+class LaunchPolicy:
+    """How `main()` constructs `PareTUI` with respect to the daemon."""
+
+    auto_spawn: bool
+    systemd_managed: bool
+
+
+def _systemd_unit_enabled(run: Callable[..., object]) -> bool | None:
+    """`systemctl --user is-enabled pare-daemon` exited 0?
+
+    True/False for a definite answer; a missing `systemctl` binary is a
+    definite False ("no unit", plan C5). None when the answer is unknown
+    (systemctl hung or could not be run for another reason)."""
+    try:
+        proc = run(
+            ["systemctl", "--user", "is-enabled", "pare-daemon"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    except (OSError, subprocess.SubprocessError):
+        logger.exception("could not ask systemctl whether pare-daemon is enabled")
+        return None
+    return proc.returncode == 0
+
+
+def launch_policy(
+    env: Mapping[str, str], run: Callable[..., object] = subprocess.run
+) -> LaunchPolicy:
+    """Decide whether this launch may spawn a daemon (plan C5, spec §8).
+
+    - A user systemd unit manages pare-daemon (`is-enabled` exits 0): never
+      spawn. agent_core unlinks and rebinds the socket on every start, so a
+      systemd restart would orphan a TUI-spawned daemon.
+    - `PARE_TUI_NO_AUTO_SPAWN=1`: never spawn (the spec §8 escape hatch).
+    - systemctl's answer unknown (it hung or failed to run): fail closed --
+      do not spawn next to a daemon that may be supervised.
+    - Otherwise spawn when nothing is running.
+
+    `run` is `subprocess.run`-shaped so tests pass a fake instead of
+    shelling out to the real systemctl.
+    """
+    enabled = _systemd_unit_enabled(run)
+    if enabled:
+        return LaunchPolicy(auto_spawn=False, systemd_managed=True)
+    if env.get("PARE_TUI_NO_AUTO_SPAWN") == "1" or enabled is None:
+        return LaunchPolicy(auto_spawn=False, systemd_managed=False)
+    return LaunchPolicy(auto_spawn=True, systemd_managed=False)
 
 
 async def parse_input(session, line: str) -> None:
@@ -94,11 +216,41 @@ class PareTUI(App):
     }
     """
 
-    def __init__(self, socket_path, channel_id: str, cwd: str) -> None:
+    def __init__(
+        self,
+        socket_path,
+        channel_id: str,
+        cwd: str,
+        *,
+        auto_spawn: bool = False,
+        daemon_log_dir: Path | None = None,
+        systemd_managed: bool = False,
+    ) -> None:
+        """`auto_spawn` is opt-in (plan C1): only `main()` turns it on, so
+        constructing the app -- as every test does -- never launches a
+        daemon. `systemd_managed` only changes the transcript line shown
+        when the attach fails (plan C5)."""
         super().__init__()
         self.socket_path = socket_path
         self.channel_id = channel_id
         self.cwd = cwd
+        self.auto_spawn = auto_spawn
+        self.systemd_managed = systemd_managed
+        self._daemon_log_dir = (
+            daemon_log_dir
+            if daemon_log_dir is not None
+            else Path.home() / ".local" / "state" / "pare"
+        )
+        # Set only when detect_or_spawn launched the daemon this app owns;
+        # on_unmount reaps it. Attach-lane apps never touch the daemon.
+        self._daemon_owned_pid: int | None = None
+        self._daemon_spawn_failed = False
+        self._daemon_connect_task: asyncio.Task | None = None
+        self._daemon_spawn_future: asyncio.Future | None = None
+        self._sighup_installed = False
+        # _record_spawn runs at most once per spawn future (done-callback, or
+        # the unmount path when the callback has not run yet).
+        self._spawn_recorded = False
         # Construction only -- no connection is opened here. `on_mount`
         # starts it and subscribes to its message stream once the app is
         # actually running.
@@ -199,25 +351,234 @@ class PareTUI(App):
         start = getattr(self.session, "start", None)
         if subscribe is not None and start is not None:
             subscribe(self._on_daemon_message)
-            try:
-                await start()
-            except Exception:
-                # No running daemon is an expected state to launch into
-                # (spec's "done when" gate: don't block on one existing) --
-                # log it and leave the app usable rather than crashing the
-                # whole UI before it can even render.
-                logger.exception(
-                    "failed to connect to daemon at %s", self.socket_path
+            if self.auto_spawn:
+                self._install_sighup_handler()
+                # detect_or_spawn blocks for up to its startup_timeout plus
+                # the timeout path's kill waits. Awaited here, it would hold
+                # the app unready -- nothing painted, no key handled, not
+                # even quit -- for that long (measured: run_test() did not
+                # return until on_mount did). So the spawn lane runs as a
+                # background task and on_mount returns at once.
+                self._daemon_connect_task = asyncio.create_task(
+                    self._spawn_then_connect(start)
                 )
             else:
-                self._daemon_connected = True
-                self._set_pane_daemon_session(self.session)
+                await self._connect(start, spawned=False)
         self._refresh_status_bar()
 
+    def _install_sighup_handler(self) -> None:
+        """Closing the terminal or dropping SSH sends SIGHUP, whose default
+        action kills the process without running on_unmount -- orphaning a
+        daemon we spawned (it is in its own session, so it gets no hangup).
+        Turn it into a normal exit so the unmount/reap path runs (final
+        review S1). Main thread only; skipped where unsupported, and never
+        over a handler someone else installed (including SIG_IGN, e.g.
+        under nohup, where SIGHUP cannot kill us anyway)."""
+        if not hasattr(signal, "SIGHUP"):
+            return
+        if threading.current_thread() is not threading.main_thread():
+            return
+        if signal.getsignal(signal.SIGHUP) != signal.SIG_DFL:
+            return
+        try:
+            asyncio.get_running_loop().add_signal_handler(
+                signal.SIGHUP, self._on_sighup
+            )
+        except (NotImplementedError, RuntimeError, ValueError, OSError):
+            logger.exception("could not install a SIGHUP handler")
+            return
+        self._sighup_installed = True
+
+    def _on_sighup(self) -> None:
+        logger.info("SIGHUP: exiting so the owned daemon is reaped")
+        self.exit()
+
+    def _remove_sighup_handler(self) -> None:
+        if not self._sighup_installed:
+            return
+        self._sighup_installed = False
+        try:
+            asyncio.get_running_loop().remove_signal_handler(signal.SIGHUP)
+        except Exception:
+            logger.exception("could not remove the SIGHUP handler")
+
+    async def _connect(
+        self, start, *, spawned: bool, failure_line: str | None = None
+    ) -> None:
+        try:
+            await start()
+        except Exception:
+            # No running daemon is an expected state to launch into
+            # (spec's "done when" gate: don't block on one existing) --
+            # log it and leave the app usable rather than crashing the
+            # whole UI before it can even render.
+            logger.exception("failed to connect to daemon at %s", self.socket_path)
+            if failure_line is not None:
+                self._daemon_spawn_failed = True
+                self._write_transcript(failure_line)
+            if self.systemd_managed:
+                self._write_transcript(SYSTEMD_ATTACH_FAILED)
+        else:
+            self._daemon_connected = True
+            self._daemon_spawn_failed = False
+            self._set_pane_daemon_session(self.session)
+            if not spawned:
+                self._write_transcript(
+                    f"[attached to running pare-daemon at {self.socket_path}]"
+                )
+
+    async def _spawn_then_connect(self, start) -> None:
+        # Nothing awaits this task on the happy path, so an exception escaping
+        # it would never be retrieved and the UI would sit on "checking..."
+        # and daemon:DOWN forever. Surface it instead. (CancelledError is not
+        # an Exception and still propagates.)
+        try:
+            where = resolve_spawn_cwd(os.environ)
+            if where.error is not None:
+                # Spawning would only produce a daemon that exits at startup.
+                # Don't; still attach if a daemon is already running.
+                await self._connect(
+                    start, spawned=False,
+                    failure_line=f"[daemon spawn failed: {where.error}]",
+                )
+            else:
+                spawned = await self._detect_or_spawn_daemon(where.cwd)
+                await self._connect(start, spawned=spawned)
+        except Exception as exc:
+            logger.exception("daemon spawn/connect task failed")
+            self._daemon_spawn_failed = True
+            self._write_transcript(f"[daemon spawn failed: {type(exc).__name__}: {exc}]")
+        self._refresh_status_bar()
+
+    def _record_spawn(self, fut: asyncio.Future) -> None:
+        """Done-callback on the detect_or_spawn future: record an owned PID
+        the moment the thread returns, whoever (if anyone) is awaiting it --
+        so a spawn that completes after the connect task was cancelled is
+        still reaped by on_unmount.
+
+        Idempotent: asyncio runs done-callbacks one loop step after the
+        result is set, so `_reap_owned_daemon` also calls this for a future
+        that is done but whose callback may not have run. Only the first
+        call records; a late callback cannot resurrect an already-reaped PID.
+        """
+        if self._spawn_recorded or not fut.done():
+            return
+        self._spawn_recorded = True
+        if fut.cancelled() or fut.exception() is not None:
+            return
+        result = fut.result()
+        if result.mode == "spawned":
+            self._daemon_owned_pid = result.pid
+
+    async def _detect_or_spawn_daemon(self, spawn_cwd: Path | None = None) -> bool:
+        """Run `detect_or_spawn` on a thread and report the outcome in the
+        transcript. Returns True iff this app now owns a daemon.
+
+        The "checking" line is written before the thread starts: which lane
+        we are in is not known until it returns."""
+        self._write_transcript(
+            f"[checking for pare-daemon at {self.socket_path}; "
+            "spawning one if it is not running...]"
+        )
+        loop = asyncio.get_running_loop()
+        # A bare executor future, never cancelled (shielded below): cancelling
+        # an await on to_thread() drops the thread's result, which here would
+        # be the PID of a daemon we just started.
+        fut = loop.run_in_executor(
+            None,
+            functools.partial(
+                detect_or_spawn,
+                Path(self.socket_path),
+                self._daemon_log_dir,
+                spawn_cmd=_daemon_command(),
+                spawn_cwd=spawn_cwd,
+            ),
+        )
+        self._spawn_recorded = False
+        fut.add_done_callback(self._record_spawn)
+        self._daemon_spawn_future = fut
+        try:
+            result = await asyncio.shield(fut)
+        except Exception as exc:
+            logger.exception("detect_or_spawn raised")
+            self._daemon_spawn_failed = True
+            self._write_transcript(f"[daemon spawn failed: {type(exc).__name__}: {exc}]")
+            return False
+        if result.mode == "spawned":
+            logs = result.log_path if result.log_path is not None else "none (log dir unwritable)"
+            self._write_transcript(
+                f"[pare-daemon ready — PID {result.pid}, logs at {logs}]"
+            )
+            return True
+        if result.mode == "failed":
+            self._daemon_spawn_failed = True
+            reason, _, tail = (result.error or "unknown error").partition("\n")
+            self._write_transcript(f"[daemon spawn failed: {reason}]")
+            if tail:
+                self._write_transcript(f"[{tail}]")
+        # "attached": the attached line is written once session.start()
+        # actually connects, the same as for a non-spawning launch.
+        return False
+
     async def on_unmount(self) -> None:
-        stop = getattr(self.session, "stop", None)
-        if stop is not None:
-            await stop()
+        try:
+            task = self._daemon_connect_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            stop = getattr(self.session, "stop", None)
+            if stop is not None:
+                await stop()
+        finally:
+            try:
+                await self._reap_owned_daemon()
+            finally:
+                # Last: a second SIGHUP during the reap must not kill us.
+                self._remove_sighup_handler()
+
+    async def _reap_owned_daemon(self) -> None:
+        """Stop the daemon this app spawned, if any.
+
+        A spawn still in flight is waited out first (bounded by
+        detect_or_spawn's own timeouts) so its PID, if any, is recorded and
+        reaped rather than orphaned. `reap` is blocking (bounded by its
+        SIGTERM/SIGKILL timeouts), so it too runs on a thread. Any failure is
+        logged and never crashes the exit."""
+        fut = self._daemon_spawn_future
+        if fut is not None:
+            if not fut.done():
+                try:
+                    # Shielded, like the await in _detect_or_spawn_daemon: a
+                    # cancel reaching the executor future would mark it
+                    # cancelled while the thread runs on, dropping the PID.
+                    await asyncio.shield(fut)
+                except Exception:
+                    pass  # nothing is owned
+            # The done-callback may not have run yet (it is scheduled one
+            # loop step after set_result): read the PID from the future.
+            self._record_spawn(fut)
+        pid, self._daemon_owned_pid = self._daemon_owned_pid, None
+        if pid is None:
+            return
+        try:
+            outcome = await asyncio.to_thread(reap, pid)
+        except Exception:
+            logger.exception("failed to reap owned pare-daemon PID %s", pid)
+            return
+        if outcome == "abandoned":
+            logger.warning("pare-daemon PID %s survived SIGKILL; abandoned", pid)
+        else:
+            logger.info("reaped pare-daemon PID %s: %s", pid, outcome)
+
+    def _write_transcript(self, text: str) -> None:
+        try:
+            log = self.query_one("#transcript", RichLog)
+        except Exception:
+            return
+        log.write(text)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "chat-input":
@@ -253,6 +614,9 @@ class PareTUI(App):
             self._set_pane_daemon_session(None)
             self._refresh_status_bar()
             return
+        # A live message means the daemon is talking to us; a spawn failure
+        # from launch is stale.
+        self._daemon_spawn_failed = False
         self._append_transcript(msg)
         if is_turn_end(msg):
             self._turn.reset()
@@ -274,7 +638,12 @@ class PareTUI(App):
             pane_dock = self.query_one("#pane-dock", PaneDock)
         except Exception:
             return
-        status_bar.daemon_connected = self._daemon_connected
+        if self._daemon_connected:
+            status_bar.daemon_state = "up"
+        elif self._daemon_spawn_failed:
+            status_bar.daemon_state = "spawn-failed"
+        else:
+            status_bar.daemon_state = "down"
         status_bar.channel_id = self.channel_id
         status_bar.refresh_for(pane_dock.panes)
 
@@ -318,5 +687,12 @@ class PareTUI(App):
 
 def main() -> None:
     config = load_config()
-    app = PareTUI(config.socket_path, _new_channel_id(), os.getcwd())
+    policy = launch_policy(os.environ)
+    app = PareTUI(
+        config.socket_path,
+        _new_channel_id(),
+        os.getcwd(),
+        auto_spawn=policy.auto_spawn,
+        systemd_managed=policy.systemd_managed,
+    )
     app.run()
