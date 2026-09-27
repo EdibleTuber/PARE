@@ -19,20 +19,24 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from agent_core.protocol import ToolApprovalRequestMessage, ToolApprovalResponseMessage
+from rich.markdown import Markdown as RichMarkdown
+from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Input, RichLog
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Footer, Header, Input, Markdown, RichLog
 
 import pare
 from pare.config import load_config
 from pare.tui.daemon_lifecycle import detect_or_spawn, reap
 from pare.tui.panes.base import PaneDock
 from pare.tui.panes.uart import UartPane
+from pare.tui.prefs import default_tui_config_path, load_theme, save_theme
 from pare.tui.session import DaemonDisconnected, DaemonSession
 from pare.tui.sources.fake_console import FakeConsoleSource
 from pare.tui.widgets.approval import ApprovalModal
 from pare.tui.widgets.statusbar import StatusBar
-from pare.tui.widgets.transcript import TurnAccumulator, is_turn_end
+from pare.tui.widgets.transcript import Committed, TranscriptLog, TurnRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +45,19 @@ def _new_channel_id() -> str:
     """A fresh channel per launch, so a session starts clean instead of
     replaying cli-default. Mirrors pare/cli.py:_new_channel_id."""
     return datetime.now().strftime("tui-%Y%m%d-%H%M%S")
+
+
+#: Cycles the chat / pane-dock split. Unbound in Textual 8.2.8's App, Screen
+#: and Input bindings (Input binds ctrl+a/c/d/e/k/u/v/w/x; the App binds
+#: ctrl+p for the palette, ctrl+q and ctrl+c), so it works with the chat
+#: box focused -- which is nearly always.
+LAYOUT_KEY = "ctrl+l"
+
+#: The split states LAYOUT_KEY steps through, as #main-area classes. The
+#: first is the default and needs no class.
+LAYOUT_CLASSES = ("", "-layout-even", "-layout-dock-wide", "-layout-dock-hidden")
+
+ECHO_PREFIX = "you> "
 
 
 SYSTEMD_ATTACH_FAILED = (
@@ -154,6 +171,13 @@ def launch_policy(
     return LaunchPolicy(auto_spawn=True, systemd_managed=False)
 
 
+def is_sendable(line: str) -> bool:
+    """Whether `parse_input` would send anything for `line`: not blank, and
+    not a bare "/" (which has no command name)."""
+    line = line.strip()
+    return bool(line) and bool(line[1:].split(None, 1) if line.startswith("/") else line)
+
+
 async def parse_input(session, line: str) -> None:
     """Route one line of chat-input text to the daemon.
 
@@ -189,6 +213,8 @@ class PareTUI(App):
 
     TITLE = "PARE"
 
+    BINDINGS = [Binding(LAYOUT_KEY, "cycle_layout", "Layout")]
+
     CSS = """
     #main-area {
         height: 1fr;
@@ -203,14 +229,49 @@ class PareTUI(App):
         height: 1fr;
     }
 
+    /* The reply being streamed: grows below the committed transcript,
+       capped so the transcript stays visible; scrolled to its tail. */
+    #live-scroll {
+        height: auto;
+        max-height: 50%;
+        display: none;
+    }
+
+    #live-scroll.-streaming {
+        display: block;
+    }
+
+    #live-reply {
+        padding: 0 1;
+    }
+
     #pane-dock {
         width: 1fr;
         height: 1fr;
         border-left: solid $primary;
     }
 
+    #main-area.-layout-even #chat-area {
+        width: 1fr;
+    }
+
+    #main-area.-layout-dock-wide #chat-area {
+        width: 1fr;
+    }
+
+    #main-area.-layout-dock-wide #pane-dock {
+        width: 2fr;
+    }
+
+    /* display:none only drops it from layout: the pane stays mounted, so
+       its own poll timer keeps running and the status bar still reads it. */
+    #main-area.-layout-dock-hidden #pane-dock {
+        display: none;
+    }
+
+    /* In normal flow after #main-area, not docked: the Footer docks bottom,
+       and two bottom docks share one row (the Footer painted over this). */
     StatusBar {
-        dock: bottom;
         height: 1;
         background: $panel;
     }
@@ -225,11 +286,14 @@ class PareTUI(App):
         auto_spawn: bool = False,
         daemon_log_dir: Path | None = None,
         systemd_managed: bool = False,
+        tui_config_path: Path | None = None,
     ) -> None:
         """`auto_spawn` is opt-in (plan C1): only `main()` turns it on, so
         constructing the app -- as every test does -- never launches a
         daemon. `systemd_managed` only changes the transcript line shown
-        when the attach fails (plan C5)."""
+        when the attach fails (plan C5). `tui_config_path` is the
+        preferences file (default `$XDG_CONFIG_HOME/pare/tui.json`); tests
+        pass a tmp path."""
         super().__init__()
         self.socket_path = socket_path
         self.channel_id = channel_id
@@ -255,14 +319,31 @@ class PareTUI(App):
         # starts it and subscribes to its message stream once the app is
         # actually running.
         self.session = DaemonSession(socket_path, channel_id, cwd)
-        self._turn = TurnAccumulator()
+        self._turn = TurnRenderer()
         self._daemon_connected = False
+        self.tui_config_path = (
+            tui_config_path
+            if tui_config_path is not None
+            else default_tui_config_path(os.environ)
+        )
+        # The theme name the file already holds; watch_theme saves only a
+        # change from it, so applying the loaded theme never rewrites it.
+        self._saved_theme: str | None = None
+        self._layout_index = 0
+        self._live_render_task: asyncio.Task | None = None
+        self._live_dirty = False
+        # Bumped whenever the live text is committed to the transcript: a
+        # render that started before the bump shows a reply that is already
+        # in the transcript, so it must not reveal the live block.
+        self._live_generation = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="main-area"):
             with Vertical(id="chat-area"):
-                yield RichLog(id="transcript", wrap=True, markup=False)
+                yield TranscriptLog(id="transcript", wrap=True, markup=False)
+                with VerticalScroll(id="live-scroll"):
+                    yield Markdown(id="live-reply")
                 yield Input(
                     placeholder="Type a message, or /command ...", id="chat-input"
                 )
@@ -333,6 +414,7 @@ class PareTUI(App):
                 pane._daemon_session = session
 
     async def on_mount(self) -> None:
+        self._load_theme()
         # Refresh the status line on a timer, independent of message
         # traffic, so the UART cursor visibly ticks even during a quiet
         # stretch (spec: "the UART cursor" is one of the things StatusBar
@@ -573,18 +655,78 @@ class PareTUI(App):
         else:
             logger.info("reaped pare-daemon PID %s: %s", pid, outcome)
 
-    def _write_transcript(self, text: str) -> None:
+    def _write_transcript(self, text: str | Text) -> None:
+        """Commit one plain line. Any reply still streaming is committed
+        first, so the transcript stays in arrival order."""
+        self._commit(self._turn.flush())
+        self._write_entry(text)
+
+    def _write_entry(self, content: str | Text | RichMarkdown) -> None:
         try:
             log = self.query_one("#transcript", RichLog)
         except Exception:
             return
-        log.write(text)
+        if isinstance(content, RichMarkdown):
+            log.write(content, expand=True)
+        else:
+            log.write(content)
+
+    def _commit(self, entries: list[Committed]) -> None:
+        for entry in entries:
+            if entry.kind == "markdown":
+                self._write_entry(RichMarkdown(entry.text))
+            else:
+                self._write_entry(entry.text)
+        if entries:
+            self._live_generation += 1
+            self._sync_live_reply()
+
+    def _sync_live_reply(self) -> None:
+        """Show `self._turn.live` in the live widget. The Markdown re-render
+        is coalesced onto one task, since `Markdown.update` is async and
+        tokens arrive faster than it runs. Hiding is immediate; showing
+        waits for that render (see `_render_live_reply`), so the block is
+        never revealed still holding the previous, committed reply."""
+        try:
+            scroll = self.query_one("#live-scroll", VerticalScroll)
+        except Exception:
+            return
+        if not self._turn.live:
+            scroll.remove_class("-streaming")
+        self._live_dirty = True
+        if self._live_render_task is None or self._live_render_task.done():
+            self._live_render_task = asyncio.create_task(self._render_live_reply())
+
+    async def _render_live_reply(self) -> None:
+        try:
+            live = self.query_one("#live-reply", Markdown)
+            scroll = self.query_one("#live-scroll", VerticalScroll)
+            while self._live_dirty:
+                self._live_dirty = False
+                text, generation = self._turn.live, self._live_generation
+                # update(), not append(): append() computes its offsets
+                # before taking the widget lock, so overlapping un-awaited
+                # appends corrupt the document. A whole-text update is
+                # always correct, and coalescing keeps it cheap.
+                await live.update(text)
+                if text and generation == self._live_generation:
+                    # What was rendered belongs to the reply still live.
+                    scroll.add_class("-streaming")
+                    scroll.scroll_end(animate=False)
+        except Exception:
+            logger.exception("failed to render the in-progress reply")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "chat-input":
             return
         line = event.value
         event.input.value = ""
+        if is_sendable(line):
+            # Before the send: a reply cannot precede it, and it stays if
+            # the send fails.
+            self._write_transcript(
+                Text.assemble((ECHO_PREFIX, "bold cyan"), line.strip())
+            )
         try:
             await parse_input(self.session, line)
         except Exception as exc:
@@ -594,12 +736,7 @@ class PareTUI(App):
             # not crash the whole app out from under an event handler; the
             # UART pane's own I3 resilience is the model here.
             logger.exception("failed to send chat/command input")
-            try:
-                self.query_one("#transcript", RichLog).write(
-                    f"[send failed: {exc}]"
-                )
-            except Exception:
-                pass
+            self._write_transcript(f"[send failed: {exc}]")
 
     def _on_daemon_message(self, msg: object) -> None:
         """The single dispatch point for everything `DaemonSession` fans
@@ -610,6 +747,9 @@ class PareTUI(App):
             self.handle_tool_approval_request(msg)
             return
         if isinstance(msg, DaemonDisconnected):
+            # The turn cannot finish: keep what streamed, and start the
+            # next turn with clean dedup state.
+            self._commit(self._turn.end_turn())
             self._daemon_connected = False
             self._set_pane_daemon_session(None)
             self._refresh_status_bar()
@@ -618,19 +758,46 @@ class PareTUI(App):
         # from launch is stale.
         self._daemon_spawn_failed = False
         self._append_transcript(msg)
-        if is_turn_end(msg):
-            self._turn.reset()
         self._refresh_status_bar()
 
     def _append_transcript(self, msg: object) -> None:
-        text = self._turn.feed(msg)
-        if not text:
-            return
+        committed = self._turn.feed(msg)
+        if committed:
+            self._commit(committed)
+        else:
+            self._sync_live_reply()
+
+    def action_cycle_layout(self) -> None:
+        """chat 2:1 -> 1:1 -> 1:2 -> dock hidden -> 2:1."""
         try:
-            log = self.query_one("#transcript", RichLog)
+            area = self.query_one("#main-area", Horizontal)
         except Exception:
             return
-        log.write(text)
+        self._layout_index = (self._layout_index + 1) % len(LAYOUT_CLASSES)
+        for cls in LAYOUT_CLASSES:
+            if cls:
+                area.set_class(cls == LAYOUT_CLASSES[self._layout_index], cls)
+
+    def _load_theme(self) -> None:
+        name = load_theme(self.tui_config_path)
+        if name is None:
+            return
+        if name not in self.available_themes:
+            logger.warning(
+                "ignoring unknown theme %r in %s; using the default",
+                name, self.tui_config_path,
+            )
+            return
+        self._saved_theme = name
+        self.theme = name
+
+    def watch_theme(self, theme: str) -> None:
+        """Persist a theme the operator picked (the palette's theme picker
+        sets `App.theme`, textual/theme.py ThemeProvider)."""
+        if theme == getattr(self, "_saved_theme", theme):
+            return
+        if save_theme(self.tui_config_path, theme):
+            self._saved_theme = theme
 
     def _refresh_status_bar(self) -> None:
         try:
@@ -677,12 +844,7 @@ class PareTUI(App):
             await self.session.send(response)
         except Exception as exc:
             logger.exception("failed to send approval response")
-            try:
-                self.query_one("#transcript", RichLog).write(
-                    f"[approval response not sent: {exc}]"
-                )
-            except Exception:
-                pass
+            self._write_transcript(f"[approval response not sent: {exc}]")
 
 
 def main() -> None:
