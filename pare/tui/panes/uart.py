@@ -213,6 +213,18 @@ class UartPane(Pane):
     def on_error(self, exc: Exception) -> None:
         self._mark(f"read failed: {exc}")
 
+    def on_attach_error(self, exc: Exception) -> None:
+        """A failed CONNECT (the pane never attached) is rendered
+        differently from a read failure: it names the fact that the pane
+        is retrying, because the base keeps retrying `attach()` on its own
+        backoff timer (spec I3). The raw exception text is kept verbatim --
+        note that the mcp client SDK renders an HTTP 404 (which a mistyped
+        endpoint, e.g. one missing the worker's `/mcp` path, produces) as
+        'Session terminated', so the operator should be told to check the
+        endpoint when that text appears here."""
+        self._mark(f"connect failed: {exc} -- retrying (check the endpoint "
+                   "URL; the worker serves its MCP endpoint at /mcp)")
+
     def _mark(self, text: str) -> None:
         self._lines.append((text, True))
 

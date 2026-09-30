@@ -10,7 +10,11 @@ the test file rather than any real source. The only pane implemented in v1
 is UART (a later task) -- this module is the boundary it is built on.
 
 Spec I3: a pane whose source errors renders the error in place and keeps
-retrying with backoff; the chat and other panes stay unaffected. Each pane
+retrying with backoff; the chat and other panes stay unaffected. This
+covers the CONNECT path as well as reads: a pane whose `attach()` raises
+at mount (the real failure behind a mistyped endpoint) renders the error
+in place and retries `attach()` with backoff on its own timer -- the
+exception never escapes to the app. Each pane
 has its own `set_interval` timer (Textual's polling primitive -- see
 `tests/test_tui_approval.py`'s `_FakePoller` for the established pattern in
 this codebase), so one pane's backoff, or one pane's source raising on every
@@ -37,10 +41,11 @@ class Pane(Widget):
       - how it reports source health (`healthy`, `last_error`);
       - whether it accepts input (`can_send`, `accepts_input`, `send`).
 
-    Subclasses render by overriding `on_slice` (successful read) and
-    `on_error` (failed read); both are no-ops by default so a subclass that
-    only needs cursor/backoff bookkeeping -- as in this task's tests --
-    requires no rendering code at all. Nothing here or in `PaneDock` names
+    Subclasses render by overriding `on_slice` (successful read),
+    `on_error` (failed read), and `on_attach_error` (failed connect); all
+    are no-ops by default so a subclass that only needs cursor/backoff
+    bookkeeping -- as in this task's tests -- requires no rendering code at
+    all. Nothing here or in `PaneDock` names
     MCP or any concrete source; a `Pane` works against any object
     satisfying `ConsoleSource`.
     """
@@ -74,6 +79,11 @@ class Pane(Widget):
         self.last_error: str | None = None
         self._interval = poll_interval
         self._timer: Timer | None = None
+        # Non-None while the pane is in connect-retry mode: the most recent
+        # `attach()` exception. Distinct from a read failure (a pane that IS
+        # attached, whose source then raises): while this is set, the poll
+        # tick retries `attach()` itself rather than reading (spec I3).
+        self._attach_failed: Exception | None = None
 
     async def on_mount(self) -> None:
         """Attach once, then start polling at the normal interval.
@@ -81,8 +91,17 @@ class Pane(Widget):
         A `None` session id (no live session -- `attach`'s contract) is not
         a failure: it does not touch `healthy` or the poll interval. Only
         `advance()`'s own read failures drive backoff.
+
+        An `attach()` EXCEPTION is a failure (spec I3): it is rendered in
+        place via `on_attach_error` and retried with backoff on this pane's
+        own timer -- it never escapes to the app.
         """
-        self.session = await self.attach()
+        try:
+            self.session = await self.attach()
+        except Exception as exc:
+            self._attach_failed = exc
+            self._fail_attach(exc)
+            return
         self._reschedule(self.poll_interval)
 
     async def attach(self) -> str | None:
@@ -110,6 +129,19 @@ class Pane(Widget):
         self.healthy = False
         self.last_error = str(exc)
         self.on_error(exc)
+        self._backoff()
+
+    def _fail_attach(self, exc: Exception) -> None:
+        """Bookkeeping for a failed `attach()` (a CONNECT failure, not a
+        read failure): same healthy/last_error/backoff shape as `_fail`,
+        rendered through `on_attach_error` so a subclass can tell the two
+        apart in its in-place marker."""
+        self.healthy = False
+        self.last_error = str(exc)
+        self.on_attach_error(exc)
+        self._backoff()
+
+    def _backoff(self) -> None:
         backed_off = min(self._interval * 2, self.max_backoff)
         if backed_off != self._interval:
             self._reschedule(backed_off)
@@ -136,14 +168,36 @@ class Pane(Widget):
         self._timer = self.set_interval(interval, self._poll_tick)
 
     async def _poll_tick(self) -> None:
+        if self._attach_failed is not None:
+            await self._retry_attach()
+            return
         await self.advance()
+
+    async def _retry_attach(self) -> None:
+        """One connect retry. On success, leave connect-retry mode and
+        resume the normal poll interval; on failure, record it and back
+        off until the next retry. A `None` session is NOT a failure
+        (`attach`'s contract -- see `UartPane.attach`): it leaves retry
+        mode and hands the pane to the read path, which reports it."""
+        try:
+            self.session = await self.attach()
+        except Exception as exc:
+            self._attach_failed = exc
+            self._fail_attach(exc)
+            return
+        self._attach_failed = None
+        self._reschedule(self.poll_interval)
 
     def on_slice(self, slice_: ConsoleSlice) -> None:
         """Render a successful read. No-op by default; subclasses override."""
 
     def on_error(self, exc: Exception) -> None:
-        """Render the failure in place (spec I3). No-op by default;
+        """Render a READ failure in place (spec I3). No-op by default;
         subclasses override."""
+
+    def on_attach_error(self, exc: Exception) -> None:
+        """Render a CONNECT failure (a raising `attach`) in place (spec
+        I3). No-op by default; subclasses override."""
 
     def accepts_input(self) -> bool:
         return self.can_send

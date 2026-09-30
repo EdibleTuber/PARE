@@ -114,6 +114,51 @@ async def test_no_session_is_reported_not_crashed():
     assert pane.snapshot_lines()      # says something, rather than raising
 
 
+async def test_attach_failure_renders_a_connect_failed_marker():
+    """The real-world failure behind the TUI crash: `attach()` raising at
+    mount (bad endpoint -> HTTP 404 -> SDK's 'Session terminated'). The
+    pane must show a MARKER saying the connect failed and that it is
+    retrying -- rendered in place, distinct from device text -- instead of
+    the exception escaping `on_mount` to the app.
+
+    Asserted on the structural `is_marker` flag (the real distinctness
+    guarantee, per the module docstring), not just the snapshot framing.
+    """
+    from pare.tui.panes.base import PaneDock
+    from pare.tui.panes.uart import UartPane
+    from textual.app import App, ComposeResult
+
+    class _DeadSource:
+        async def attach(self):
+            raise RuntimeError("Session terminated")
+
+        async def read(self, cursor, limit=None):
+            raise RuntimeError("no attached session")
+
+        async def send(self, session, data):
+            raise NotImplementedError
+
+        async def status(self):
+            return {}
+
+    pane = UartPane(source=_DeadSource(), poll_interval=0.02, id="uart")
+
+    class _App(App):
+        def compose(self) -> ComposeResult:
+            yield PaneDock([pane], id="dock")
+
+    app = _App()
+    async with app.run_test() as pilot:
+        await pilot.pause(0.15)
+        lines = [text for text, is_marker in pane._lines if is_marker]
+        assert any("connect failed: Session terminated" in line for line in lines), (
+            "the pane must render the connect failure in place as a marker, "
+            f"got markers: {lines!r}"
+        )
+        assert pane.healthy is False
+        assert pane.last_error == "Session terminated"
+
+
 async def test_render_styles_markers_structurally_not_by_text_shape():
     """The anti-spoofing guarantee lives in `render()` (the real widget
     output), keyed off the structural `is_marker` flag set when a slice's
