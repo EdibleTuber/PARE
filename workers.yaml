@@ -103,6 +103,9 @@ workers:
   # Networked hardware worker on pare-bench (100.97.133.126). Systemd unit
   # /etc/systemd/system/pare-hardware-mcp.service; deploys from a checkout at
   # /opt/pare/hardware-mcp/ (see pare-hardware-mcp/scripts/bench_deploy.sh).
+  # Console on this bench: the Tigard's if00 UART (if01 is silent -- the
+  # 2026-09-27 spike). PARE_HW_DEVICE is operator-declared in the Pi unit;
+  # this line records the current wiring.
   # risk_default remains high -- the tailnet transport does not relax the
   # model-containment floor; see the block below.
   hardware:
@@ -175,11 +178,12 @@ risk_overrides:
   - ["mitm_inject_request", "critical"]
 
   # --- hardware (pare-hardware-mcp), FORWARD-DECLARED ---------------------
-  # The worker does not exist yet, so these match nothing today and
-  # tests/test_risk_overrides_coverage.py reports them as unchecked rather
-  # than failing. Once the package is installed, a pin matching no tool FAILS
-  # that test — which is the point: it forces the tool names to be reconciled
-  # against these patterns rather than shipped past them.
+  # The worker is deployed on pare-bench, but its contract package is not
+  # installed in this venv and the coverage test's _CONTRACT_MODULES has no
+  # "hardware" entry, so these pins are reported as unchecked rather than
+  # failing. Install the package AND add "hardware" to that map to turn this
+  # section into a hard check — which is the point: it forces the tool names
+  # to be reconciled against these patterns rather than shipped past them.
   #
   # critical means: prompts every time, can never be session-approved, and
   # requires a typed justification (risk_pool.py:387, :454, :463). That is the
@@ -188,6 +192,15 @@ risk_overrides:
   - ["hardware_erase_*", "critical"]
   - ["hardware_write_*", "critical"]
   - ["hardware_glitch_*", "critical"]
+  # Target power control (feat/power-cycle-and-baud): high, not critical --
+  # it cannot corrupt data the way a flash write does, but it must never run
+  # unattended. power_status is pinned for symmetry: the contract advertises
+  # it high, so an honest worker is unaffected, and the pin still caps an
+  # under-reporting build.
+  - ["hardware_power_set", "high"]
+  - ["hardware_power_cycle", "high"]
+  - ["hardware_console_detect_baud_cycling", "high"]
+  - ["hardware_power_status", "high"]
   - ["mitm_add_blocking_rule", "high"]
   - ["mitm_add_modification_rule", "high"]
   - ["mitm_replay_flow", "high"]
