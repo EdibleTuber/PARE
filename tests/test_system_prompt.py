@@ -109,3 +109,48 @@ def test_preserves_dynamic_flow_steering():
 
 def test_preserves_approval_gate_line():
     assert "least-invasive" in _flat()
+
+
+# --- The hardware bench ---------------------------------------------------
+#
+# The live-TUI transcript failure this section pins: the model told the
+# operator to type `/hardware_list_devices` and to "run /worker load
+# hardware". The first half was a fabrication — `hardware_*` are worker
+# tools the MODEL calls (like `frida_*`/`static_*`), never slash commands an
+# operator types; there is no `/hardware_*` command. The second half was a
+# real PARE built-in (`/worker load hardware`) the operator DOES type, to
+# load a worker that is not present at boot. The prompt must draw that line.
+
+
+def test_hardware_worker_is_loaded_not_autoloaded():
+    """Hardware is a networked worker absent from the toolset at boot; the
+    prompt must say so and name the operator command that loads it."""
+    f = _flat()
+    assert "not autoloaded" in f
+    assert "/worker load hardware" in f
+
+
+def test_hardware_tools_are_model_calls_not_operator_slash_commands():
+    """THE fix: `hardware_*` are tools the model invokes, not commands the
+    operator types. Pin the correction by naming the exact forbidden form
+    the model produced in the transcript (`/hardware_list_devices`)."""
+    f = _flat()
+    assert "hardware_list_devices" in f
+    assert "never types a tool name" in f
+    # the prompt names the fabricated slash form, to forbid it
+    assert "`/hardware_list_devices`" in f
+
+
+def test_hardware_tool_list_is_read_live_not_recited():
+    """The hardware tool set changes between bench deployments; the model
+    must read the live list rather than recite a stale one from memory."""
+    f = _flat()
+    assert "/worker tools hardware" in f
+
+
+def test_hardware_mutating_tools_gate_for_approval():
+    """The hardware worker's risk floor is high: power/flash/erase/write/
+    glitch pause for operator approval and never run unattended."""
+    f = _flat()
+    assert "approval" in f
+    assert "never run unattended" in f

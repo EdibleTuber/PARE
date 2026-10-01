@@ -159,59 +159,246 @@ async def test_attach_failure_renders_a_connect_failed_marker():
         assert pane.last_error == "Session terminated"
 
 
-async def test_render_styles_markers_structurally_not_by_text_shape():
-    """The anti-spoofing guarantee lives in `render()` (the real widget
-    output), keyed off the structural `is_marker` flag set when a slice's
-    honesty field fires -- NOT in `snapshot_lines()`, which is only a
-    readability seam (per the pane's own docstring). Every other test in
-    this file asserts on `snapshot_lines()`, so none of them can tell
-    `render()`'s real style attribution from a version that fakes it by
+def _strip_styles(strip):
+    """The Rich styles actually carried by a log line (one per segment).
+    `_segments` is the line's stored content -- asserting on it means the
+    test sees what the widget really wrote, not a reconstruction. A
+    segment written without a style carries None; normalize to the empty
+    style so callers can read `.bold` etc. uniformly."""
+    from rich.style import Style
+
+    return [segment.style or Style() for segment in strip._segments]
+
+
+async def test_log_styles_markers_structurally_not_by_text_shape():
+    """The anti-spoofing guarantee lives in what the pane WRITES to its
+    display (`_append` -> the `#uart-log` child, the real widget output),
+    keyed off the structural `is_marker` flag set when a slice's honesty
+    field fires -- NOT in `snapshot_lines()`, which is only a readability
+    seam (per the pane's own docstring). Every other unmounted test in
+    this file asserts on `snapshot_lines()`, so none of them can tell the
+    display's real style attribution from a version that fakes it by
     inspecting the text -- this is the same "asserted on the wrong layer"
     trap already caught once in this file for the honesty fields
     themselves, one layer up.
 
-    Two halves, both against the real `render()`:
+    (Migrated from the old `render() -> Text` seam to the log's stored
+    lines when the display became a `RichLog` child; same property, same
+    two halves.)
+
+    Two halves, both against the real log contents:
 
       (a) a genuine marker (a real dropped-bytes event, no device text
-          alongside it) carries a Rich style span; the device line read
-          just before it does not.
+          alongside it) is written to the log with a style the device
+          line read just before it does not carry.
       (b) device BYTES that happen to be marker-shaped text -- what an
           operator would see if the board itself printed something that
-          reads like a marker -- must render with no such style. This is
-          the assertion that actually pins the property: a pane that
+          reads like a marker -- must be written with no such style. This
+          is the assertion that actually pins the property: a pane that
           derived styling from the text instead of the flag would style
           this line too.
     """
-    from pare.tui.panes.uart import UartPane
     from pare.tui.sources.fake_console import FakeConsoleSource
+    from textual.widgets import RichLog
 
     # (a) a genuine marker is styled; the device line before it is not.
-    genuine = UartPane(source=FakeConsoleSource())
-    await genuine.attach()
-    genuine.source.feed(b"boot ok\n")
-    await genuine.advance()                # one device line: "boot ok"
-    genuine.source.feed(b"x" * 20)
-    genuine.source.drop(1000)              # evicts everything just fed
-    await genuine.advance()                # -> one dropped marker, no text
+    async with _mounted_pane(FakeConsoleSource()) as (app, pane, pilot):
+        src = pane.source
+        src.feed(b"boot ok\n")
+        await pilot.pause(0.1)             # one device line: "boot ok"
+        src.feed(b"x" * 20)
+        src.drop(1000)                     # evicts everything just fed
+        await pilot.pause(0.1)             # -> one dropped marker, no text
 
-    g_lines = genuine.render().split("\n")
-    assert len(g_lines) == 2
-    device_line, marker_line = g_lines
-    assert device_line.plain == "boot ok"
-    assert not device_line.spans, "device text must carry no marker style"
-    assert marker_line.spans, "a genuine marker must be styled distinctly"
+        log = pane.query_one("#uart-log", RichLog)
+        lines = list(log.lines)
+        device_line = next(s for s in lines if s.text == "boot ok")
+        marker_line = next(
+            s for s in lines if "byte(s) dropped" in s.text
+        )
+        assert not any(st.bold for st in _strip_styles(device_line)), (
+            "device text must carry no marker style"
+        )
+        assert any(st.bold for st in _strip_styles(marker_line)), (
+            "a genuine marker must be styled distinctly"
+        )
 
     # (b) device bytes shaped exactly like a marker must NOT get that style.
-    spoof = UartPane(source=FakeConsoleSource())
-    await spoof.attach()
-    spoof_text = "-- session ended -- device is no longer connected --"
-    spoof.source.feed(spoof_text.encode())
-    await spoof.advance()
+    async with _mounted_pane(FakeConsoleSource()) as (app, pane, pilot):
+        spoof_text = "-- session ended -- device is no longer connected --"
+        pane.source.feed(spoof_text.encode())
+        await pilot.pause(0.1)
 
-    s_lines = spoof.render().split("\n")
-    assert len(s_lines) == 1
-    assert s_lines[0].plain == spoof_text
-    assert not s_lines[0].spans, (
-        "device bytes shaped like a marker must render as ordinary "
-        "output, not be misclassified as a marker"
-    )
+        log = pane.query_one("#uart-log", RichLog)
+        strip = next(s for s in log.lines if s.text == spoof_text)
+        assert not any(st.bold for st in _strip_styles(strip)), (
+            "device bytes shaped like a marker must render as ordinary "
+            "output, not be misclassified as a marker"
+        )
+
+
+# --- the pane's live display and input ----------------------------------
+#
+# The operator-facing symptoms behind this section: device output that
+# arrived for a whole session never became visible (the widget repainted
+# only on unrelated invalidation, and even then only its OLDEST lines,
+# since its renderable was the entire ever-growing list), and there was no
+# way to type at the console from the pane at all (`submit` existed but
+# nothing in the TUI ever called it).
+#
+# The tests above drive the pane with bare `attach()`/`advance()` -- never
+# mounted -- so they cannot exercise the log/input widgets at all. These
+# mount the pane in a bare app the way the production app lays it out.
+
+
+def _mounted_pane(source, *, size=(60, 10), poll_interval=0.02):
+    """Mount a `UartPane` on `source` in a bare Textual app and yield
+    (app, pane, pilot).
+
+    `#uart { height: 1fr; }` gives the pane the dock-filling layout the
+    production app uses, so its children get a real, non-zero size.
+    """
+    from contextlib import asynccontextmanager
+
+    from pare.tui.panes.base import PaneDock
+    from pare.tui.panes.uart import UartPane
+    from textual.app import App, ComposeResult
+
+    pane = UartPane(source=source, poll_interval=poll_interval, id="uart")
+
+    class _App(App):
+        CSS = "#uart { height: 1fr; }"
+
+        def compose(self) -> ComposeResult:
+            yield PaneDock([pane], id="dock")
+
+    @asynccontextmanager
+    async def _ctx():
+        app = _App()
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            yield app, pane, pilot
+
+    return _ctx()
+
+
+async def test_new_output_is_written_to_the_pane_log_as_it_arrives():
+    """Device output must reach the pane's visible display as it arrives:
+    the display is a log child that each slice writes into, not a
+    renderable that only ever repaints on unrelated invalidation."""
+    from pare.tui.sources.fake_console import FakeConsoleSource
+    from textual.widgets import RichLog
+
+    async with _mounted_pane(FakeConsoleSource()) as (app, pane, pilot):
+        pane.source.feed(b"boot ok\n")
+        await pilot.pause(0.1)
+        log = pane.query_one("#uart-log", RichLog)
+        assert "boot ok" in "\n".join(strip.text for strip in log.lines)
+
+
+async def test_pane_log_follows_the_tail_when_output_overflows():
+    """A pane shorter than its transcript must stay pinned to the newest
+    line: a renderable of the whole list can only ever show the OLDEST
+    lines, which is what made the live console look dead."""
+    from pare.tui.sources.fake_console import FakeConsoleSource
+    from textual.widgets import RichLog
+
+    async with _mounted_pane(FakeConsoleSource(), size=(40, 8)) as (
+        app, pane, pilot):
+        pane.source.feed(b"".join(f"line {i}\n".encode() for i in range(30)))
+        await pilot.pause(0.1)
+        log = pane.query_one("#uart-log", RichLog)
+        assert log.lines[-1].text == "line 29"
+        assert log.is_vertical_scroll_end, "the log must sit at the newest line"
+
+
+async def test_following_pauses_when_the_operator_scrolls_up():
+    """Following must yield to the operator: while they are scrolled up
+    reading old output, new lines must not yank the view back to the tail;
+    once they are back at the tail, following resumes."""
+    from pare.tui.sources.fake_console import FakeConsoleSource
+    from textual.widgets import RichLog
+
+    async with _mounted_pane(FakeConsoleSource(), size=(40, 8)) as (
+        app, pane, pilot):
+        src = pane.source
+        src.feed(b"".join(f"line {i}\n".encode() for i in range(30)))
+        await pilot.pause(0.1)
+        log = pane.query_one("#uart-log", RichLog)
+        assert log.is_vertical_scroll_end
+
+        log.scroll_home(animate=False, immediate=True)
+        await pilot.pause()
+        src.feed(b"line 30\n")
+        await pilot.pause(0.1)
+        assert log.lines[-1].text == "line 30"  # the line still arrives
+        assert not log.is_vertical_scroll_end, (
+            "new output must not yank a scrolled-up view back to the tail"
+        )
+
+        log.scroll_end(animate=False, immediate=True)
+        await pilot.pause()
+        src.feed(b"line 31\n")
+        await pilot.pause(0.1)
+        assert log.is_vertical_scroll_end, (
+            "following must resume once the operator is back at the tail"
+        )
+
+
+async def test_enter_in_the_pane_input_sends_the_line_to_the_target():
+    """The operator asked where the input field was: the pane has one, and
+    Enter on it sends the line through the pane's write path to the
+    source, then clears the field."""
+    from pare.tui.sources.fake_console import FakeConsoleSource
+    from textual.widgets import Input
+
+    async with _mounted_pane(FakeConsoleSource()) as (app, pane, pilot):
+        pane.query_one("#uart-input", Input).focus()
+        await pilot.pause()
+        for ch in "boot":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert pane.source.sent == [b"boot\n"]
+        assert pane.query_one("#uart-input", Input).value == ""
+
+
+async def test_focusing_the_pane_moves_the_caret_into_its_input():
+    """The dock's focus cycle calls `pane.focus()` on the pane container --
+    for the input to be usable from that cycle, focusing the pane must land
+    the caret in the pane's input, not on the container itself."""
+    from pare.tui.sources.fake_console import FakeConsoleSource
+    from textual.widgets import Input
+
+    async with _mounted_pane(FakeConsoleSource()) as (app, pane, pilot):
+        pane.focus()
+        await pilot.pause()
+        assert app.focused is pane.query_one("#uart-input", Input)
+
+
+async def test_pane_input_is_disabled_while_there_is_no_live_session():
+    """With no live session there is nowhere to send: the input says so
+    (disabled, with a hint) instead of accepting lines that can only fail,
+    and the no-session marker is visible in the log."""
+    from pare.tui.sources.fake_console import FakeConsoleSource
+    from textual.widgets import Input, RichLog
+
+    async with _mounted_pane(FakeConsoleSource(session=None)) as (
+        app, pane, pilot):
+        assert pane.query_one("#uart-input", Input).disabled
+        log = pane.query_one("#uart-log", RichLog)
+        assert any("no live console session" in s.text for s in log.lines)
+
+
+async def test_pane_input_is_disabled_when_the_session_dies():
+    """A session that dies mid-stream (alive=False on a read) leaves
+    nowhere to send either: the input disables with it."""
+    from pare.tui.sources.fake_console import FakeConsoleSource
+    from textual.widgets import Input
+
+    async with _mounted_pane(FakeConsoleSource()) as (app, pane, pilot):
+        src = pane.source
+        src.feed(b"x")
+        src.die()
+        await pilot.pause(0.1)
+        assert pane.query_one("#uart-input", Input).disabled
