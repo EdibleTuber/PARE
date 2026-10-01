@@ -513,6 +513,137 @@ async def test_status_bar_has_its_own_row_above_the_footer(tmp_path):
         assert bar.y == footer.y - 1
 
 
+# --- 5. footer hints: ^q quit, f1 help (2026-10-01) ------------------------
+
+
+def _svg_rows(app) -> list[str]:
+    """The operator-visible screen, rows reconstructed from
+    `export_screenshot(simplify=True)`. The SVG holds one `<text>` node per
+    glyph, so this reassembles them (col from x, row from y — the same
+    transform as the 2026-10-01 manual dump script that sized the 120x30
+    grid). Use size=(120, 30) in tests that call this."""
+    import html as _html
+    import re
+
+    svg = app.export_screenshot(simplify=True)
+    cells: dict[tuple[int, int], str] = {}
+    for m in re.finditer(
+        r'<text class="[^"]*" x="([\d.]+)" y="([\d.]+)"[^>]*>([^<]*)</text>',
+        svg,
+    ):
+        col = round(float(m.group(1)) / 12.2)
+        row = round((float(m.group(2)) - 20) / 24.4)
+        for i, ch in enumerate(_html.unescape(m.group(3))):
+            cells[(col + i, row)] = ch
+    if not cells:
+        return []
+    max_c = max(c for c, _ in cells)
+    return [
+        "".join(cells.get((c, r), " ") for c in range(max_c + 1)).rstrip()
+        for r in range(max(r for _, r in cells) + 1)
+    ]
+
+
+async def test_quit_and_help_are_in_the_footer(tmp_path):
+    """The Footer renders only the app subclass's own BINDINGS (the base
+    App's ^q -> quit is NOT shown -- verified live in Textual 8.2.8), so
+    both hints must be declared here to appear at a glance."""
+    from pare.tui.app import PareTUI
+
+    declared = {(b.key, b.description) for b in PareTUI.BINDINGS}
+    assert ("ctrl+q", "Quit") in declared
+    assert ("f1", "Help") in declared
+    app = _make_app(tmp_path)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        footer = _svg_rows(app)[-1]
+        assert "Quit" in footer
+        assert "Help" in footer
+
+
+async def test_f1_sends_help_exactly_like_typing_it(tmp_path):
+    session = _Session()
+    app = _make_app(tmp_path, session=session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("f1")
+        await pilot.pause()
+        lines = _lines(app)
+        assert "you> /help" in lines
+        commands = [m for m in session.sent if isinstance(m, CommandMessage)]
+        assert commands == [CommandMessage(name="help", args="")]
+
+
+async def test_f1_with_no_live_connection_fails_like_typed_help(tmp_path):
+    """F1 must go through the same path as typing /help: echo the line,
+    then a [send failed: ...] transcript line, never a crash out of the
+    event handler."""
+    session = _Session(fail_send=RuntimeError("connect() before send()"))
+    app = _make_app(tmp_path, session=session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("f1")
+        await pilot.pause()
+        lines = _lines(app)
+        assert "you> /help" in lines
+        assert any("[send failed:" in line for line in lines)
+
+
+async def test_f1_with_a_draft_in_the_input_does_not_clobber_it(tmp_path):
+    """F1 is one-keystroke help, not a line submit: a half-typed message in
+    the focused input must survive it. Pinned per the 2026-10-01
+    whole-branch review: a future refactor that makes _submit_line clear
+    the input would silently change F1's contract."""
+    from textual.widgets import Input
+
+    session = _Session()
+    app = _make_app(tmp_path, session=session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        box = app.query_one("#chat-input", Input)
+        box.focus()
+        box.value = "half-typed th"
+        await pilot.pause()
+        await pilot.press("f1")
+        await pilot.pause()
+        assert box.value == "half-typed th"
+        assert "you> /help" in _lines(app)
+        commands = [m for m in session.sent if isinstance(m, CommandMessage)]
+        assert commands == [CommandMessage(name="help", args="")]
+
+
+# --- 6. pane title labels (2026-10-01) --------------------------------------
+
+
+async def test_chat_and_uart_panes_carry_title_labels(tmp_path):
+    from pare.tui.app import LAYOUT_KEY
+    from pare.tui.panes.base import PaneDock
+
+    app = _make_app(tmp_path)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        chat_label = app.query_one("#chat-area .pane-label")
+        assert str(chat_label.render()) == "Chat"
+        dock_label = app.query_one("#pane-dock .pane-label")
+        assert str(dock_label.render()) == "UART"
+        # The UART label sits above the pane it titles.
+        first_pane = app.query_one("#pane-dock", PaneDock).panes[0]
+        assert dock_label.region.y < first_pane.region.y
+        # Operator-visible in the render, not just in the widget tree.
+        screen = "\n".join(_svg_rows(app))
+        assert "Chat" in screen
+        assert "UART" in screen
+        # Hiding the dock (4th layout preset) hides the label with it --
+        # no orphan strip. Note: Textual's `visible` is the CSS *visibility*
+        # rule; `display: none` is what removes the dock (and the label)
+        # from the render.
+        for _ in range(3):
+            await pilot.press(LAYOUT_KEY)
+            await pilot.pause()
+        assert not app.query_one("#pane-dock").display
+        assert "UART" not in "\n".join(_svg_rows(app))
+
+
 # --- Fix round 1 -----------------------------------------------------------
 
 

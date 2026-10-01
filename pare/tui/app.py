@@ -24,7 +24,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Footer, Header, Input, Markdown, RichLog
+from textual.widgets import Footer, Header, Input, Markdown, RichLog, Static
 
 import pare
 from pare.config import load_config
@@ -213,7 +213,15 @@ class PareTUI(App):
 
     TITLE = "PARE"
 
-    BINDINGS = [Binding(LAYOUT_KEY, "cycle_layout", "Layout")]
+    BINDINGS = [
+        Binding(LAYOUT_KEY, "cycle_layout", "Layout"),
+        # Declared here, not inherited: the Textual 8.2.8 Footer renders
+        # only the app subclass's own BINDINGS (verified: the base App's
+        # ^q -> quit does not appear in the footer), so "at a glance"
+        # requires the explicit entries.
+        Binding("ctrl+q", "quit", "Quit"),
+        Binding("f1", "show_help", "Help"),
+    ]
 
     CSS = """
     #main-area {
@@ -273,6 +281,15 @@ class PareTUI(App):
        and two bottom docks share one row (the Footer painted over this). */
     StatusBar {
         height: 1;
+        background: $panel;
+    }
+
+    /* One-line dim title strip above a pane's content. Static by design:
+       live pane state belongs in the StatusBar row above the footer. */
+    .pane-label {
+        height: 1;
+        text-style: dim;
+        padding: 0 1;
         background: $panel;
     }
     """
@@ -341,13 +358,14 @@ class PareTUI(App):
         yield Header()
         with Horizontal(id="main-area"):
             with Vertical(id="chat-area"):
+                yield Static("Chat", classes="pane-label")
                 yield TranscriptLog(id="transcript", wrap=True, markup=False)
                 with VerticalScroll(id="live-scroll"):
                     yield Markdown(id="live-reply")
                 yield Input(
                     placeholder="Type a message, or /command ...", id="chat-input"
                 )
-            yield PaneDock([self._build_uart_pane()], id="pane-dock")
+            yield PaneDock([self._build_uart_pane()], id="pane-dock", title="UART")
         yield StatusBar(id="status-bar")
         yield Footer()
 
@@ -721,6 +739,13 @@ class PareTUI(App):
             return
         line = event.value
         event.input.value = ""
+        await self._submit_line(line)
+
+    async def _submit_line(self, line: str) -> None:
+        """One line into the daemon, exactly as typing it would send it:
+        the `you>` echo first (a reply cannot precede it, and it stays if
+        the send fails), then the send with its failure line. `F1`
+        (action_show_help) submits "/help" through this same path."""
         if is_sendable(line):
             # Before the send: a reply cannot precede it, and it stays if
             # the send fails.
@@ -777,6 +802,9 @@ class PareTUI(App):
         for cls in LAYOUT_CLASSES:
             if cls:
                 area.set_class(cls == LAYOUT_CLASSES[self._layout_index], cls)
+
+    async def action_show_help(self) -> None:
+        await self._submit_line("/help")
 
     def _load_theme(self) -> None:
         name = load_theme(self.tui_config_path)
