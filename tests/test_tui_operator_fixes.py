@@ -589,6 +589,29 @@ async def test_f1_with_no_live_connection_fails_like_typed_help(tmp_path):
         assert any("[send failed:" in line for line in lines)
 
 
+async def test_f1_with_a_draft_in_the_input_does_not_clobber_it(tmp_path):
+    """F1 is one-keystroke help, not a line submit: a half-typed message in
+    the focused input must survive it. Pinned per the 2026-10-01
+    whole-branch review: a future refactor that makes _submit_line clear
+    the input would silently change F1's contract."""
+    from textual.widgets import Input
+
+    session = _Session()
+    app = _make_app(tmp_path, session=session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        box = app.query_one("#chat-input", Input)
+        box.focus()
+        box.value = "half-typed th"
+        await pilot.pause()
+        await pilot.press("f1")
+        await pilot.pause()
+        assert box.value == "half-typed th"
+        assert "you> /help" in _lines(app)
+        commands = [m for m in session.sent if isinstance(m, CommandMessage)]
+        assert commands == [CommandMessage(name="help", args="")]
+
+
 # --- 6. pane title labels (2026-10-01) --------------------------------------
 
 
