@@ -24,7 +24,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Footer, Header, Input, Markdown, RichLog
+from textual.widgets import Footer, Header, Input, Markdown, RichLog, Static
 
 import pare
 from pare.config import load_config
@@ -283,6 +283,15 @@ class PareTUI(App):
         height: 1;
         background: $panel;
     }
+
+    /* One-line dim title strip above a pane's content. Static by design:
+       live pane state belongs in the StatusBar row above the footer. */
+    .pane-label {
+        height: 1;
+        text-style: dim;
+        padding: 0 1;
+        background: $panel;
+    }
     """
 
     def __init__(
@@ -349,13 +358,14 @@ class PareTUI(App):
         yield Header()
         with Horizontal(id="main-area"):
             with Vertical(id="chat-area"):
+                yield Static("Chat", classes="pane-label")
                 yield TranscriptLog(id="transcript", wrap=True, markup=False)
                 with VerticalScroll(id="live-scroll"):
                     yield Markdown(id="live-reply")
                 yield Input(
                     placeholder="Type a message, or /command ...", id="chat-input"
                 )
-            yield PaneDock([self._build_uart_pane()], id="pane-dock")
+            yield PaneDock([self._build_uart_pane()], id="pane-dock", title="UART")
         yield StatusBar(id="status-bar")
         yield Footer()
 

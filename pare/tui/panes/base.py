@@ -23,6 +23,7 @@ from typing import Sequence
 from textual.containers import Vertical
 from textual.timer import Timer
 from textual.widget import Widget
+from textual.widgets import Static
 
 from pare.tui.sources.base import ConsoleSlice, ConsoleSource
 
@@ -160,17 +161,27 @@ class PaneDock(Vertical):
     """Mounts, lays out, and focus-cycles a set of `Pane` widgets.
 
     Owns lifecycle (mounting/unmounting panes), focus (cycling Textual
-    focus between them), and layout (a vertical stack by default). Knows
-    NOTHING about `ConsoleSource`, MCP, or any concrete source: every
-    method here operates purely on the `Pane` interface, which is what
-    lets it be tested against a stub source alone.
+    focus between them), and layout (a vertical stack by default, with an
+    optional one-line title strip above the panes). Knows NOTHING about
+    `ConsoleSource`, MCP, or any concrete source: every method here
+    operates purely on the `Pane` interface, which is what lets it be
+    tested against a stub source alone.
     """
 
-    def __init__(self, panes: Sequence[Pane] = (), *, id: str | None = None) -> None:
+    def __init__(
+        self,
+        panes: Sequence[Pane] = (),
+        *,
+        id: str | None = None,
+        title: str | None = None,
+    ) -> None:
         super().__init__(id=id)
         self._panes: list[Pane] = list(panes)
+        self._title = title
 
     def compose(self):
+        if self._title is not None:
+            yield Static(self._title, classes="pane-label")
         yield from self._panes
 
     @property

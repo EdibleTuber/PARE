@@ -589,6 +589,38 @@ async def test_f1_with_no_live_connection_fails_like_typed_help(tmp_path):
         assert any("[send failed:" in line for line in lines)
 
 
+# --- 6. pane title labels (2026-10-01) --------------------------------------
+
+
+async def test_chat_and_uart_panes_carry_title_labels(tmp_path):
+    from pare.tui.app import LAYOUT_KEY
+    from pare.tui.panes.base import PaneDock
+
+    app = _make_app(tmp_path)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        chat_label = app.query_one("#chat-area .pane-label")
+        assert str(chat_label.render()) == "Chat"
+        dock_label = app.query_one("#pane-dock .pane-label")
+        assert str(dock_label.render()) == "UART"
+        # The UART label sits above the pane it titles.
+        first_pane = app.query_one("#pane-dock", PaneDock).panes[0]
+        assert dock_label.region.y < first_pane.region.y
+        # Operator-visible in the render, not just in the widget tree.
+        screen = "\n".join(_svg_rows(app))
+        assert "Chat" in screen
+        assert "UART" in screen
+        # Hiding the dock (4th layout preset) hides the label with it --
+        # no orphan strip. Note: Textual's `visible` is the CSS *visibility*
+        # rule; `display: none` is what removes the dock (and the label)
+        # from the render.
+        for _ in range(3):
+            await pilot.press(LAYOUT_KEY)
+            await pilot.pause()
+        assert not app.query_one("#pane-dock").display
+        assert "UART" not in "\n".join(_svg_rows(app))
+
+
 # --- Fix round 1 -----------------------------------------------------------
 
 
