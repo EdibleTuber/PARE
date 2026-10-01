@@ -162,7 +162,8 @@ class PaneDock(Vertical):
 
     Owns lifecycle (mounting/unmounting panes), focus (cycling Textual
     focus between them), and layout (a vertical stack by default, with an
-    optional one-line title strip above the panes). Knows NOTHING about
+    optional one-line title strip above the panes; a titled dock with no
+    panes renders just the strip). Knows NOTHING about
     `ConsoleSource`, MCP, or any concrete source: every method here
     operates purely on the `Pane` interface, which is what lets it be
     tested against a stub source alone.

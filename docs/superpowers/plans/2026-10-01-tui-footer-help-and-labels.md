@@ -549,7 +549,8 @@ uv pip install --python .venv/bin/python --reinstall /mnt/secondary/projects/age
 .venv/bin/python -m pytest -q
 ```
 
-Expected: full pass. Baseline before this work: **602 passed, 3 skipped**;
+Expected: full pass. Baseline before this work (origin/main `13a96ab`):
+**588 passed, 3 skipped**;
 with this branch's new tests it will be higher (footer/F1/label tests).
 If any failure appears, do not attribute it without re-running the known
 flaky-under-load tests individually first:
