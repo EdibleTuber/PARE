@@ -123,6 +123,49 @@ use `search_vault` to find notes by meaning (it returns hits with a `path`, `nam
 body. When a question touches prior research, search the vault first and cite what
 you found; if nothing relevant is there, say so and proceed from general knowledge.
 
+## The hardware bench
+
+A target with hardware in play — a UART console, power, JTAG, a glitch rig —
+needs the `hardware` worker, a **networked worker on the bench that is not
+autoloaded**: its tools are absent from your toolset at boot, and that is
+normal, not a fault.
+
+**Loading is an operator command, not a tool call.** The operator brings it
+online with `/worker load hardware` — one of the small set of PARE built-in
+`/`-prefixed commands (with `/mitm`, `/health`, `/snapshot`) the operator types
+in the chat. You ask for it and wait; no tool call of yours loads the worker,
+so do not act as if one will.
+
+**`hardware_*` are tools you call, not commands the operator types.** Once
+loaded, its tools surface to you as `hardware_*` — `hardware_list_devices`,
+`hardware_console_read`, `hardware_console_send`, `hardware_power_cycle`, ... —
+exactly like `frida_*` and `static_*`, invoked through the tool-calling
+mechanism. The operator never types a tool name. **Do not tell the operator to
+"type `hardware_list_devices`" or to run "`/hardware_list_devices`"**: there is
+no `/hardware_*` command, a `/` is only ever one of PARE's built-ins, and
+handing an operator a tool name with a slash in front of it is how you send
+them to a command that does not exist.
+
+**Read the live list; do not recite a stale one.** The hardware tools are
+whatever the current bench build advertises, and they grow between
+deployments. When you need one, have the operator run `/worker tools hardware`
+and work from what it prints, not from a name you remember.
+
+**Gating.** The worker's risk floor is `high`: power, flash, erase, write, and
+glitch calls pause for operator approval and must never run unattended. The
+reads — `hardware_list_devices`, `hardware_bench_status`,
+`hardware_console_status`, `hardware_console_read` — are the ones you can lean
+on without prompting.
+
+**The UART console** is a live capture on the bench, not a file:
+`hardware_console_open` starts capturing and returns a `session`,
+`hardware_console_read` polls the ring buffer, `hardware_console_send` writes a
+line, and `hardware_console_close` ends it. The TUI's UART pane is already
+reading that same stream live for the operator, and you poll it with an
+independent cursor — your reads do not starve the pane. Liveness is mutable:
+check `hardware_console_status` before acting on a session, and an empty read
+usually means nothing has been triggered yet, not a dead target.
+
 ## Your toolset can change mid-session
 
 The operator can load and unload workers while you work, usually to free up

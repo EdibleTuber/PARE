@@ -22,6 +22,8 @@ import logging
 from typing import Protocol, runtime_checkable
 
 from rich.text import Text
+from textual.css.query import NoMatches
+from textual.widgets import Input, RichLog
 
 from pare.protocol import PaneActivityMessage
 from pare.tui.panes.base import Pane
@@ -29,6 +31,12 @@ from pare.tui.sanitize import for_display
 from pare.tui.sources.base import ConsoleSlice, ConsoleSource
 
 logger = logging.getLogger(__name__)
+
+# The one style device text never gets, applied to a marker line solely
+# because of its `is_marker` flag (see `_append`). A board cannot forge it:
+# the flag is set by this pane when a slice's honesty field fires, never by
+# parsing bytes.
+MARKER_STYLE = "bold yellow on grey23"
 
 # Measured 2026-09-20 against pare-bench (100.97.133.126) over tailscale0.
 # Median console_read RTT: 12.01ms, p95: 13.37ms (N=100, direct wire).
@@ -65,13 +73,20 @@ class UartPane(Pane):
     line is either device text (sanitised through `for_display`, never
     decoded raw) or a marker. Markers are tracked separately from text as a
     `(text, is_marker)` pair rather than recognised by pattern-matching the
-    string later -- a marker's distinctness in the actual widget (`render`,
-    below) comes from a style applied to a flag the device can never set,
-    not from a text prefix a malicious board could also emit. `snapshot_lines`
-    still gives markers a distinct textual framing for readability in
-    tests/logs, but that framing alone is NOT the security boundary; see
-    the module report for the caveat that plain-text framing is inherently
-    spoofable by a board that can emit arbitrary printable bytes.
+    string later -- a marker's distinctness in the actual display (the
+    `#uart-log` child, written by `_append`) comes from a style applied to a
+    flag the device can never set, not from a text prefix a malicious board
+    could also emit. `snapshot_lines` still gives markers a distinct textual
+    framing for readability in tests/logs, but that framing alone is NOT the
+    security boundary; see the module report for the caveat that plain-text
+    framing is inherently spoofable by a board that can emit arbitrary
+    printable bytes.
+    """
+
+    DEFAULT_CSS = """
+    #uart-log {
+        height: 1fr;
+    }
     """
 
     #: UART accepts operator input (`submit`, below). Overrides `Pane`'s
@@ -125,6 +140,11 @@ class UartPane(Pane):
         # line visually distinct in `render()` -- it is never derived from
         # parsing the text itself, so device bytes cannot forge it.
         self._lines: list[tuple[str, bool]] = []
+        # Set when a read reports `alive=False`: the session is gone and
+        # stays gone (only a raising attach enters connect-retry mode), so
+        # there is nowhere to send. Distinct from `session is None` (never
+        # had a session) -- both disable the input via `_sync_input_state`.
+        self._session_dead = False
         # Observed-output batch pending a flush -- bytes only, no I/O; see
         # `_accumulate_observed`/`_flush_observed`.
         self._observed_buf = bytearray()
@@ -133,16 +153,70 @@ class UartPane(Pane):
         self._observed_polls_since_flush = 0
         self._observed_should_flush = False
 
+    def compose(self):
+        """The pane's display and input: a log the slices are written into
+        (the widget shows its children, so there is no `render()` of the
+        whole line list any more) and a line input docked below it. The
+        log is not keyboard-focusable -- it is read with the wheel, and
+        stealing Tab stops would put the caret away from the input."""
+        log = RichLog(id="uart-log", wrap=True, min_width=1)
+        log.can_focus = False
+        yield log
+        yield Input(id="uart-input", disabled=True)
+
+    def on_focus(self) -> None:
+        """A focus that lands on the pane container moves to the pane's
+        input. `PaneDock`'s focus cycle calls `pane.focus()` on the pane
+        itself, and that is how an operator gets to the console -- the
+        caret has to end up somewhere they can type. When focus is ALREADY
+        on the input (the event bubbling up from it), nothing moves; when
+        the input is disabled (no session) the focus stays on the pane.
+
+        NOTE: a Textual 8.x message is dispatched to EVERY handler found
+        in the MRO (not just the most-derived one) -- that is why the
+        mount/input-setup work lives in `attach()` (plain virtual
+        dispatch) rather than an `on_mount` override, which would run the
+        base's `Pane.on_mount` -- and its `attach()` -- a second time.
+        """
+        if self.screen is None or self.screen.focused is not self:
+            return
+        try:
+            inp = self.query_one("#uart-input", Input)
+        except NoMatches:
+            return
+        if not inp.disabled:
+            inp.focus()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter in the pane's input: send the line through `submit` (the
+        ungated write path, spec S3.2) and clear the field. A bare Enter
+        (empty line) sends a lone newline -- what a bare Enter does at a
+        real console. The pane has exactly one input child, and a disabled
+        input cannot hold focus, so nothing else can submit here."""
+        if event.input.disabled:
+            return
+        line = event.input.value
+        event.input.clear()
+        await self.submit(line)
+
     async def attach(self) -> str | None:
         """Attach, do not own: a `None` session means no live console to
         read -- report it and offer `console_open` as an explicit operator
         action, never retry on a timer or as a side effect of being
-        visible."""
+        visible.
+
+        This is the one place the session can be set (mount AND every
+        connect retry go through it), so the input's enabled state is
+        synced here -- see `on_focus`'s note on why not in `on_mount`.
+        The session is passed EXPLICITLY: the base assigns
+        `self.session = await self.attach()` only after this returns, so
+        `self.session` is still the stale value in here."""
         session = await super().attach()
         if session is None:
             self._mark(
                 "no live console session -- run console_open to attach"
             )
+        self._sync_input_state(session)
         return session
 
     async def advance(self) -> ConsoleSlice | None:
@@ -181,7 +255,7 @@ class UartPane(Pane):
         text = for_display(slice_.data)
         if text:
             for line in text.splitlines():
-                self._lines.append((line, False))
+                self._append(line, False)
 
         if slice_.dropped:
             self._mark(
@@ -209,12 +283,79 @@ class UartPane(Pane):
 
         if not slice_.alive:
             self._mark("session ended -- device is no longer connected")
+            self._session_dead = True
+            self._sync_input_state(self.session)
 
     def on_error(self, exc: Exception) -> None:
         self._mark(f"read failed: {exc}")
 
+    def on_attach_error(self, exc: Exception) -> None:
+        """A failed CONNECT (the pane never attached) is rendered
+        differently from a read failure: it names the fact that the pane
+        is retrying, because the base keeps retrying `attach()` on its own
+        backoff timer (spec I3). The raw exception text is kept verbatim --
+        note that the mcp client SDK renders an HTTP 404 (which a mistyped
+        endpoint, e.g. one missing the worker's `/mcp` path, produces) as
+        'Session terminated', so the operator should be told to check the
+        endpoint when that text appears here."""
+        self._mark(f"connect failed: {exc} -- retrying (check the endpoint "
+                   "URL; the worker serves its MCP endpoint at /mcp)")
+
     def _mark(self, text: str) -> None:
-        self._lines.append((text, True))
+        self._append(text, True)
+
+    def _append(self, text: str, is_marker: bool) -> None:
+        """Append one line to the pane's record and, while the pane is
+        mounted, to its visible log as well.
+
+        The log follows the tail while the operator is at the tail and
+        holds still while they are scrolled up reading: `scroll_end` is
+        decided per write by `is_vertical_scroll_end` AT WRITE TIME, so a
+        fresh console stays pinned to the newest output, scrolling up is
+        never yanked away, and following resumes once they reach the tail.
+
+        `is_marker` is the sole input to styling -- markers get
+        `MARKER_STYLE`, device text gets none, keyed off the flag the
+        device cannot set, not off the text (class docstring).
+
+        The guard is "the log child exists", NOT `is_mounted`: during
+        `on_mount` (where `attach()` runs) the composed children already
+        exist but `is_mounted` is still False, and a write there is simply
+        deferred by the RichLog until its size is known -- so a mount-time
+        line (the no-session marker) still reaches the display. A bare
+        `attach()`/`advance()` pane (the unmounted tests) has no children
+        at all: NoMatches, and only the `_lines` record is kept.
+        """
+        self._lines.append((text, is_marker))
+        try:
+            log = self.query_one("#uart-log", RichLog)
+        except NoMatches:
+            return
+        follow = log.is_vertical_scroll_end
+        if is_marker:
+            log.write(Text(text, style=MARKER_STYLE), scroll_end=follow)
+        else:
+            log.write(text, scroll_end=follow)
+
+    def _sync_input_state(self, session: str | None) -> None:
+        """(Re)apply the input's enabled state and hint from the session
+        state: with no session (or a dead one) there is nowhere to send,
+        so the input says so instead of accepting lines that can only
+        end as 'send failed' markers. The session value is always passed
+        explicitly (see `attach` for why `self.session` cannot be read
+        there). NoMatches-tolerant: a bare `attach()` (unmounted tests)
+        has no input child to sync."""
+        try:
+            inp = self.query_one("#uart-input", Input)
+        except NoMatches:
+            return
+        live = session is not None and not self._session_dead
+        inp.disabled = not live
+        inp.placeholder = (
+            "type a line -- Enter sends it to the device"
+            if live
+            else "no live console session -- nothing to send to"
+        )
 
     # --- write path (operator -> device) --------------------------------
 
@@ -340,19 +481,9 @@ class UartPane(Pane):
         """Plain-text seam for tests: markers get a distinct framing so a
         human (or a diff) can tell them from device text at a glance, but
         see the class docstring -- the real distinctness guarantee is the
-        `is_marker` flag driving `render()`'s styling, not this framing."""
+        `is_marker` flag driving `_append`'s styling of the `#uart-log`
+        display, not this framing."""
         out = []
         for text, is_marker in self._lines:
             out.append(f"-- {text} --" if is_marker else text)
         return out
-
-    def render(self) -> Text:
-        """Actual widget content: markers get a style device text never
-        gets, keyed off the tracked `is_marker` flag rather than the
-        string -- so a board cannot forge the style by choosing bytes."""
-        body = Text()
-        for text, is_marker in self._lines:
-            style = "bold yellow on grey23" if is_marker else ""
-            body.append(text, style=style)
-            body.append("\n")
-        return body

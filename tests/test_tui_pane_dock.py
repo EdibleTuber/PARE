@@ -104,6 +104,47 @@ class _FlakySource:
         return {}
 
 
+class _DeadAttachSource(_StubSource):
+    """`attach()` raises on every call -- the connect-failure case (a bad
+    endpoint), distinct from a read failure (attached, then the source
+    raises) and from a `None` session (attached, nothing live to read)."""
+
+    async def attach(self) -> str | None:
+        raise RuntimeError("Session terminated")
+
+
+class _FlakyAttachSource:
+    """Fails its first `fail_times` attach calls, then succeeds forever --
+    drives the attach-retry / backoff-resets discrimination."""
+
+    def __init__(self, fail_times: int) -> None:
+        self.fail_times = fail_times
+        self.attach_calls = 0
+
+    async def attach(self) -> str | None:
+        self.attach_calls += 1
+        if self.attach_calls <= self.fail_times:
+            raise RuntimeError("attach refused")
+        return "session-1"
+
+    async def read(self, cursor: int, limit: int | None = None) -> ConsoleSlice:
+        return ConsoleSlice(
+            data=b"x",
+            next_cursor=cursor + 1,
+            dropped=0,
+            remaining=0,
+            capture_gaps=[],
+            alive=True,
+            limit_applied=4096,
+        )
+
+    async def send(self, session: str, data: bytes) -> None:
+        raise NotImplementedError
+
+    async def status(self) -> dict:
+        return {}
+
+
 class _RecordingPane(Pane):
     """A `Pane` subclass that only records slices/errors -- no rendering,
     since the base's `on_slice`/`on_error` are no-ops by design."""
@@ -112,12 +153,16 @@ class _RecordingPane(Pane):
         super().__init__(source, **kwargs)
         self.slices: list[ConsoleSlice] = []
         self.errors: list[Exception] = []
+        self.attach_errors: list[Exception] = []
 
     def on_slice(self, slice_: ConsoleSlice) -> None:
         self.slices.append(slice_)
 
     def on_error(self, exc: Exception) -> None:
         self.errors.append(exc)
+
+    def on_attach_error(self, exc: Exception) -> None:
+        self.attach_errors.append(exc)
 
 
 class _DockApp(App):
@@ -138,6 +183,8 @@ def test_stub_satisfies_console_source_protocol():
     # real assertions below.
     _confirms_protocol(_StubSource())
     _confirms_protocol(_FlakySource(fail_times=1))
+    _confirms_protocol(_DeadAttachSource())
+    _confirms_protocol(_FlakyAttachSource(fail_times=1))
 
 
 @pytest.mark.asyncio
@@ -331,3 +378,60 @@ async def test_pane_attach_receives_none_session_without_becoming_unhealthy():
         assert pane.session is None
         assert pane.healthy is True
         assert pane.cursor > 0, "pane must still poll and advance even with no session id"
+
+
+@pytest.mark.asyncio
+async def test_attach_failure_at_mount_renders_in_place_and_keeps_sibling_alive():
+    """Spec I3 on the CONNECT path (the real failure behind a mistyped
+    endpoint): a source whose `attach()` raises must render the error in
+    the pane, mark it unhealthy, and back off on ITS OWN timer -- the
+    exception must never escape `on_mount` to the app, and a sibling pane
+    must keep advancing.
+
+    Pre-fix, `Pane.on_mount` awaited `attach()` unguarded: the exception
+    escaped, the poll timer was never started, and `healthy`/`last_error`
+    were never touched -- the pane looked healthy while polling nothing."""
+    healthy = _RecordingPane(_StubSource(), id="healthy", poll_interval=_POLL_INTERVAL,
+                             max_backoff=_MAX_BACKOFF)
+    dead = _RecordingPane(_DeadAttachSource(), id="dead", poll_interval=_POLL_INTERVAL,
+                          max_backoff=_MAX_BACKOFF)
+    app = _DockApp([healthy, dead])
+    async with app.run_test() as pilot:
+        await pilot.pause(_POLL_INTERVAL * 5)
+
+        assert dead.session is None
+        assert dead.healthy is False, "attach failure must mark the pane unhealthy"
+        assert dead.last_error == "Session terminated"
+        assert dead.attach_errors, "attach failure must render in place (spec I3)"
+        assert dead._interval > _POLL_INTERVAL, (
+            "attach failure must back off on the pane's own timer"
+        )
+        assert healthy.cursor > 0, "sibling pane must keep advancing (spec I3)"
+        assert healthy.healthy is True
+
+
+@pytest.mark.asyncio
+async def test_attach_retries_with_backoff_and_recovers():
+    """A source whose `attach()` fails twice then succeeds must get its
+    pane re-attached -- and, mirroring the read path's backoff-resets
+    test, the interval must be observed BACKED OFF first and then back at
+    exactly `poll_interval` once attach and reads succeed. An
+    implementation that stays permanently backed off after a connect
+    failure would pass 'it recovered' but not the interval assert."""
+    flaky = _FlakyAttachSource(fail_times=2)
+    pane = _RecordingPane(flaky, poll_interval=_POLL_INTERVAL, max_backoff=_MAX_BACKOFF)
+    app = _DockApp([pane])
+    async with app.run_test() as pilot:
+        # Ladder at these settings: mount fail -> 0.04, retry fail -> 0.08,
+        # retry success at ~0.12s, reads resume at 0.02.
+        await pilot.pause(_POLL_INTERVAL * 10)
+        assert flaky.attach_calls >= 3, "pane must keep retrying attach, not give up"
+        assert pane.attach_errors, "each failed attach must render in place"
+        assert pane.session == "session-1"
+        assert pane.slices, "reads must resume after attach recovers"
+        assert pane._interval == _POLL_INTERVAL, (
+            f"interval is {pane._interval} after recovery -- expected it back "
+            f"at exactly poll_interval ({_POLL_INTERVAL}), not left backed off"
+        )
+        assert pane.healthy is True
+        assert pane.cursor > 0
