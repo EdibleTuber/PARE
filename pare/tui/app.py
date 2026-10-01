@@ -213,7 +213,15 @@ class PareTUI(App):
 
     TITLE = "PARE"
 
-    BINDINGS = [Binding(LAYOUT_KEY, "cycle_layout", "Layout")]
+    BINDINGS = [
+        Binding(LAYOUT_KEY, "cycle_layout", "Layout"),
+        # Declared here, not inherited: the Textual 8.2.8 Footer renders
+        # only the app subclass's own BINDINGS (verified: the base App's
+        # ^q -> quit does not appear in the footer), so "at a glance"
+        # requires the explicit entries.
+        Binding("ctrl+q", "quit", "Quit"),
+        Binding("f1", "show_help", "Help"),
+    ]
 
     CSS = """
     #main-area {
@@ -721,6 +729,13 @@ class PareTUI(App):
             return
         line = event.value
         event.input.value = ""
+        await self._submit_line(line)
+
+    async def _submit_line(self, line: str) -> None:
+        """One line into the daemon, exactly as typing it would send it:
+        the `you>` echo first (a reply cannot precede it, and it stays if
+        the send fails), then the send with its failure line. `F1`
+        (action_show_help) submits "/help" through this same path."""
         if is_sendable(line):
             # Before the send: a reply cannot precede it, and it stays if
             # the send fails.
@@ -777,6 +792,9 @@ class PareTUI(App):
         for cls in LAYOUT_CLASSES:
             if cls:
                 area.set_class(cls == LAYOUT_CLASSES[self._layout_index], cls)
+
+    async def action_show_help(self) -> None:
+        await self._submit_line("/help")
 
     def _load_theme(self) -> None:
         name = load_theme(self.tui_config_path)
