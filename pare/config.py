@@ -21,9 +21,13 @@ class PAREConfig(BaseConfig):
     assumes localhost on port 8000 in the local lab).
     """
 
-    # Override BaseConfig's Qwen default: gemma-4-26b handles tool-calling
-    # far more reliably for PARE's agentic loop. Env-overridable via PARE_MODEL.
-    model: str = "gemma-4-26b-a4b-it-q4_k_m"
+    # The model on the inference server's re slot (P40), where PARE's requests
+    # are meant to land. Must match that slot's loaded model or the manager
+    # answers 409. Was gemma-4-26b-a4b until 2026-10-04, when the slot moved to
+    # Qwen3.6-35B-A3B (gemma made tool errors in every run of an opencode
+    # editing benchmark where Qwen3.6 made none; PARE's own loop was not
+    # re-benchmarked). Env-overridable via PARE_MODEL.
+    model: str = "Qwen3.6-35B-A3B-UD-IQ4_NL_XL"
 
     apk_re_agents_url: str = "http://127.0.0.1:8000"
     # Advertise static_analyze (the apk_re_agents coordinator) only when that
