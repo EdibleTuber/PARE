@@ -497,3 +497,39 @@ async def test_d47_custom_marker_resolves(tmp_path):
     [m async for m in agent.handle_chat(msg, ctx)]
 
     assert ctx.project_slug == slug
+
+
+@pytest.mark.asyncio
+async def test_d48_unreadable_project_file_none(tmp_path):
+    """D48: .pare/project holds non-UTF-8 bytes -> read_text() raises
+    UnicodeDecodeError (not a ProjectSlugError) -> caught at the stamp ->
+    ctx.project_slug is None; the turn itself completes."""
+    agent = _make_agent(mode="off")
+    _text_turn(agent)
+    marker = tmp_path / ".pare"
+    marker.mkdir()
+    (marker / "project").write_bytes(b"\xff\xfe\x00not-utf8")
+    ctx = _ctx()
+    ctx.cwd = str(tmp_path)
+    msg = MagicMock(); msg.text = "hi"
+
+    [m async for m in agent.handle_chat(msg, ctx)]
+
+    assert ctx.project_slug is None
+
+
+@pytest.mark.asyncio
+async def test_d49_project_path_is_directory_none(tmp_path):
+    """D49: .pare/project exists as a DIRECTORY -> read_text() raises
+    IsADirectoryError (OSError, not a ProjectSlugError) -> caught at the
+    stamp -> ctx.project_slug is None; the turn itself completes."""
+    agent = _make_agent(mode="off")
+    _text_turn(agent)
+    (tmp_path / ".pare" / "project").mkdir(parents=True)
+    ctx = _ctx()
+    ctx.cwd = str(tmp_path)
+    msg = MagicMock(); msg.text = "hi"
+
+    [m async for m in agent.handle_chat(msg, ctx)]
+
+    assert ctx.project_slug is None
