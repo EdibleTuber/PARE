@@ -580,10 +580,12 @@ class PareAgent(Agent):
                     ctx.project_slug = resolve_project_slug(
                         cwd, marker=self.config.project_marker or ".pare",
                         home=Path.home())
-                except ProjectSlugError:
-                    # Outside a project, or an invalid stored slug: the slug channel
-                    # stays empty for this message. An artifact dispatch against it
-                    # refuses downstream, naming the cwd (fail closed); non-artifact
+                except (ProjectSlugError, OSError, UnicodeDecodeError):
+                    # Outside a project, an invalid stored slug, or a broken
+                    # project file (non-UTF-8, a directory, unreadable, or a
+                    # read-only marker dir): the slug channel stays empty for
+                    # this message. An artifact dispatch against it refuses
+                    # downstream, naming the cwd (fail closed); non-artifact
                     # turns never see this.
                     ctx.project_slug = None
             from agent_core.inference import StreamEnd
