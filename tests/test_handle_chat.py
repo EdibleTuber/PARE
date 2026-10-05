@@ -1,10 +1,12 @@
 """handle_chat: streaming, tool-loop, loop-cap, and error paths."""
 import itertools
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agent_core.agent import HandlerContext
 from agent_core.capture import CaptureStore
 from agent_core.conversation import Conversation
 from agent_core.inference import CompletionResult, StreamEnd, ToolCall, Usage
@@ -12,6 +14,7 @@ from agent_core.protocol import (
     ErrorMessage, ResponseMessage, StreamChunkMessage, ToolProgressMessage,
 )
 from pare.agent import PareAgent
+from pare.project_slug import ARCTIC_BASE_SLUG_RE
 
 
 def _make_agent(mode="off"):
@@ -28,6 +31,9 @@ def _make_agent(mode="off"):
     # setup() isn't run in these unit tests; stub the attrs it would create.
     agent._disambig_resolved = {}
     agent.worker_manager = None
+    # The framework populates config in run_daemon; handle_chat's slug stamp
+    # reads project_marker.
+    agent.config = SimpleNamespace(project_marker=".pare")
     return agent
 
 
@@ -49,6 +55,14 @@ class _Stream:
             for it in self._items:
                 yield it
         return gen()
+
+
+def _text_turn(agent):
+    """Give the agent a single text stream (mode off, ends in StreamEnd)."""
+    usage = Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3)
+    agent.inference.stream = MagicMock(
+        return_value=_Stream(["ok", StreamEnd(finish_reason="stop",
+                                              chunks_yielded=1, usage=usage)]))
 
 
 @pytest.mark.asyncio
@@ -357,3 +371,165 @@ async def test_poll_spin_does_not_handback():
     assert agent.tool_executor.run.await_count <= 3
     msgs = ctx.conversation.get_messages_for_api(system_prompt="S")
     _assert_toolcalls_paired(msgs)
+
+# --- Task 6: the ctx slug stamp (D41-D47) -----------------------------------
+
+@pytest.mark.asyncio
+async def test_d41_stored_slug_stamped(tmp_path):
+    """D41: cwd inside a project with a valid stored slug -> the stamp puts
+    the stored slug on ctx after one turn."""
+    agent = _make_agent(mode="off")
+    _text_turn(agent)
+    slug = "bench-store-abc123"
+    marker = tmp_path / ".pare"
+    marker.mkdir()
+    (marker / "project").write_text(slug + "\n")
+    ctx = _ctx()
+    ctx.cwd = str(tmp_path)
+    msg = MagicMock(); msg.text = "hi"
+
+    [m async for m in agent.handle_chat(msg, ctx)]
+
+    assert ctx.project_slug == slug
+
+
+@pytest.mark.asyncio
+async def test_d42_no_project_slug_none(tmp_path):
+    """D42: cwd with no marker anywhere up the tree -> NoProjectError caught
+    -> ctx.project_slug is None (fail closed downstream)."""
+    agent = _make_agent(mode="off")
+    _text_turn(agent)
+    ctx = _ctx()
+    ctx.cwd = str(tmp_path)
+    msg = MagicMock(); msg.text = "hi"
+
+    [m async for m in agent.handle_chat(msg, ctx)]
+
+    assert ctx.project_slug is None
+
+
+@pytest.mark.asyncio
+async def test_d43_invalid_stored_slug_none(tmp_path):
+    """D43: .pare/project holds something ArcticBase rejects ->
+    InvalidStoredSlugError caught -> ctx.project_slug is None."""
+    agent = _make_agent(mode="off")
+    _text_turn(agent)
+    marker = tmp_path / ".pare"
+    marker.mkdir()
+    (marker / "project").write_text("UPPER-SLUG\n")
+    ctx = _ctx()
+    ctx.cwd = str(tmp_path)
+    msg = MagicMock(); msg.text = "hi"
+
+    [m async for m in agent.handle_chat(msg, ctx)]
+
+    assert ctx.project_slug is None
+
+
+@pytest.mark.asyncio
+async def test_d44_missing_project_file_created(tmp_path):
+    """D44: marker dir present but no stored slug -> the stamp creates the
+    file (documented, idempotent behavior) and stamps the derived slug."""
+    agent = _make_agent(mode="off")
+    _text_turn(agent)
+    (tmp_path / ".pare").mkdir()
+    ctx = _ctx()
+    ctx.cwd = str(tmp_path)
+    msg = MagicMock(); msg.text = "hi"
+
+    [m async for m in agent.handle_chat(msg, ctx)]
+
+    proj = tmp_path / ".pare" / "project"
+    assert proj.exists()
+    stored = proj.read_text().strip()
+    assert ARCTIC_BASE_SLUG_RE.fullmatch(stored)
+    assert ctx.project_slug == stored
+
+
+@pytest.mark.asyncio
+async def test_d45_none_cwd_attribute_untouched(tmp_path):
+    """D45 (P-pin): a real HandlerContext with cwd=None -> the project_slug
+    attribute is never touched (the isinstance(cwd, str) guard skips)."""
+    agent = _make_agent(mode="off")
+    _text_turn(agent)
+    ctx = HandlerContext(conversation=Conversation(history_depth=50),
+                         channel_id="test", writer=None, cwd=None)
+    msg = MagicMock(); msg.text = "hi"
+
+    [m async for m in agent.handle_chat(msg, ctx)]
+
+    assert getattr(ctx, "project_slug", "SENTINEL") == "SENTINEL"
+
+
+@pytest.mark.asyncio
+async def test_d46_path_cwd_attribute_untouched(tmp_path):
+    """D46 (P-pin): real HandlerContext, cwd a Path (R11: str-only) -> the
+    attribute is never touched, even though a valid project sits there."""
+    agent = _make_agent(mode="off")
+    _text_turn(agent)
+    marker = tmp_path / ".pare"
+    marker.mkdir()
+    (marker / "project").write_text("bench-store-abc123\n")
+    ctx = HandlerContext(conversation=Conversation(history_depth=50),
+                         channel_id="test", writer=None, cwd=tmp_path)
+    msg = MagicMock(); msg.text = "hi"
+
+    [m async for m in agent.handle_chat(msg, ctx)]
+
+    assert getattr(ctx, "project_slug", "SENTINEL") == "SENTINEL"
+
+
+@pytest.mark.asyncio
+async def test_d47_custom_marker_resolves(tmp_path):
+    """D47: config.project_marker='.projx' -> the stamp resolves via the
+    custom marker dir, not .pare."""
+    agent = _make_agent(mode="off")
+    agent.config = SimpleNamespace(project_marker=".projx")
+    _text_turn(agent)
+    slug = "projx-slug-0001"
+    marker = tmp_path / ".projx"
+    marker.mkdir()
+    (marker / "project").write_text(slug + "\n")
+    ctx = _ctx()
+    ctx.cwd = str(tmp_path)
+    msg = MagicMock(); msg.text = "hi"
+
+    [m async for m in agent.handle_chat(msg, ctx)]
+
+    assert ctx.project_slug == slug
+
+
+@pytest.mark.asyncio
+async def test_d48_unreadable_project_file_none(tmp_path):
+    """D48: .pare/project holds non-UTF-8 bytes -> read_text() raises
+    UnicodeDecodeError (not a ProjectSlugError) -> caught at the stamp ->
+    ctx.project_slug is None; the turn itself completes."""
+    agent = _make_agent(mode="off")
+    _text_turn(agent)
+    marker = tmp_path / ".pare"
+    marker.mkdir()
+    (marker / "project").write_bytes(b"\xff\xfe\x00not-utf8")
+    ctx = _ctx()
+    ctx.cwd = str(tmp_path)
+    msg = MagicMock(); msg.text = "hi"
+
+    [m async for m in agent.handle_chat(msg, ctx)]
+
+    assert ctx.project_slug is None
+
+
+@pytest.mark.asyncio
+async def test_d49_project_path_is_directory_none(tmp_path):
+    """D49: .pare/project exists as a DIRECTORY -> read_text() raises
+    IsADirectoryError (OSError, not a ProjectSlugError) -> caught at the
+    stamp -> ctx.project_slug is None; the turn itself completes."""
+    agent = _make_agent(mode="off")
+    _text_turn(agent)
+    (tmp_path / ".pare" / "project").mkdir(parents=True)
+    ctx = _ctx()
+    ctx.cwd = str(tmp_path)
+    msg = MagicMock(); msg.text = "hi"
+
+    [m async for m in agent.handle_chat(msg, ctx)]
+
+    assert ctx.project_slug is None
