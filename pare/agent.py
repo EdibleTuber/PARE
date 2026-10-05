@@ -58,6 +58,7 @@ from pare.capture_store import CaptureStoreManager
 # -- unlike a bare `import pare.protocol` for its side effect alone, which a
 # later cleanup pass could mistake for dead code and delete.
 from pare.protocol import PaneActivityMessage
+from pare.project_slug import ProjectSlugError, resolve_project_slug
 from pare.handback import (
     COMMIT_TOOLS, NAME_SEARCH_TOOLS, POLL_TOOLS,
     POLL_FAILURE_LIMIT, is_worker_failure, poll_failure_question,
@@ -573,6 +574,18 @@ class PareAgent(Agent):
         future while we're parked on the await). Ported from pal/agent.py.
         """
         with self._bind_store(ctx):
+            cwd = getattr(ctx, "cwd", None)
+            if isinstance(cwd, str) and cwd:
+                try:
+                    ctx.project_slug = resolve_project_slug(
+                        cwd, marker=self.config.project_marker or ".pare",
+                        home=Path.home())
+                except ProjectSlugError:
+                    # Outside a project, or an invalid stored slug: the slug channel
+                    # stays empty for this message. An artifact dispatch against it
+                    # refuses downstream, naming the cwd (fail closed); non-artifact
+                    # turns never see this.
+                    ctx.project_slug = None
             from agent_core.inference import StreamEnd
 
             conv = ctx.conversation
