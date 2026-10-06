@@ -128,14 +128,32 @@ else
   else
     warn "no $DRIVE_ID_FILE -- cannot tell this drive from another project's"
   fi
+  # open_artifact renames a file to {name}+partial when a close fails oversize
+  # or is abandoned (the P2 spelling, pinned as R11). Such an orphan is not
+  # ordinary disk shrinkage -- free space went down and stayed down, and nobody
+  # says why. Walk one level down, where the slug dirs live, and name them.
+  orphans="$(find "$ARTIFACT_ROOT" -mindepth 2 -maxdepth 2 -type f \
+                 -name '*+partial' 2>/dev/null | sort)"
+  if [ -z "$orphans" ]; then
+    pass "no abandoned partial writes under $ARTIFACT_ROOT"
+  else
+    n=0
+    while IFS= read -r orphan; do
+      [ -n "$orphan" ] || continue
+      n=$((n + 1))
+      echo "        ${orphan#"$ARTIFACT_ROOT"/}"
+    done <<< "$orphans"
+    fail "$n abandoned partial write(s) named above -- open_artifact renames a failed oversize or abandoned close to {name}+partial; review each, then remove it"
+  fi
 fi
 
 echo
 if [ "$PROBLEMS" -eq 0 ]; then
   echo "No problems found. If a finding still has not appeared, it was never published:"
   echo "check the daemon's own /health and the agent transcript."
+  exit 0
 else
   echo "$PROBLEMS problem(s) above. Fix the FIRST one -- the later probes may only"
   echo "be failing because of it."
+  exit 1
 fi
-exit 0

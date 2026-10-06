@@ -26,7 +26,8 @@ def fakebin(tmp_path):
     return bindir
 
 
-def _run(fakebin: Path, tmp_path: Path, env_extra: dict | None = None) -> str:
+def _run_with_exit(fakebin: Path, tmp_path: Path,
+                   env_extra: dict | None = None) -> tuple[int, str]:
     env = {
         "PATH": f"{fakebin}:/usr/bin:/bin",
         "PARE_ARTIFACT_ROOT": str(tmp_path / "no-drive"),
@@ -36,7 +37,12 @@ def _run(fakebin: Path, tmp_path: Path, env_extra: dict | None = None) -> str:
     out = subprocess.run(
         ["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=30,
     )
-    return out.stdout + out.stderr
+    return out.returncode, out.stdout + out.stderr
+
+
+def _run(fakebin: Path, tmp_path: Path, env_extra: dict | None = None) -> str:
+    _rc, text = _run_with_exit(fakebin, tmp_path, env_extra)
+    return text
 
 
 def _listening_on(fakebin: Path, port: int) -> None:
@@ -79,3 +85,62 @@ def test_nothing_listening_is_still_a_failure(fakebin, tmp_path):
     out = _run(fakebin, tmp_path)
     assert "nothing is listening on :9102" in out
     assert "FAIL" in out
+
+
+# --- orphaned partial writes (open_artifact's {name}+partial, the R11 spelling) ---
+
+# The shared fakebin curl shim answers EVERY curl with "200", which makes the
+# heartbeat probe fail ("no heartbeat object") for reasons that have nothing to
+# do with the drive. These tests assert exit codes, so they need a drive-rooted
+# setup where every OTHER check passes and the code can only be the orphan
+# check's. Returns the drive root to plant files in.
+def _healthy_drive(fakebin: Path, tmp_path: Path) -> Path:
+    _shim(fakebin, "curl",
+          'case "$*" in\n'
+          '  *api/health*) echo 200 ;;\n'
+          '  *) echo \'{"objects": [{"title": "heartbeat", "age_s": 4}]}\' ;;\n'
+          'esac')
+    _shim(fakebin, "systemctl", 'echo "AGENT_WORKER_PORT=9102"')
+    _shim(fakebin, "ss", 'echo "LISTEN 0 2048 0.0.0.0:9102 0.0.0.0:*"')
+    _shim(fakebin, "mountpoint", 'exit 0')
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    (drive / ".bench-store-id").write_text("cafe1234\n")
+    return drive
+
+
+def test_a_clean_drive_has_no_orphaned_partials(fakebin, tmp_path):
+    drive = _healthy_drive(fakebin, tmp_path)
+    (drive / "run-01").mkdir()
+    (drive / "run-01" / "foo.bin").write_bytes(b"\x00" * 32)
+    rc, out = _run_with_exit(fakebin, tmp_path, {"PARE_ARTIFACT_ROOT": str(drive)})
+    assert rc == 0, out
+    assert "no abandoned partial writes" in out
+    assert "FAIL" not in out
+    # the null-glob trap: with nothing to match, the pattern must not be printed
+    assert "*+partial" not in out
+
+
+def test_an_orphaned_partial_is_named_and_the_doctor_fails(fakebin, tmp_path):
+    drive = _healthy_drive(fakebin, tmp_path)
+    (drive / "run-01").mkdir()
+    (drive / "run-01" / "foo.bin+partial").write_bytes(b"\x00" * 64)
+    rc, out = _run_with_exit(fakebin, tmp_path, {"PARE_ARTIFACT_ROOT": str(drive)})
+    assert rc != 0, out
+    assert "foo.bin+partial" in out
+    assert "1 abandoned partial write" in out
+    # every other check passes, so exactly one FAIL -- the orphan check's
+    assert sum(1 for line in out.splitlines() if "FAIL" in line) == 1, out
+
+
+def test_the_spelling_is_plus_partial_not_partial(fakebin, tmp_path):
+    """R11 mutant: a matcher on "partial" instead of "+partial". The decoy ends
+    with the literal word partial, so it must NOT be reported."""
+    drive = _healthy_drive(fakebin, tmp_path)
+    (drive / "run-01").mkdir()
+    (drive / "run-01" / "summary_partial").write_text("nothing to do with R11\n")
+    (drive / "run-01" / "notes.txt").write_text("clean\n")
+    rc, out = _run_with_exit(fakebin, tmp_path, {"PARE_ARTIFACT_ROOT": str(drive)})
+    assert rc == 0, out
+    assert "summary_partial" not in out
+    assert "no abandoned partial writes" in out
