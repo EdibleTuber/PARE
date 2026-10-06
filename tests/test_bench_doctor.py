@@ -144,3 +144,28 @@ def test_the_spelling_is_plus_partial_not_partial(fakebin, tmp_path):
     assert rc == 0, out
     assert "summary_partial" not in out
     assert "no abandoned partial writes" in out
+
+
+def test_only_files_one_level_down_are_orphans(fakebin, tmp_path):
+    """The walk is `$ARTIFACT_ROOT/*/` and the match is any FILE -- three rules,
+    three mutants this pins:
+    - walk-mindepth-widened: a `+partial` file lying at the drive root is out of
+      the walk, because a root-level file is not any slug's abandoned write;
+    - walk-maxdepth-widened: nothing under a slug dir is anyone else's business,
+      so a nested `run-01/sub/foo2.bin+partial` is not reported;
+    - match-any-file-or-dir: a DIRECTORY named `run-01/abandoned_run+partial` is
+      not an abandoned write -- open_artifact renames a file, never a directory.
+    """
+    drive = _healthy_drive(fakebin, tmp_path)
+    (drive / "run-01").mkdir()
+    (drive / "stray+partial").write_bytes(b"\x00" * 16)
+    (drive / "run-01" / "sub").mkdir()
+    (drive / "run-01" / "sub" / "foo2.bin+partial").write_bytes(b"\x00" * 48)
+    (drive / "run-01" / "abandoned_run+partial").mkdir()
+    (drive / "run-01" / "note.md").write_text("clean artifact\n")
+    rc, out = _run_with_exit(fakebin, tmp_path, {"PARE_ARTIFACT_ROOT": str(drive)})
+    assert rc == 0, out
+    assert "no abandoned partial writes" in out
+    assert "FAIL" not in out
+    for planted in ("stray+partial", "foo2.bin+partial", "abandoned_run+partial"):
+        assert planted not in out, out
