@@ -35,6 +35,7 @@ from agent_core.protocol import ErrorMessage, ResponseMessage
 import pare.agent
 from pare.agent import PareAgent
 from pare.arcticbase import ArcticBaseError
+from pare.repeat_guard import RepeatGuard
 from pare.tools.publish_finding import PublishFinding
 
 SLUG = "bench-store-abc123"
@@ -368,8 +369,9 @@ async def test_a_failed_ensure_is_reported_into_the_chat(tmp_path,
 async def test_an_oserror_from_the_publish_is_caught_too(tmp_path, monkeypatch):
     """The catch is (ArcticBaseError, OSError) around the WHOLE
     ensure+publish, not just the client's own error family: an OSError
-    from publish_descriptor is reported in the same voice, the descriptor
-    is cleared, the chat continues.
+    from publish_descriptor is reported in the same voice — in the
+    yielded messages AND the conversation, pairing intact — the
+    descriptor is cleared, the chat continues.
 
     Kills: 'narrow the except back' to ArcticBaseError (the OSError
     escapes handle_chat's contract through the tool loop)."""
@@ -386,6 +388,150 @@ async def test_an_oserror_from_the_publish_is_caught_too(tmp_path, monkeypatch):
     assert any(failure in t for t in _notices(out))
     assert out[-1].text == "final answer"
     assert ctx.artifact_descriptor is None
+    msgs = ctx.conversation.get_messages_for_api(system_prompt="S")
+    assert any(m["role"] == "assistant" and failure in (m.get("content") or "")
+               for m in msgs)
+    _assert_toolcalls_paired(msgs)
+
+
+@pytest.mark.asyncio
+async def test_a_multi_call_round_keeps_the_notice_after_all_results(
+        tmp_path, monkeypatch):
+    """I-1 regression. ONE completion round carries two tool calls — the
+    artifact call whose publish fails, and a sibling vault search that
+    lands nothing. The notice must land AFTER both tool results, never
+    between them: an assistant message that splits a round's tool_calls
+    from their results breaks pairing, strict providers reject it, and
+    the Conversation persists that shape to the channel's NEXT request.
+
+    Kills: 'surface the notice inside the tool loop' — every other test
+    here used a single-call round, where nothing followed to split."""
+    agent = _make_agent()
+    _fake_clients(monkeypatch,
+                  ensure_raises=ArcticBaseError("ArcticBase did not answer"))
+    root = _project(tmp_path)
+    ctx = _ctx(root)
+    call_t1 = ToolCall(id="t1", name="dump_proc_mem", arguments={"pid": 121})
+    call_t2 = ToolCall(id="t2", name="search_vault",
+                       arguments={"query": "dump"})
+    agent.inference.stream = MagicMock(
+        return_value=_Stream([[call_t1, call_t2]]))
+    agent.inference.complete = AsyncMock(
+        side_effect=[CompletionResult(type="text", content="final answer",
+                                      usage=None)])
+
+    def run(name, args, ctx):
+        if name == "dump_proc_mem":
+            ctx.artifact_descriptor = copy.deepcopy(DESCRIPTOR)
+            return TOOL_BODY
+        return "vault hits"
+
+    agent.tool_executor.run = AsyncMock(side_effect=run)
+
+    out = await _collect(agent, ctx)  # must not raise
+
+    failure = "ArcticBaseError: ArcticBase did not answer"
+    assert any(failure in t for t in _notices(out))
+    assert not any(isinstance(m, ErrorMessage) for m in out)
+    assert out[-1].text == "final answer"
+    assert ctx.artifact_descriptor is None
+
+    msgs = ctx.conversation.get_messages_for_api(system_prompt="S")
+    _assert_toolcalls_paired(msgs)
+    notice_at = max(i for i, m in enumerate(msgs)
+                    if m.get("role") == "assistant"
+                    and failure in (m.get("content") or ""))
+    last_tool_at = max(i for i, m in enumerate(msgs)
+                       if m.get("role") == "tool")
+    assert notice_at > last_tool_at, "the notice split the round's results"
+
+
+@pytest.mark.asyncio
+async def test_a_handback_still_reports_a_failed_publish(tmp_path, monkeypatch):
+    """M2 regression. The round whose artifact call's publish failed never
+    reaches the end-of-round flush when a later call of the same round
+    trips the spin guard: the turn ENDS at the handback, and a notice
+    collected in round_failures would die with it — the operator never
+    learns the publish failed, while the descriptor is already consumed.
+    The handback now flushes round_failures itself, between _settle and
+    the question; this pins the order on the stream AND the conversation.
+
+    Kills: 'forget the flush in the handback' (notice missing from both);
+    'flush before _settle' or 'flush per-call inside the tool loop' (the
+    notice's assistant message splits the round's tool_calls from their
+    results — pairing breaks); 'flush both here and at round end without
+    clearing' (notice appears twice in the conversation)."""
+
+    class _SpinOnSecondSight(RepeatGuard):
+        """The spin, deterministically: hard_after=1 makes a search_vault
+        with one recorded entry hard-blocked, and a confirmed block on
+        sight is a trip — t2 records a first entry, t3 trips. No real
+        streak of identical results is needed."""
+
+        def __init__(self):
+            super().__init__(hard_after=1)
+
+        def tripped(self, name: str, arguments: object) -> bool:
+            return (name == "search_vault"
+                    and self.entry(name, arguments) is not None)
+
+    monkeypatch.setattr(pare.agent, "RepeatGuard", _SpinOnSecondSight)
+    agent = _make_agent()
+    _fake_clients(monkeypatch,
+                  ensure_raises=ArcticBaseError("ArcticBase did not answer"))
+    root = _project(tmp_path)
+    ctx = _ctx(root)
+    call_t1 = ToolCall(id="t1", name="dump_proc_mem", arguments={"pid": 121})
+    call_t2 = ToolCall(id="t2", name="search_vault",
+                       arguments={"pattern": "Crypto"})
+    call_t3 = ToolCall(id="t3", name="search_vault",
+                       arguments={"pattern": "Crypto"})
+    agent.inference.stream = MagicMock(
+        return_value=_Stream([[call_t1, call_t2, call_t3]]))
+    # The followup text completion sits there only to be proven unreachable:
+    # the turn ends at the handback question, not at "final answer".
+    agent.inference.complete = AsyncMock(
+        side_effect=[CompletionResult(type="text", content="final answer",
+                                      usage=None)])
+
+    def run(name, args, ctx):
+        if name == "dump_proc_mem":
+            ctx.artifact_descriptor = copy.deepcopy(DESCRIPTOR)
+            return TOOL_BODY
+        return "vault hits"
+
+    agent.tool_executor.run = AsyncMock(side_effect=run)
+
+    out = await _collect(agent, ctx)  # must not raise
+
+    failure = "ArcticBaseError: ArcticBase did not answer"
+    assert agent.inference.complete.await_count == 0, \
+        "the handback must end the turn, not reach the followup"
+    assert not any(isinstance(m, ErrorMessage) for m in out)
+    notice_at = next(i for i, m in enumerate(out)
+                     if isinstance(m, ResponseMessage)
+                     and failure in m.text)
+    question_at = max(i for i, m in enumerate(out)
+                      if isinstance(m, ResponseMessage)
+                      and "stuck" in m.text)
+    assert notice_at < question_at, "the notice must precede the question"
+    assert "stuck" in out[-1].text
+    assert out[-1].text != "final answer"
+    assert ctx.artifact_descriptor is None
+
+    msgs = ctx.conversation.get_messages_for_api(system_prompt="S")
+    _assert_toolcalls_paired(msgs)
+    notices = [i for i, m in enumerate(msgs)
+               if m.get("role") == "assistant"
+               and failure in (m.get("content") or "")]
+    assert len(notices) == 1, "a flushed notice is never repeated"
+    question_at = max(i for i, m in enumerate(msgs)
+                      if m.get("role") == "assistant"
+                      and "stuck" in (m.get("content") or ""))
+    last_tool_at = max(i for i, m in enumerate(msgs)
+                       if m.get("role") == "tool")
+    assert last_tool_at < notices[0] < question_at, \
+        "results first, then the notice, then the question"
 
 
 # --- publish_finding's widened except (P3-R15 precedent) ---------------------------
