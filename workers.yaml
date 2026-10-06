@@ -36,6 +36,9 @@
 #   artifact_drive_id expected contents of {artifact_root}/.bench-store-id, so
 #                     one project's removable drive is distinguishable from
 #                     another's.
+#   artifact_host     host on which the artifact_root lives, per the OPERATOR.
+#                     Required explicitly for a stdio worker; a networked
+#                     worker defaults it to the endpoint's hostname.
 #
 # stdio workers (a process PARE launches and talks to over stdin/stdout) are
 # declared with `command` + `args` instead of `endpoint` — e.g. the in-house

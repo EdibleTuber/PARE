@@ -67,7 +67,12 @@ class PublishFinding(Tool):
         try:
             slug = resolve_project_slug(
                 cwd, marker=config.project_marker or ".pare", home=Path.home())
-        except ProjectSlugError as exc:
+        except (ProjectSlugError, OSError, UnicodeDecodeError) as exc:
+            # P3-R15 precedent: the slug read is a file read, and a file
+            # read raises non-ProjectSlugError — non-UTF-8 bytes, a
+            # directory named "project", an unreadable marker. A tool
+            # result answers in JSON; a traceback through the tool loop
+            # answers in nothing.
             return _err(str(exc))
 
         client = ArcticBaseClient(config.arcticbase_url)

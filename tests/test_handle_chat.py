@@ -449,7 +449,8 @@ async def test_d44_missing_project_file_created(tmp_path):
 @pytest.mark.asyncio
 async def test_d45_none_cwd_attribute_untouched(tmp_path):
     """D45 (P-pin): a real HandlerContext with cwd=None -> the project_slug
-    attribute is never touched (the isinstance(cwd, str) guard skips)."""
+    value is never set (stays at its v1.12.0 declared default None; the
+    isinstance(cwd, str) guard skips)."""
     agent = _make_agent(mode="off")
     _text_turn(agent)
     ctx = HandlerContext(conversation=Conversation(history_depth=50),
@@ -458,13 +459,13 @@ async def test_d45_none_cwd_attribute_untouched(tmp_path):
 
     [m async for m in agent.handle_chat(msg, ctx)]
 
-    assert getattr(ctx, "project_slug", "SENTINEL") == "SENTINEL"
+    assert ctx.project_slug is None  # v1.12.0 default; guard must not set it
 
 
 @pytest.mark.asyncio
 async def test_d46_path_cwd_attribute_untouched(tmp_path):
     """D46 (P-pin): real HandlerContext, cwd a Path (R11: str-only) -> the
-    attribute is never touched, even though a valid project sits there."""
+    value is never set, even though a valid project sits there."""
     agent = _make_agent(mode="off")
     _text_turn(agent)
     marker = tmp_path / ".pare"
@@ -476,7 +477,7 @@ async def test_d46_path_cwd_attribute_untouched(tmp_path):
 
     [m async for m in agent.handle_chat(msg, ctx)]
 
-    assert getattr(ctx, "project_slug", "SENTINEL") == "SENTINEL"
+    assert ctx.project_slug is None  # v1.12.0 default; guard must not set it
 
 
 @pytest.mark.asyncio

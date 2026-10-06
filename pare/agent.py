@@ -66,7 +66,7 @@ from pare.handback import (
     disambig_question, spin_question,
 )
 from pare.repeat_guard import RepeatGuard
-from pare.arcticbase import ArcticBaseClient
+from pare.arcticbase import ArcticBaseClient, ArcticBaseError
 from pare.heartbeat import (BEAT_INTERVAL_SECONDS, Heartbeat)
 from pare.tools import PublishFinding, ReadVaultDoc, StaticAnalyze
 from pare.tools._http import ApkReAgentsClient
@@ -671,12 +671,26 @@ class PareAgent(Agent):
                         if tc.id not in done_ids:
                             conv.add_tool_result(tc.id, marker)
 
-                def _settle_and_handback(question: str, done_ids: set[str]) -> ResponseMessage:
-                    """Settle the round, then append the handback question as the
-                    assistant turn."""
+                def _settle_and_handback(question: str,
+                                         done_ids: set[str]) -> list[ResponseMessage]:
+                    """Settle the round, flush any pending publish-failure
+                    notices into the conversation, then append the handback
+                    question as the assistant turn. The flush sits AFTER
+                    _settle for the same reason the end-of-round flush sits
+                    after the tool loop: an assistant message must not split
+                    a round's tool_calls from their results, and _settle is
+                    what answers the owed ones. A notice flushed here is
+                    cleared on the way out, so the end-of-round flush can
+                    never repeat it."""
                     _settle("[handed back to operator — call not executed]", done_ids)
+                    flushed: list[ResponseMessage] = []
+                    for failure in round_failures:
+                        conv.add_assistant(failure)
+                        flushed.append(ResponseMessage(text=failure))
+                    round_failures.clear()
                     conv.add_assistant(question)
-                    return ResponseMessage(text=question)
+                    flushed.append(ResponseMessage(text=question))
+                    return flushed
 
                 for _round in range(MAX_TOOL_ROUNDS):
                     conv.add_assistant_tool_calls([
@@ -685,6 +699,7 @@ class PareAgent(Agent):
                         for tc in tool_calls
                     ])
                     done_ids: set[str] = set()
+                    round_failures: list[str] = []
                     for tc in tool_calls:
                         mgr = self.worker_manager
                         # Presence in the executor IS the provenance test here.
@@ -718,14 +733,15 @@ class PareAgent(Agent):
                                     # reusing `why` verbatim would have the
                                     # assistant tell the operator to ask the
                                     # operator.
-                                    yield _settle_and_handback(
-                                        f"the {owner!r} worker is not loaded, "
-                                        f"so the assistant's last tool call "
-                                        f"didn't run. Run /worker load {owner} "
-                                        f"to bring it back, then continue — or "
-                                        f"tell me how you'd like to proceed "
-                                        f"without it.",
-                                        done_ids)
+                                    for message in _settle_and_handback(
+                                            f"the {owner!r} worker is not loaded, "
+                                            f"so the assistant's last tool call "
+                                            f"didn't run. Run /worker load {owner} "
+                                            f"to bring it back, then continue — or "
+                                            f"tell me how you'd like to proceed "
+                                            f"without it.",
+                                            done_ids):
+                                        yield message
                                     return
                         if tc.name in COMMIT_TOOLS:
                             cls = normalize_class(str((tc.arguments or {}).get("cls", "")))
@@ -734,7 +750,8 @@ class PareAgent(Agent):
                                         and frozenset(cands) not in resolved):
                                     q = disambig_question(cls, cands)
                                     resolved.add(frozenset(cands))
-                                    yield _settle_and_handback(q, done_ids)
+                                    for message in _settle_and_handback(q, done_ids):
+                                        yield message
                                     return
                         yield ToolProgressMessage(tool=tc.name, arguments=tc.arguments)
                         if guard.should_run(tc.name, tc.arguments):
@@ -769,11 +786,12 @@ class PareAgent(Agent):
                                     if poll_failures[tc.name] >= POLL_FAILURE_LIMIT:
                                         conv.add_tool_result(tc.id, result)
                                         done_ids.add(tc.id)
-                                        yield _settle_and_handback(
-                                            poll_failure_question(
-                                                tc.name, poll_failures[tc.name],
-                                                raw_result),
-                                            done_ids)
+                                        for message in _settle_and_handback(
+                                                poll_failure_question(
+                                                    tc.name, poll_failures[tc.name],
+                                                    raw_result),
+                                                done_ids):
+                                            yield message
                                         return
                                 else:
                                     # Any success resets it: the trigger is
@@ -793,11 +811,38 @@ class PareAgent(Agent):
                                 total, last_result = guard.entry(tc.name, tc.arguments) or (0, "")
                                 q = spin_question(tc.name, tc.arguments, total, last_result,
                                                   name_searches.get(pat, set()))
-                                yield _settle_and_handback(q, done_ids)
+                                for message in _settle_and_handback(q, done_ids):
+                                    yield message
                                 return
                             result = guard.blocked(tc.name, tc.arguments)
                         conv.add_tool_result(tc.id, result)
                         done_ids.add(tc.id)
+                        # RiskAwareToolPool._execute_and_audit lands a
+                        # validated descriptor on this ctx when a
+                        # `produces: artifact` tool succeeds; publish it to
+                        # the project's workbench (P4 T5). The call never
+                        # raises — it answers with the failure text, or None.
+                        failure = self._publish_artifact_descriptor(ctx)
+                        if failure is not None:
+                            # Collect the notice for the end of the
+                            # round instead of surfacing it here: this
+                            # loop still has tool results owed to the
+                            # round's tool_calls, and nothing may come
+                            # between them.
+                            round_failures.append(failure)
+                    # Flush the publish notices only now, after every
+                    # tool result of this round is written: an assistant
+                    # message must not split a round's tool_calls from
+                    # their results — strict OpenAI-compatible providers
+                    # reject that shape, the Conversation persists to
+                    # JSONL, and the poisoned request would be the
+                    # channel's NEXT one (the same pairing contract
+                    # _settle guards above). Into the conversation, and
+                    # out through the stream, as any operator notice
+                    # here goes.
+                    for failure in round_failures:
+                        conv.add_assistant(failure)
+                        yield ResponseMessage(text=failure)
                     messages = conv.get_messages_for_api(system_prompt=self.system_prompt(ctx))
                     completion = await self.inference.complete(
                         messages, tools=schemas, reasoning=mode, max_tokens=MAX_TOKENS)
@@ -815,3 +860,60 @@ class PareAgent(Agent):
             except Exception as exc:
                 logger.exception("Chat error: %s", exc)
                 yield ErrorMessage(error=f"Chat error: {exc}")
+
+    def _publish_artifact_descriptor(self, ctx: HandlerContext) -> str | None:
+        """Publish the artifact descriptor a worker tool just landed, once.
+
+        The pool (`RiskAwareToolPool._execute_and_audit`) sets
+        `ctx.artifact_descriptor` after a validated artifact tool result;
+        agent_core never clears it and never publishes it, so this is the
+        gate that makes a descriptor exactly one workbench object. The
+        content is the descriptor's eight fields as-is plus a retrieval
+        command — a plain scp line, no legacy flags, no alternate
+        transfer commands — naming ONLY the descriptor's host: that
+        field is spec.artifact_host by construction (daemon-
+        substituted), while a host read out of the tool-result body is
+        whatever the worker happened to print. The bytes stay on the
+        machine that produced them; only this reference travels (§5.1).
+
+        Returns None on success or when the feature is off, else the
+        failure text — the §10 five-candidates voice publish_finding uses.
+        This never raises: a dead workbench is a reported fact, not a way
+        to lose the operator's turn.
+        """
+        if not getattr(self.config, "arcticbase_url", ""):
+            # Same condition as PublishFinding's registration gate: an
+            # unconfigured backend means there is no channel at all, so
+            # there is nothing here to succeed or to complain about.
+            return None
+        descriptor = ctx.artifact_descriptor
+        if not isinstance(descriptor, dict):
+            # The field's declared type is `dict | None`; a non-dict is
+            # None or a test stub's auto-attribute. Either way nothing
+            # was landed, and there is nothing to publish.
+            return None
+        # Consume semantics FIRST: the field is cleared before any
+        # publishing work, so every failure path below still clears it and
+        # a second tool call in the same turn can never re-publish or
+        # publish a stale descriptor.
+        ctx.artifact_descriptor = None
+        slug = ctx.project_slug
+        if not slug:
+            # No marker, no workbench: a publish failure to report, naming
+            # the cwd the way the no-project rule elsewhere does.
+            return (f"artifact descriptor not published: no project slug "
+                    f"for cwd {getattr(ctx, 'cwd', None)!r}")
+        content = dict(descriptor)
+        content["retrieval"] = f"scp {descriptor['host']}:{descriptor['path']} ."
+        content["produced_at_project"] = slug
+        title = descriptor["produced_by"]
+        try:
+            client = ArcticBaseClient(self.config.arcticbase_url)
+            client.ensure_workbench(slug, slug)
+            client.publish_descriptor(slug, title, content)
+        except (ArcticBaseError, OSError) as exc:
+            # Reported, never raised: §10 says the operator has five
+            # candidates to choose between when something does not
+            # arrive, so the message has to say which one this was.
+            return f"{type(exc).__name__}: {exc}"
+        return None
