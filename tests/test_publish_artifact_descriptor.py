@@ -459,8 +459,9 @@ async def test_a_handback_still_reports_a_failed_publish(tmp_path, monkeypatch):
     Kills: 'forget the flush in the handback' (notice missing from both);
     'flush before _settle' or 'flush per-call inside the tool loop' (the
     notice's assistant message splits the round's tool_calls from their
-    results — pairing breaks); 'flush both here and at round end without
-    clearing' (notice appears twice in the conversation)."""
+    results — pairing breaks). The clear() is insurance beyond this
+    turn's return path: pending notices must never outlive the flush
+    that delivered them."""
 
     class _SpinOnSecondSight(RepeatGuard):
         """The spin, deterministically: hard_after=1 makes a search_vault
