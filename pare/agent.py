@@ -66,7 +66,7 @@ from pare.handback import (
     disambig_question, spin_question,
 )
 from pare.repeat_guard import RepeatGuard
-from pare.arcticbase import ArcticBaseClient
+from pare.arcticbase import ArcticBaseClient, ArcticBaseError
 from pare.heartbeat import (BEAT_INTERVAL_SECONDS, Heartbeat)
 from pare.tools import PublishFinding, ReadVaultDoc, StaticAnalyze
 from pare.tools._http import ApkReAgentsClient
@@ -798,6 +798,18 @@ class PareAgent(Agent):
                             result = guard.blocked(tc.name, tc.arguments)
                         conv.add_tool_result(tc.id, result)
                         done_ids.add(tc.id)
+                        # RiskAwareToolPool._execute_and_audit lands a
+                        # validated descriptor on this ctx when a
+                        # `produces: artifact` tool succeeds; publish it to
+                        # the project's workbench (P4 T5). The call never
+                        # raises — it answers with the failure text, or None.
+                        failure = self._publish_artifact_descriptor(ctx)
+                        if failure is not None:
+                            # The chat-visible pattern this loop already
+                            # uses for notices to the operator: into the
+                            # conversation, and out through the stream.
+                            conv.add_assistant(failure)
+                            yield ResponseMessage(text=failure)
                     messages = conv.get_messages_for_api(system_prompt=self.system_prompt(ctx))
                     completion = await self.inference.complete(
                         messages, tools=schemas, reasoning=mode, max_tokens=MAX_TOKENS)
@@ -815,3 +827,60 @@ class PareAgent(Agent):
             except Exception as exc:
                 logger.exception("Chat error: %s", exc)
                 yield ErrorMessage(error=f"Chat error: {exc}")
+
+    def _publish_artifact_descriptor(self, ctx: HandlerContext) -> str | None:
+        """Publish the artifact descriptor a worker tool just landed, once.
+
+        The pool (`RiskAwareToolPool._execute_and_audit`) sets
+        `ctx.artifact_descriptor` after a validated artifact tool result;
+        agent_core never clears it and never publishes it, so this is the
+        gate that makes a descriptor exactly one workbench object. The
+        content is the descriptor's eight fields as-is plus a retrieval
+        command — scp's default SFTP mode, never `scp -O`, never
+        sftp/rsync text — naming ONLY the descriptor's host: that field is
+        spec.artifact_host by construction (daemon-substituted), while a
+        host read out of the tool-result body is whatever the worker
+        happened to print. The bytes stay on the machine that produced
+        them; only this reference travels (§5.1).
+
+        Returns None on success or when the feature is off, else the
+        failure text — the §10 five-candidates voice publish_finding uses.
+        This never raises: a dead workbench is a reported fact, not a way
+        to lose the operator's turn.
+        """
+        if not getattr(self.config, "arcticbase_url", ""):
+            # Same condition as PublishFinding's registration gate: an
+            # unconfigured backend means there is no channel at all, so
+            # there is nothing here to succeed or to complain about.
+            return None
+        descriptor = ctx.artifact_descriptor
+        if not isinstance(descriptor, dict):
+            # The field's declared type is `dict | None`; a non-dict is
+            # None or a test stub's auto-attribute. Either way nothing
+            # was landed, and there is nothing to publish.
+            return None
+        # Consume semantics FIRST: the field is cleared before any
+        # publishing work, so every failure path below still clears it and
+        # a second tool call in the same turn can never re-publish or
+        # publish a stale descriptor.
+        ctx.artifact_descriptor = None
+        slug = ctx.project_slug
+        if not slug:
+            # No marker, no workbench: a publish failure to report, naming
+            # the cwd the way the no-project rule elsewhere does.
+            return (f"artifact descriptor not published: no project slug "
+                    f"for cwd {getattr(ctx, 'cwd', None)!r}")
+        content = dict(descriptor)
+        content["retrieval"] = f"scp {descriptor['host']}:{descriptor['path']} ."
+        content["produced_at_project"] = slug
+        title = descriptor["produced_by"]
+        try:
+            client = ArcticBaseClient(self.config.arcticbase_url)
+            client.ensure_workbench(slug, slug)
+            client.publish_descriptor(slug, title, content)
+        except (ArcticBaseError, OSError) as exc:
+            # Reported, never raised: §10 says the operator has five
+            # candidates to choose between when something does not
+            # arrive, so the message has to say which one this was.
+            return f"{type(exc).__name__}: {exc}"
+        return None
