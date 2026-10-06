@@ -115,7 +115,14 @@ workers:
     endpoint: http://100.97.133.126:9102/mcp
     transport: streamable_http
     connect_timeout: 20
-    read_timeout: 60
+    read_timeout: 60    # artifact floor: measured sustained write ~28 MB/s (2026-09
+    # bench install), worst-case console capture 64 MiB ≈ 2.3 s write plus JSON
+    # response — well inside. The floor must be stated: a read timeout raises
+    # McpError locally while the worker keeps writing (artifact-wiring spec,
+    # "Timeouts, and the silent overwrite they cause"), so an unset ceiling
+    # (300 s, agent_core client.py DEFAULT_HTTP_READ_TIMEOUT) is a wait, not a
+    # guard. Rule: floor = max_bytes / measured_rate, re-measure when the drive
+    # or host changes.
     # FLOOR — raised from medium. RiskAwareToolPool gates only high and
     # critical (risk_pool.py:386), so a medium floor meant any hardware tool
     # that failed to advertise a wire tier — a half-wired dev build, or a
@@ -125,7 +132,8 @@ workers:
     risk_default: high
     autoload: false        # REQUIRED for networked workers
     capability_tags: [hardware, uart, jtag, glitch]
-    artifact_root: null    # placeholder; wiring is a separate design
+    artifact_root: /mnt/bench-store
+    artifact_drive_id: b2657680-9f16-4918-9195-ef3ba17da924
 
   # --- apk_re_agents (Streamable HTTP) — disabled until services run + discovery hardened ---
   # unpacker:
