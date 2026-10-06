@@ -268,18 +268,23 @@ async def test_the_descriptor_is_consumed_not_copied(tmp_path, monkeypatch):
     nothing new — publishes nothing more.
 
     Kills: 'publish twice (no clear)' — with the field left set, the
-    second call's gate check republishes and publish_calls holds two."""
+    second call's gate check republishes and publish_calls holds two.
+
+    The stream assertions also pin that a non-artifact round passes through
+    the descriptor gate unharmed (mutation-survival fix)."""
     agent = _make_agent()
     made = _fake_clients(monkeypatch)
     root = _project(tmp_path)
     ctx = _ctx(root)
     _artifact_turn(agent, rounds=2)
 
-    await _collect(agent, ctx)
+    out = await _collect(agent, ctx)
 
     assert len(made) == 1, "one client, one publish, for one landed descriptor"
     assert made[0].publish_calls and len(made[0].publish_calls) == 1
     assert ctx.artifact_descriptor is None
+    assert not any(isinstance(m, ErrorMessage) for m in out)
+    assert out[-1].text == "final answer"
 
 
 # --- the gate --------------------------------------------------------------------
