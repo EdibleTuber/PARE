@@ -1,7 +1,12 @@
 # Deploying PARE
 
-Three things get deployed, on two machines. Nothing here is required to *run*
-PARE from a terminal — see [`QUICKSTART.md`](QUICKSTART.md) for that.
+This covers the PARE host (the daemon, and ArcticBase beside it) and the bench
+Pi. Two workers also run on machines of their own. `pare-hardware-mcp` runs on
+the bench Pi and is deployed by its own repo's `scripts/bench_deploy.sh`.
+`pare-frida-mcp` runs on the laptop the Android device is attached to; see
+[`docs/frida-quickstart.md`](docs/frida-quickstart.md#2-serve-the-worker-on-the-tailnet).
+Nothing here is required to *run* PARE from a terminal — see
+[`QUICKSTART.md`](QUICKSTART.md) for that.
 
 ## The daemon, as a user service
 

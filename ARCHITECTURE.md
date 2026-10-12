@@ -19,9 +19,9 @@ emitted to the client by the daemon; risk gating and operator approval happen
 transparently inside tool dispatch.
 
 The two loops are nested and are not the same thing: `for _round in
-range(MAX_TOOL_ROUNDS)` (`pare/agent.py:437`) is the round, and each round runs
+range(MAX_TOOL_ROUNDS)` in `PareAgent.handle_chat` is the round, and each round runs
 every tool call the model asked for before going back to the model. The round cap
-of 50 is *"a coarse final backstop"* in its own words (`:356`) — the repeat-guard
+of 50 is *"a coarse final backstop"* in the comment beside it — the repeat-guard
 and the handback checkpoints are what normally stop a loop, long before it.
 
 ```mermaid
@@ -115,9 +115,10 @@ flowchart TD
     OP -. "ToolApprovalResponseMessage" .-> AP
 ```
 
-**`critical` never takes the session shortcut** — `risk_pool.py:414` reads
-`if effective != "critical" and self.is_session_approved(...)`, so a critical tool
-prompts every time and requires a typed justification. That branch was missing
+**`critical` never takes the session shortcut** — agent_core's
+`RiskAwareToolPool.call_tool` reads
+`if effective != "critical" and self.is_session_approved(...)`, so a critical
+tool prompts every time and requires a typed justification. That branch was missing
 from an earlier version of this diagram, which showed `high` and `critical`
 behaving identically.
 
@@ -227,6 +228,8 @@ pare/
     agent.py            PareAgent — handle_chat / handle_command / setup / system_prompt
     __main__.py         python -m pare entry point (calls run_daemon)
     cli.py              pare-cli — wires agent_core's REPL to PARE's socket
+    tui/                pare-tui — chat beside live device panes (Textual)
+    protocol.py         PARE-local protocol messages (e.g. pane activity)
     config.py           PAREConfig (PARE_* env vars)
     arcticbase.py       ArcticBase client — workbenches, reports, descriptors
     capture_store.py    per-project capture store (.pare/ walk-up)
@@ -235,7 +238,7 @@ pare/
     handback.py         operator-handback checkpoints
     repeat_guard.py     no-progress floor on repeated tool calls
     prompts/system.md   the RE loop as the model runs it
-    commands/           /health /worker /mitm /snapshot /frida … (one module each)
+    commands/           /health /worker /mitm /snapshot, Frida operator commands …
     tools/              publish_finding, read_vault_doc, static_analyze, _http
 workers.yaml            MCP worker registry and the trust anchor — see WORKERS.md
 bench/                  the Pi at the bench: status server, kiosk + status units

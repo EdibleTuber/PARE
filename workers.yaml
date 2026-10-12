@@ -86,8 +86,9 @@ workers:
   # control API served by an operator-launched mitmproxy daemon — NOT read-only:
   # five reads plus list_rules are wire tier low, but delete_rule/clear_rules are
   # also low (they mutate), add_blocking_rule/add_modification_rule/replay_flow
-  # are high, and inject_request is critical. No operator pins cover any of them,
-  # so that gating rests entirely on wire metadata. Tools surface as mitm_*.
+  # are high, and inject_request is critical. risk_overrides pins those four at
+  # the same tiers, so their gating does not rest on wire metadata alone;
+  # delete_rule/clear_rules are unpinned. Tools surface as mitm_*.
   # Mounted unconditionally, like
   # static/frida. Requires the worker installed into this venv (`pip install -e
   # ~/Projects/pare-mitm-mcp`) and the daemon started via `/mitm up`. See

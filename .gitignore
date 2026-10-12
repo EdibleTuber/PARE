@@ -1,8 +1,9 @@
 # Secrets / local environment — NEVER commit
 .env
 
-# Virtualenv
+# Virtualenvs (.venv-test: the verify step in QUICKSTART.md)
 .venv/
+.venv-test/
 
 # Python bytecode
 __pycache__/

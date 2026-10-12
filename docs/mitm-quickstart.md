@@ -41,9 +41,11 @@ and so on. Approval follows the wire tier — the `high` tools prompt, and
 `inject_request` (critical) forces a justification. Everything at tier `low`
 auto-executes (still audited), and note that **`delete_rule` and `clear_rules`
 are `low` even though they mutate interception state**, so they auto-execute:
-a model can tear down every rule you set without asking. No operator pins
-cover any of these, so that gating rests entirely on the worker's own wire
-metadata.
+a model can tear down every rule you set without asking. `workers.yaml` pins
+the four tools that rewrite or forge traffic (`inject_request` to critical;
+`add_blocking_rule`, `add_modification_rule` and `replay_flow` to high), so
+their gating holds even if a worker build under-reports its tiers. Nothing pins
+`delete_rule` or `clear_rules`, so they stay at `low`.
 
 ## 1. Prerequisites
 
