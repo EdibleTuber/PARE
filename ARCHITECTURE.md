@@ -121,6 +121,62 @@ prompts every time and requires a typed justification. That branch was missing
 from an earlier version of this diagram, which showed `high` and `critical`
 behaving identically.
 
+### The capture store
+
+What it is for — context spent only on what the model asks for — is in
+[`README.md`](README.md#the-capture-store-context-spent-on-what-the-model-asks-for).
+This section covers how it works. The machinery is `agent_core.capture`. PARE
+supplies the inline budget and works out which store to use.
+
+```mermaid
+flowchart LR
+    R["worker result"] --> ST[("project store<br/>SQLite + FTS5")]
+    R --> Q{"error?"}
+    Q -->|"yes"| M["model sees it whole"]
+    Q -->|"no"| B{"over the<br/>inline budget?"}
+    B -->|"no"| M
+    B -->|"yes"| S["≤512-byte stub:<br/>summary, rows, columns, ref"] --> M
+    M -. "search_capture / read_capture" .-> ST
+    OP["operator: /snapshot"] -. "reads directly, no model" .-> ST
+```
+
+- **Storing never depends on size.** `RiskAwareToolPool` passes every result it
+  executes to `CaptureLayer.maybe_substitute`, errors included. Calls that were
+  denied are not captured, because no tool ran. The layer writes the result
+  first and decides about the stub afterwards. In its own words, *"Store !=
+  Substitute"*.
+- **Only replacing it in the conversation depends on size.** A result larger
+  than the inline budget is replaced by a stub from `build_stub`. The stub is
+  JSON, capped at 512 bytes, with a `read_capture(ref=…)` hint. Errors are
+  never stubbed, because the model has to see them. PARE works out the budget
+  in `PareAgent.setup` as `context_window_tokens / history_depth * 3.5` bytes,
+  so it shrinks or grows with the context window.
+- **Rows come from the result's shape.** `infer_rows` turns a list into one row
+  per element. It also unwraps a worker envelope such as
+  `{"summary": …, "processes": [...]}` into the list's rows. Hex addresses are
+  pulled out at write time (`normalize_addrs`) so they can be searched.
+- **Getting results back.** `search_capture` does full-text search across every
+  worker, and with no arguments it lists the most recent captures.
+  `read_capture` returns one capture as a byte window that can be paged with
+  `offset`. Both are built-in tools and run outside risk gating. A ref that no
+  longer exists returns a hint to search again rather than an error.
+- **Where the store lives.** `resolve_capture_db` walks up from the client's
+  working directory looking for a `.pare/` folder. It stops before `$HOME`, so
+  a marker in `$HOME` itself is ignored. The store is then
+  `.pare/capture.db`, so each project gets its own. Outside a project it falls
+  back to a per-session database under XDG state. `pare/capture_store.py` opens
+  each store once, adds a `.gitignore` to it, and holds an advisory lock so a
+  second daemon on the same project fails loudly. A body over 64 KiB is
+  written out to a separate file, but full-text search still covers it.
+- **`/snapshot`** (`pare/commands/snapshot.py`) shows a capture to the operator
+  in full. It reads the store directly and draws the table itself, so the model
+  never sees it. Operator Frida commands such as `/ps` and `/apps` call the
+  pool with `capture=False`. Their results are still stored, but the operator
+  sees all of the output rather than a stub.
+- **The TUI's pane activity is captured too.** Console traffic from the TUI
+  panes is written to the same store under `worker="pane:<kind>"`, off the
+  daemon's event loop. That makes it searchable alongside tool output.
+
 ### Ecosystem
 
 PARE is the second agent on `agent_core` (after PAL). PAL curates the vault;
@@ -137,7 +193,10 @@ flowchart TB
         PAL["PAL agent"] --> VAULT[("vault (git repo)")]
     end
     subgraph pareside["PARE host"]
-        PARE["PARE agent"] --> WK["MCP workers: static, frida, mitm"]
+        PARE["PARE agent"] --> WK["stdio workers: static, mitm"]
+    end
+    subgraph laptop["laptop beside the Android device"]
+        FR["frida worker"]
     end
     subgraph bench["pare-bench — the Raspberry Pi at the workbench"]
         KIOSK["kiosk browser + local status page"]
@@ -147,13 +206,16 @@ flowchart TB
     PARE -->|"completions + search_vault"| MGR
     PARE -->|"publishes reports<br/>+ descriptors"| AB
     KIOSK -->|"reads, on the bench screen"| AB
+    PARE -->|"MCP over the tailnet"| FR
+    PARE -->|"MCP over the tailnet"| HW["hardware worker<br/>(on pare-bench)"]
     AC[["agent_core (shared library)"]] --- PAL
     AC --- PARE
 ```
 
 **These are roles, not machines.** On this deployment the inference server, the
-PARE daemon and ArcticBase are all the same host (`agenthost`); only the bench Pi
-is genuinely separate. The split is drawn because nothing in the design assumes
+PARE daemon and ArcticBase are all the same host (`agenthost`). The bench Pi
+(which also runs the hardware worker) and the laptop running the frida worker
+are genuinely separate. The split is drawn because nothing in the design assumes
 they are co-located — the Pi reaches ArcticBase over the tailnet, which is why
 `PARE_ARCTICBASE_URL` is pinned to a tailnet address in the deployed unit rather
 than to loopback.

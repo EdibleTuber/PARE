@@ -48,6 +48,31 @@ The loop as the model actually runs it lives in
   several near-duplicate candidates. That turns a silent wrong commit into a
   one-line correction.
 
+## The capture store: context spent on what the model asks for
+
+RE tools produce large output — a process list, every class in an APK, a
+module's exports, an hour of HTTPS flows. Pasting all of it into the
+conversation would fill a local model's context window in a few calls. Even a
+model with a 1M-token window would be paying, on every later turn, for rows it
+never needed.
+
+So PARE stores every worker result and only lets small ones through. A large
+result is replaced in the conversation by a stub of at most 512 bytes: what was
+captured, how many rows, which columns, and the `ref` to read it by. The model
+then **asks for just what it is interested in**. It searches across everything
+captured with `search_capture`, and reads one result a window at a time with
+`read_capture`. A 500-class `enumerate_classes` result therefore costs a few
+hundred bytes, not the whole class list. Only the matches for the class the
+investigation is about ever reach the model.
+
+Because nothing is thrown away, findings outlive the call that produced them.
+They can be searched later in the investigation, and after the worker itself is
+unloaded. `/snapshot` shows any capture to the operator in full, read straight
+from the store, with no model in the path.
+
+How it works, where the store lives and when a result is stubbed:
+[`ARCHITECTURE.md`](ARCHITECTURE.md#the-capture-store).
+
 ## Where everything else lives
 
 | | |
@@ -56,7 +81,7 @@ The loop as the model actually runs it lives in
 | [`WORKERS.md`](WORKERS.md) | the worker registry, risk tiers and operator approval, `/worker`, adding one |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | daemon + client, a chat turn end to end, RAG, risk gating, where the code lives |
 | [`DEPLOY.md`](DEPLOY.md) | the daemon as a service, the bench Pi, ArcticBase |
-| [`docs/frida-quickstart.md`](docs/frida-quickstart.md) | device + `frida-server` setup, attach, Java hooks, the capture store |
+| [`docs/frida-quickstart.md`](docs/frida-quickstart.md) | the worker on the device's laptop, `frida-server`, attach, Java hooks, operator commands |
 | [`docs/mitm-quickstart.md`](docs/mitm-quickstart.md) | HTTPS interception end to end |
 | [`docs/superpowers/`](docs/superpowers/) | designs, implementation plans and build records |
 | [`bench/INSTALL.md`](bench/INSTALL.md) | the Raspberry Pi at the workbench |
