@@ -12,8 +12,10 @@ registry and risk model [`WORKERS.md`](WORKERS.md); for how it fits together
 - **An inference manager** reachable on your LAN that exposes an OpenAI-compatible
   `/v1/chat/completions` **and** a retrieval API at `/collections/{id}/search`
   (the [`inference_server`](https://github.com/EdibleTuber/inference_server)
-  project). It must have a model that emits **structured tool calls** loaded —
-  `gemma-4-26b-a4b-it-q4_k_m` is the tested default.
+  project). It must have a model that emits **structured tool calls** loaded,
+  and `PARE_MODEL` must name exactly that model, or the manager answers `409`.
+  PARE's default is `model` in [`pare/config.py`](pare/config.py), and the
+  comment beside it records why it changed.
 - **PAL's vault indexed** into a collection on that server (default name: `vault`).
   Verify it returns hits:
   ```bash
@@ -32,8 +34,22 @@ python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
 
-`agent_core` and the in-house Frida server (`pare-frida-mcp`) install as
-dependencies.
+This installs PARE and `agent_core`. **The workers are not dependencies.** Each
+lives in its own repo and is installed separately:
+
+- [`pare-static-mcp`](https://github.com/EdibleTuber/pare-static-mcp) and
+  [`pare-mitm-mcp`](https://github.com/EdibleTuber/pare-mitm-mcp) install into
+  this venv (`pip install -e <checkout>`; mitm also needs `--no-deps`, see
+  [`docs/mitm-quickstart.md`](docs/mitm-quickstart.md)).
+- [`pare-frida-mcp`](https://github.com/EdibleTuber/pare-frida-mcp) runs on
+  the machine the Android device is attached to, and PARE reaches it over the
+  network. See [`docs/frida-quickstart.md`](docs/frida-quickstart.md).
+
+`workers.yaml` launches the stdio workers by **absolute path**
+(`command: /mnt/secondary/projects/PARE/.venv/bin/...`). On any other checkout,
+edit those `command:` lines to point at your venv, or the workers fail to
+start. PARE runs without any worker. You get the chat and the vault, and
+`/worker list` shows which workers failed to load and why.
 
 ## 3. Configure
 
@@ -47,7 +63,7 @@ Minimum to set:
 | Variable | What | Example |
 |---|---|---|
 | `PARE_INFERENCE_URL` | inference manager (completions **and** `/collections`) | `http://192.168.1.14:11434` |
-| `PARE_MODEL` | a model that emits structured tool calls | `gemma-4-26b-a4b-it-q4_k_m` |
+| `PARE_MODEL` | the model loaded on the server's slot; must match exactly | see `pare/config.py` |
 | `PARE_COLLECTION_ID` | the collection PAL's vault is indexed into | `vault` |
 
 `PARE_VAULT_PATH` is PARE's own state directory (profile/wisdom/channels), **not**
@@ -55,10 +71,8 @@ where it reads PAL's research — that comes over RAG.
 
 ## 4. Run
 
-> **Activate the venv** before starting the daemon. PARE launches the Frida
-> worker by bare command name (`pare-frida-mcp`), so it must be on `PATH`.
-> Skipping activation logs `worker frida discovery failed (No such file or
-> directory)` and you get no Frida tools.
+> **Activate the venv** before starting the daemon. `/mitm up` runs the
+> `pare-mitm-daemon` console script by name, so it must be on `PATH`.
 
 Terminal 1 — the daemon:
 
@@ -87,19 +101,21 @@ pare-cli
 PARE searches the vault, reads the best hit, and answers from the real note —
 grounded in PAL's curated knowledge, not just the model's training data.
 
-**A risk-gated action** (drives a Frida worker tool):
+**A risk-gated action** (needs the mitm worker; see
+[`docs/mitm-quickstart.md`](docs/mitm-quickstart.md)). Start the proxy with
+`/mitm up`, then:
 
 ```
-> List the available Frida devices.
+> Add a rule blocking requests to example.com.
 ```
 
-Because the `frida` worker's `risk_default` is `high`, PARE pauses for approval
-before dispatching:
+Reads auto-execute, but `add_blocking_rule` changes traffic and is tier `high`,
+so PARE stops for approval before dispatching:
 
 ```
 --- approval required ---
-  frida.list_devices  (declared=high effective=high)
-  args:
+  mitm.add_blocking_rule  (declared=high effective=high)
+  args: ...
   approve? [y/n/j/a]:
 ```
 
@@ -125,7 +141,8 @@ env-gated worker smokes, not a sign of a broken install.
 
 | Symptom | Cause / fix |
 |---|---|
-| `worker frida discovery failed (No such file or directory: 'pare-frida-mcp')` | Daemon started without the venv on `PATH`. Activate the venv, restart. |
-| Model narrates calling tools but nothing happens (e.g. `<\|tool\|>` text, made-up note names) | The model isn't emitting structured tool calls. Use `gemma-4-26b-a4b-it-q4_k_m` (set `PARE_MODEL`). |
+| `/worker list` shows a stdio worker as `spawn_failed` | Its `command:` path in `workers.yaml` doesn't exist on this host, or the worker isn't installed into the venv. See [Install](#2-install). |
+| No Frida tools | The `frida` worker is networked and declared `autoload: false`. Run `/worker load frida`; setup is in [`docs/frida-quickstart.md`](docs/frida-quickstart.md). |
+| Model narrates calling tools but nothing happens (e.g. `<\|tool\|>` text, made-up note names) | The model isn't emitting structured tool calls. Load one that does on the server, and set `PARE_MODEL` to exactly its name. |
 | `search_vault` returns nothing | The inference server's `vault` collection isn't populated/indexed, or `PARE_COLLECTION_ID` doesn't match. Re-check step 1. |
 | Connecting `pare-cli` errors | Start the daemon first; confirm the socket path matches (`PARE_SOCKET_PATH`). |

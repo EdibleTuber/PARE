@@ -1,157 +1,193 @@
 # PARE + Frida Quick Start
 
-Drive **Frida dynamic instrumentation** (Android) through PARE: discover devices,
-attach to a process, hook Java methods, run scripts, inspect memory, and query a
-capture store — all conversationally, with every dangerous action gated on your
-approval and audited.
+Drive **Frida dynamic instrumentation** (Android) through PARE. You can discover
+devices, attach to a process, enumerate and hook Java classes, read object state
+and memory, and run scripts, all by conversation. Every dangerous action waits
+for your approval, and every call is audited.
 
 This builds on the base [`QUICKSTART.md`](../QUICKSTART.md) (inference server,
 vault, daemon, CLI). Read that first; this guide adds the Frida worker.
 
-## What the Frida worker provides
+## Where the worker runs
 
-PARE talks to Frida through the in-house [`pare-frida-mcp`](https://github.com/EdibleTuber/pare-frida-mcp)
-stdio worker (Android v1, Frida 17). It exposes 18 tools; PARE registers them as
-`frida_<tool>`:
+The Frida worker runs **on the machine the Android device is plugged into**,
+usually a laptop, not on the PARE host. It serves MCP over HTTP on the tailnet,
+and the daemon connects to it as a networked worker:
 
-| Tool | Wire tier | What it does |
+```mermaid
+flowchart LR
+    D["PARE daemon<br/>(agenthost)"] -->|"streamable HTTP<br/>over the tailnet :9101"| W["pare-frida-mcp<br/>(laptop)"]
+    W -->|"USB / adb"| DEV["rooted Android<br/>device or emulator"]
+```
+
+The worker is [`pare-frida-mcp`](https://github.com/EdibleTuber/pare-frida-mcp),
+which targets Android with Frida 17. It is **not** a PARE dependency: it is
+installed on the laptop, not into PARE's venv. PARE registers its tools as
+`frida_<tool>`.
+
+## What the worker provides
+
+`/worker tools frida` lists what the loaded worker exposes right now. The
+worker's own `contract.py` is the source of truth for names and tiers. In
+broad strokes:
+
+| Wire tier | Tools | Effect |
 |---|---|---|
-| `list_devices` | low | List Frida devices |
-| `select_device` | low | Select a device by id |
-| `attach` | medium | Attach to a process by pid or name |
-| `list_sessions` | low | List live sessions with a real liveness probe |
-| `detach` | medium | Detach a live session and tear down its capture state |
-| `enumerate_processes` | low | List device processes into the `@snapshots` store |
-| `enumerate_applications` | low | List installed apps into the `@snapshots` store |
-| `enumerate_modules` | low | List an attached process's modules into `@snapshots` |
-| `enumerate_exports` | low | List a module's exports into `@snapshots` |
-| `load_script` | medium | Load a bundled script export set |
-| `execute_script` | **critical** | Evaluate arbitrary JS in a session |
-| `java_hook` | **high** | Install an observing Java method hook |
-| `java_hook_remove` | low | Remove a Java method hook |
-| `read_memory` | **high** | Read target memory (hex preview) |
-| `write_memory` | **high** | Write bytes to target memory |
-| `search_capture` | low | Search captured events / snapshots |
-| `read_capture` | low | Read a captured record slice |
-| `page_capture` | low | Read ALL rows of a snapshot for `/snapshot` (complete, not sampled) |
+| low | `list_devices`, `select_device`, `list_sessions`; `enumerate_*` (processes, apps, modules, exports, classes, methods); `read_hook_events`; `java_hook_remove` | auto-execute, audited |
+| medium | `attach`, `detach`, `load_script` | auto-execute, audited |
+| **high** | `java_hook`, `java_read_fields`, `read_memory`, `write_memory` | prompt for approval |
+| **critical** | `execute_script` (arbitrary JS) | prompt every time, justification required |
 
-> **iOS, SSL/root/JB bypasses, the script vault, and `scan_memory` are not in v1** —
-> they're tracked fast-follows in the worker's design spec.
+`workers.yaml` also pins `frida_execute_script` to critical and
+`frida_write_memory` to high. Those pins hold even if a worker build
+under-reports its tiers.
 
-## 1. Prerequisites
+Large results, such as a class list or an export table, go into PARE's
+**capture store**, not the conversation. The model gets a short stub and pulls
+back only what it needs with `search_capture` / `read_capture`. See
+[`ARCHITECTURE.md`](../ARCHITECTURE.md#the-capture-store).
 
-Beyond the base quickstart:
+> **iOS, SSL/root/JB bypasses, the script vault and `scan_memory` are not in
+> v1.** They are tracked as follow-ups in the worker's design spec.
 
-- **The `pare-frida-mcp` worker installed** in PARE's venv. It ships as a PARE
-  dependency, so `pip install -e ".[dev]"` already pulled it; confirm:
+## 1. Prerequisites — on the laptop
+
+- **A `pare-frida-mcp` checkout, installed into its own venv.**
+  `git pull` does not install new dependencies, so run the install again
+  after pulling:
   ```bash
-  .venv/bin/pare-frida-mcp --help    # should print, not "command not found"
+  cd ~/path/to/pare-frida-mcp
+  git pull
+  pip install -e ".[dev]"
   ```
-- **A rooted Android target** — a physical device or an emulator (e.g. a rooted
-  AVD or Genymotion).
-- **`frida-server` running on the target, matching the host's Frida version.**
-  Check the host version, push the matching server, and start it:
+  This does not install `agent_core`. That is deliberate: the daemon side stays
+  on the PARE host, and the tests that need it skip.
+- **A rooted Android target**: a physical device or an emulator (e.g. a rooted
+  AVD or Genymotion), connected over `adb`.
+- **`frida-server` on the target, matching the laptop's Frida version:**
   ```bash
-  .venv/bin/python -c "import frida; print(frida.__version__)"   # e.g. 17.9.11
-  # download frida-server-<that version>-android-<arch> from the Frida releases,
-  adb push frida-server-17.9.11-android-arm64 /data/local/tmp/frida-server
+  python -c "import frida; print(frida.__version__)"   # in the worker's venv
+  # download frida-server-<that version>-android-<arch> from the Frida releases
+  adb push frida-server-<version>-android-arm64 /data/local/tmp/frida-server
   adb shell "chmod 755 /data/local/tmp/frida-server"
   adb shell "su -c '/data/local/tmp/frida-server &'"
   ```
-- **`adb` connectivity** (`adb devices` lists your target). USB-attached devices
-  appear to Frida as `usb`; an emulator typically as `local` or `usb`.
 
-Sanity-check Frida sees the device *before* involving PARE:
+Check that Frida sees the device **before** involving PARE:
 
 ```bash
-.venv/bin/frida-ls-devices      # should list your device
-.venv/bin/frida-ps -U | head    # processes on the USB device
+frida-ls-devices      # should list your device
+frida-ps -U | head    # processes on the USB device
 ```
 
-If these fail, fix the device/`frida-server` layer first — PARE can't paper over it.
+If these fail, fix the device or `frida-server` first. PARE can't work around it.
 
-## 2. Register the worker
+## 2. Serve the worker on the tailnet
 
-PARE ships with the `frida` worker already declared in `workers.yaml`:
+The worker serves HTTP when `pare-worker-kit`'s environment variables ask it to:
+
+```bash
+AGENT_WORKER_TRANSPORT=http AGENT_WORKER_HOST=tailscale0 AGENT_WORKER_PORT=9101 \
+  pare-frida-mcp
+```
+
+- **`AGENT_WORKER_HOST` takes an interface name.** Use `tailscale0` rather
+  than an address, so the worker isn't left behind when the tailnet assigns a
+  new address.
+- **A wildcard bind is refused.** The worker has no authentication; the bind
+  address is the access control. Every spelling of the wildcard (`0.0.0.0`,
+  `::`, `0`, …) exits non-zero rather than exposing every Frida tool to every
+  network the laptop joins.
+
+To keep it running across reboots, use a systemd unit. **Generate the unit
+rather than pasting a template.** A placeholder `User=` line that survived into
+a real unit failed with `217/USER`. The procedure is §1.5 of
+[`superpowers/2026-09-06-networked-frida-smoke-test.md`](superpowers/2026-09-06-networked-frida-smoke-test.md).
+
+## 3. Load it in PARE
+
+`workers.yaml` already declares the worker. Set `endpoint` to your laptop's
+tailnet address:
 
 ```yaml
 workers:
   frida:
-    command: pare-frida-mcp
-    transport: stdio
-    risk_default: high          # FLOOR during rollout — every Frida tool prompts
+    endpoint: http://100.68.47.23:9101/mcp     # the laptop's tailnet address
+    transport: streamable_http
+    connect_timeout: 20
+    read_timeout: 60
+    risk_default: low
+    autoload: false        # REQUIRED — see below
     capability_tags: [mobile, dynamic, android, frida]
-
-risk_overrides:
-  - ["frida_execute_script", "critical"]   # arbitrary JS — approval + justification
-  - ["frida_write_memory", "high"]          # mutates target memory
 ```
 
-The effective tier of each call is `max(risk_default floor, wire tier, operator pin)`.
-Because the floor is **high**, *every* Frida tool prompts for approval during this
-conservative rollout — not just the dangerous ones. (See the risk-gating diagram in
-[`ARCHITECTURE.md`](../ARCHITECTURE.md#risk-gating--operator-approval-hitl).)
+- **`autoload: false` is required, not a preference.** A sleeping laptop does
+  not refuse a connection; it silently drops it. An autoloading networked
+  worker would therefore cost its full connect timeout at every daemon boot
+  (`docs/superpowers/specs/2026-09-05-networked-workers-design.md` §5.3). Load it when you need it, with no restart:
+  ```
+  /worker load frida
+  /worker tools frida      # confirm the frida_* tools registered
+  ```
+- **`risk_default: low` is a floor, not a ceiling.** The effective tier of
+  each call is `max(floor, the tool's wire tier, operator pin)`, so the tiers
+  in the table above apply. See the risk-gating diagram in
+  [`ARCHITECTURE.md`](../ARCHITECTURE.md#risk-gating--operator-approval-hitl).
 
-## 3. Launch
+## 4. Operator commands — no model in the loop
 
-> **Activate the venv** so the daemon can spawn `pare-frida-mcp` by name. Without
-> it you'll see `worker frida discovery failed (No such file or directory)` and
-> get no Frida tools.
+To look at or set up the device yourself, these commands call the worker
+directly and print the full result. They are still audited, and the result is
+still stored in the capture store:
 
-```bash
-source .venv/bin/activate
-python -m pare      # daemon
-```
+| Command | Does |
+|---|---|
+| `/devices` | list Frida devices |
+| `/select <device_id>` | select a device |
+| `/ps [<device_id>]` | list processes |
+| `/apps [<device_id>]` | list installed apps |
+| `/attach <target> [<device_id>]` | attach by pid or name |
+| `/sessions` | live sessions, with a liveness probe |
+| `/detach <session_id>` | detach and tear down the session's state |
+| `/snapshot [list \| <ref> [query]]` | show any capture from the store in full |
 
-Confirm the worker registered (the daemon discovers its tools at startup). In the
-CLI (`pare-cli` in another activated shell), ask:
-
-```
-> What Frida tools do you have?
-```
-
-PARE should list the `frida_*` tools. If it doesn't, see Troubleshooting.
-
-## 4. The session lifecycle
-
-A Frida session flows device → process → instrumentation → capture:
+## 5. The session lifecycle
 
 ```mermaid
 flowchart LR
     LD["list_devices"] --> SD["select_device"]
     SD --> AT["attach (pid / name)"]
     AT --> SESS["session"]
-    SESS --> INSTR["instrument:<br/>load_script · execute_script<br/>java_hook · read/write_memory"]
-    INSTR --> MSG["agent messages"]
-    MSG --> CAP[("capture store<br/>(per-session SQLite)")]
-    CAP --> Q["search_capture · read_capture"]
+    SESS --> MAP["map: enumerate_classes ·<br/>enumerate_methods"]
+    MAP --> INSTR["instrument: java_hook ·<br/>java_read_fields · read/write_memory ·<br/>load_script · execute_script"]
+    INSTR --> EV["read_hook_events<br/>(since_seq)"]
+    MAP -. "large results" .-> CAP[("PARE capture store")]
+    EV -. "large results" .-> CAP
 ```
 
-Hooks and scripts emit messages that land in a per-session SQLite **capture store**;
-you retrieve them with `search_capture` / `read_capture`. (v1 detail: the message
-pump flushes to disk when you read captures, not on a timer — so read captures to
-force a flush. Very chatty hooks can drop messages between flushes, with a counter.)
+Three behaviours that read as failures but are not:
 
-## 5. A guided session
+- **Classes load lazily.** Navigate into the screen you care about *before*
+  `enumerate_classes`. The filter is a case-insensitive substring of the loaded
+  Java package, which can differ from the app id.
+- **A hook buffers its events.** Call `read_hook_events` with the last `seq`
+  you saw (0 the first time) to get new ones. An empty read means "not
+  triggered yet". Trigger the action in the app and read again.
+- **A tool that takes a `session_id` uses the most recent live session** when
+  it is omitted. With nothing attached, it says to attach first.
 
-Each Frida tool call pauses for approval. At the prompt: `y` once · `n` deny ·
-`j` approve with justification (required for `critical`) · `a` approve this tool
-for the rest of the session (works for `high`, **not** for `critical` — arbitrary
-JS always re-prompts).
+## 6. A guided session
+
+Low and medium calls auto-execute. Calls from `high` up stop at the approval
+prompt: `y` once · `n` deny · `j` approve with justification (required for
+`critical`) · `a` approve this tool for the rest of the session (`high` only;
+`critical` always prompts again).
 
 ```
 > List the Frida devices and attach to com.example.targetapp.
 
---- approval required ---
-  frida.list_devices  (declared=high effective=high)
-  approve? [y/n/j/a]: y
-  → [{"id":"usb","name":"Pixel 6","type":"usb"}, ...]
-
---- approval required ---
-  frida.attach  (declared=high effective=high)
-  args: name=com.example.targetapp
-  approve? [y/n/j/a]: y
-  → session_id=sess-1
+  → frida_list_devices                       (low — runs)
+  → frida_attach name=com.example.targetapp  (medium — runs)
 
 Attached. Session sess-1 is live on com.example.targetapp.
 
@@ -159,18 +195,19 @@ Attached. Session sess-1 is live on com.example.targetapp.
 
 --- approval required ---
   frida.java_hook  (declared=high effective=high)
-  args: session_id=sess-1, class=android.app.Activity, method=onResume
+  args: session_id=sess-1, cls=android.app.Activity, method=onResume
   approve? [y/n/j/a]: a        # approve java_hook for the rest of this session
 
-Hook installed. Navigate the app, then ask me to read the captures.
+Hook installed. Navigate the app, then ask me to read the events.
 
-> Read the captured onResume events.
-  → search_capture / read_capture (low → but floor is high, so: approve)
-  → 3 events captured: onResume @ 12:01:03 (MainActivity), ...
+> Did it fire?
+
+  → frida_read_hook_events since_seq=0       (low — runs)
+  → 3 events: onResume (MainActivity), ...
 ```
 
-For arbitrary instrumentation, `execute_script` is **critical** — PARE will require
-a justification before running JS in the target:
+`execute_script` is **critical**. PARE requires a justification before running
+arbitrary JS in the target, every time:
 
 ```
 > Run a quick script to dump the app's loaded class loaders.
@@ -182,16 +219,21 @@ a justification before running JS in the target:
   justification> investigating classloader hierarchy for hook targeting
 ```
 
-Every call — approved, denied, or auto — is appended to the JSONL audit log under
-`PARE_AUDIT_DIR` (default `~/.local/share/pare/audit/`).
+Every call (approved, denied or auto-executed) is appended to the JSONL audit
+log under `PARE_AUDIT_DIR` (default `~/.local/share/pare/audit/`).
+
+For a worked solve, see
+[`walkthroughs/omtg-datast-001-keystore.md`](walkthroughs/omtg-datast-001-keystore.md).
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
-| `worker frida discovery failed (No such file or directory: 'pare-frida-mcp')` | Daemon started without the venv on `PATH`. Activate the venv, restart. |
-| PARE says it has no Frida tools | Worker didn't register — check the daemon log for the discovery line; confirm `pare-frida-mcp --help` runs in the venv. |
-| `frida_list_devices` returns nothing / errors about the server | `frida-server` isn't running on the target or its version ≠ the host's `frida.__version__`. Re-push the matching server. |
-| `attach` fails with "process not found" | Use the exact package/process name (`frida-ps -U`), or launch the app first. |
-| Captures look empty right after a hook fires | The pump flushes on capture-read; call `read_capture`/`search_capture` to force a flush. Extremely chatty hooks can drop messages between flushes (a counter reports drops). |
-| Every trivial call prompts for approval | Expected during rollout: the `frida` `risk_default` floor is `high`. Lower it (never below `medium`) only after you've validated the wire tiers + pins. |
+| PARE says it has no Frida tools | The worker is declared with `autoload: false`. Run `/worker load frida`, then `/worker tools frida`. |
+| `/worker list` shows frida `UNREACHABLE`, or the load takes `connect_timeout` and fails | The laptop is asleep or off the tailnet, or the worker isn't serving. On the laptop, `curl -sS -o /dev/null -w '%{http_code}\n' http://<tailnet-ip>:9101/mcp` should print any status. |
+| The worker exits at start with a message about the wildcard | `AGENT_WORKER_HOST` resolves to a wildcard. Use `tailscale0` or the tailnet address. |
+| `frida_list_devices` returns nothing, or errors about the server | `frida-server` isn't running on the target, or its version doesn't match the laptop's `frida.__version__`. Push the matching server again. |
+| `attach` fails with "process not found" | Use the exact package or process name (`frida-ps -U`, or `/ps`), or launch the app first. |
+| `enumerate_classes` misses the app's classes | Classes load lazily: open the screen first. Or filter on a short token; the Java package can differ from the app id, including in case. |
+| `read_hook_events` is empty right after hooking | Not triggered yet. Do the action in the app, then read again from the same `since_seq`. |
+| A result came back as a small `captured` stub | Working as intended: the full result is in the capture store. The model reads it with `read_capture`; you can view it with `/snapshot <ref>`. |

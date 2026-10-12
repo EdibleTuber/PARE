@@ -6,7 +6,7 @@ unattended. For the daemon's internals see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 PARE reaches analysis tools through MCP workers declared in `workers.yaml`. Each entry maps to an `agent_core` `WorkerSpec`:
 
-- **Transport** — `streamable_http` (a worker reached over HTTP) or `stdio` (a worker PARE launches as a subprocess and talks to over stdin/stdout). The in-house workers ship as stdio console scripts, one repo each: [`pare-static-mcp`](https://github.com/EdibleTuber/pare-static-mcp), [`pare-frida-mcp`](https://github.com/EdibleTuber/pare-frida-mcp) and [`pare-mitm-mcp`](https://github.com/EdibleTuber/pare-mitm-mcp). A fourth, `pare-hardware-mcp`, is **forward-declared** in `workers.yaml` with `autoload: false` — it does not exist yet, so loading it reports `spawn_failed`, which is the honest answer and visible in `/worker list`. (The legacy `apk_re_agents` Streamable-HTTP backend is superseded by `pare-static-mcp` and disabled in `workers.yaml`.)
+- **Transport** — `streamable_http` (a worker reached over HTTP) or `stdio` (a worker PARE launches as a subprocess and talks to over stdin/stdout). The in-house workers are one repo each, and none is a PARE dependency. [`pare-static-mcp`](https://github.com/EdibleTuber/pare-static-mcp) and [`pare-mitm-mcp`](https://github.com/EdibleTuber/pare-mitm-mcp) run as stdio subprocesses on the PARE host. [`pare-frida-mcp`](https://github.com/EdibleTuber/pare-frida-mcp) runs on the machine the Android device is attached to, and [`pare-hardware-mcp`](https://github.com/EdibleTuber/pare-hardware-mcp) runs on the bench Pi. PARE reaches both of those over the tailnet, and both are declared `autoload: false`, so they connect on `/worker load`. (The legacy `apk_re_agents` Streamable-HTTP backend is superseded by `pare-static-mcp` and disabled in `workers.yaml`.)
 
   `workers.yaml` is the list; `/worker list` is what is actually loaded. Neither is restated here, because a count in prose is wrong the first time a worker is added.
 
@@ -43,11 +43,12 @@ pool:
 
 Two consequences to know before you use it:
 
-- **Unloading drops live state.** `/worker unload frida` disconnects the client
-  and, for a stdio worker, ends its process — any live Frida attachments and
-  installed hooks for that worker are gone with it. There is no confirmation
-  prompt and no `--force`; the command's own output names what it just
-  destroyed.
+- **Unloading drops live state.** `/worker unload <name>` disconnects the
+  client. For a stdio worker it also ends the process, so that worker's live
+  state (attachments, installed hooks) goes with it. A networked worker's
+  process runs on its own host, and PARE does not end it. There is no
+  confirmation prompt and no `--force`; the command's own output names what it
+  just destroyed.
 - **Any load or unload changes the tool list**, which changes the prompt
   prefix the model sees — so the *next* turn reprocesses the whole
   conversation from scratch, one noticeably slower reply. Without this note,
@@ -65,39 +66,45 @@ the ability to act through it, not the record of what you already found.
 `workers.yaml` remains the trust anchor: nothing is loadable, at any point in
 the daemon's life, that an operator has not declared there ahead of time with a
 `risk_default` — the floor tier every tool from that worker is gated at.
-Declaring a worker in `workers.yaml` is still the first step. Streamable HTTP
-worker:
+Declaring a worker in `workers.yaml` is still the first step. A stdio worker
+(PARE launches the process) is the `static` entry:
 
 ```yaml
 workers:
-  my_http_worker:
-    endpoint: http://127.0.0.1:9100/mcp
-    transport: streamable_http
-    risk_default: low
-    capability_tags: [static, apk]
+  static:
+    command: /mnt/secondary/projects/PARE/.venv/bin/pare-static-mcp   # absolute: this host's venv
+    transport: stdio
+    risk_default: low          # FLOOR; per-tool wire tiers + operator pins can escalate
     autoload: true
+    capability_tags: [static, apk, android]
 ```
 
-stdio worker (PARE launches the process). The in-house Frida server ships as the
-`pare-frida-mcp` console script, so the daemon must run with `.venv/bin` on
-`PATH` (see [Run](#run)):
+A networked worker (streamable HTTP on another machine) is the `frida` entry:
 
 ```yaml
 workers:
   frida:
-    command: pare-frida-mcp
-    transport: stdio
-    risk_default: high          # FLOOR; per-tool wire tiers + operator pins can escalate
+    endpoint: http://100.68.47.23:9101/mcp     # the laptop's tailnet address
+    transport: streamable_http
+    connect_timeout: 20
+    read_timeout: 60
+    risk_default: low
+    autoload: false        # REQUIRED for a networked worker
     capability_tags: [mobile, dynamic, android, frida]
-    autoload: true
 ```
+
+`autoload: false` is required for a networked worker: a sleeping host drops
+the connection rather than refusing it, so autoloading would cost the full
+connect timeout at every daemon boot. The comment block at the top of
+`workers.yaml` lists every key a worker may carry. An unknown key aborts the
+**whole** file, so check it there.
 
 What changed is the second step. `autoload` (default `true`) decides *when*
 that declared worker actually connects: `autoload: true` connects it during
-daemon startup like today; `autoload: false` declares it without connecting,
-and an operator brings it up later with `/worker load my_http_worker` — no
-restart required. Either way, the worker only ever exposes what `workers.yaml`
-declared, at no lower than its `risk_default`.
+daemon startup; `autoload: false` declares it without connecting, and an
+operator brings it up later with `/worker load <name>`, with no restart. Either
+way, the worker only ever exposes what `workers.yaml` declared, at no lower than
+its `risk_default`.
 
 Operator pins in `workers.yaml` can force a tool's tier up regardless of what the
 worker advertises (e.g. `frida_execute_script → critical`,
