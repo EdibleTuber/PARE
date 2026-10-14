@@ -125,17 +125,39 @@ approved, denied, or auto — is appended to the JSONL audit log under
 `PARE_AUDIT_DIR` (default `~/.local/share/pare/audit/`).
 
 For the full Frida dynamic-analysis workflow (device + `frida-server` setup,
-attaching, Java hooks, scripts, the capture store), see
+attaching, Java hooks, the operator commands), see
 [`docs/frida-quickstart.md`](docs/frida-quickstart.md).
 
 ## 6. Verify the install (no live stack needed)
 
+The suite checks the operator pins in `workers.yaml` against the real worker
+contracts, so it needs the worker packages installed. Do that in a **separate
+venv**, the way CI does (`.github/workflows/`). Installing `pare-mitm-mcp` with
+its dependencies pulls in mitmproxy, which the daemon's venv deliberately does
+not have (see the `--no-deps` note in
+[`docs/mitm-quickstart.md`](docs/mitm-quickstart.md)).
+
 ```bash
-.venv/bin/pytest tests/ -q
+python -m venv .venv-test
+.venv-test/bin/pip install -e ".[dev]" \
+  "pare-frida-mcp @ git+https://github.com/EdibleTuber/pare-frida-mcp.git" \
+  "pare-static-mcp @ git+https://github.com/EdibleTuber/pare-static-mcp.git" \
+  "pare-mitm-mcp @ git+https://github.com/EdibleTuber/pare-mitm-mcp.git"
+.venv-test/bin/pytest tests/ -q
 ```
 
-Expected: the suite is green (no failures) with 3 skips — those are
-env-gated worker smokes, not a sign of a broken install.
+Expected: no failures. Some skips are expected; `pytest -rs` names each one's
+reason (live smokes gated on an env var or a reachable service).
+
+Two things look like a broken install but are not:
+
+- **`test_risk_overrides_coverage` fails without the worker packages, by
+  design.** An unchecked pin run must not look like a verified one. Run the
+  suite from the venv above, not from the daemon's.
+- **Some tests run against a live ArcticBase when one is reachable** at
+  `PARE_ARCTICBASE_URL` or `PARE_ARCTIC_BASE_URL` (default `127.0.0.1:2929`),
+  and skip otherwise. On a host that can see one, a failure there concerns
+  that ArcticBase or the live test, not the PARE install.
 
 ## Troubleshooting
 

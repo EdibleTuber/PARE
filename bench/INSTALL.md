@@ -89,14 +89,11 @@ Two prerequisites were checked on the device and are already satisfied:
 
 ## 3. The status page
 
-The unit file has to reach `/etc/systemd/system/` — copying the code to
-`/opt/pare` is not enough, and `systemctl enable` answers "does not exist" if you
-only did the latter:
+`bench_deploy.sh` (§1) installs both units into `/etc/systemd/system/`, reloads
+systemd and restarts them. It does **not** enable them, so on a fresh Pi do that
+once:
 
 ```bash
-sudo install -m 644 ~/pare-bench/systemd/pare-bench-status.service \
-    /etc/systemd/system/pare-bench-status.service
-sudo systemctl daemon-reload
 sudo systemctl enable --now pare-bench-status
 systemctl --no-pager status pare-bench-status | head -12
 curl -s localhost:8080/status.json | head -c 400; echo
@@ -138,8 +135,8 @@ a `systemctl restart` / reboot survival check, and everything in §4.
 ## 4. The kiosk
 
 This bench runs **Ubuntu Server**, which has no X, no Wayland and no browser, so
-the kiosk is `cage` + Chromium rather than a desktop session. It also needs a
-different user from the status page.
+the kiosk is `cage` + Chromium rather than a desktop session. It runs as the
+same `pare` user as the status page (§2).
 
 **Follow [`KIOSK-UBUNTU.md`](KIOSK-UBUNTU.md) instead of copying the unit
 straight in.** I had no access to the Pi and could not test any of it, so that
@@ -211,11 +208,14 @@ listening — a wedged console session still shows OK there.
 
 ## What is NOT done by this
 
-- **Artifacts are not wired.** `pare-hardware-mcp` runs on this Pi (port 9102,
-  deployed by its own `scripts/bench_deploy.sh`), and the drive is mounted, but
-  `workers.yaml` still declares `artifact_root: null`, so no tool produces an
-  artifact yet. Wiring is `docs/superpowers/specs/2026-09-12-artifact-wiring-design.md`.
-- Do **not** add `RequiresMountsFor` to that worker's unit when you write it (§8.4).
+- **Artifacts are wired on the PARE side only.** `workers.yaml` declares
+  `artifact_root: /mnt/bench-store` and this drive's `artifact_drive_id` for the
+  `hardware` worker, and PARE publishes a landed artifact's descriptor to the
+  workbench. On the worker side, the `pare-hardware-mcp` unit does not set
+  `PARE_HW_ARTIFACT_ROOT`, and no hardware tool writes an artifact yet. The first
+  one is the console-capture spec in that repo. The design is
+  `docs/superpowers/specs/2026-09-12-artifact-wiring-design.md`.
+- Do **not** add `RequiresMountsFor` to `pare-hardware-mcp`'s unit (§8.4).
   With the drive absent the unit never starts, the port never listens, and
   `/worker list` prints `UNREACHABLE` — the same string it prints for "the Pi is
   off". Start unconditionally and fail at call time naming the mountpoint.
