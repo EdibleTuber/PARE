@@ -752,6 +752,8 @@ class PareTUI(App):
             self._write_transcript(
                 Text.assemble((ECHO_PREFIX, "bold cyan"), line.strip())
             )
+        if line.strip().startswith("/"):
+            self._turn.mark_command_turn()
         try:
             await parse_input(self.session, line)
         except Exception as exc:

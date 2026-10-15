@@ -86,6 +86,13 @@ class TurnRenderer:
     def __init__(self) -> None:
         self._acc = TurnAccumulator()
         self.live = ""
+        self._command_turn = False
+
+    def mark_command_turn(self) -> None:
+        """Mark the current turn as a command response, so the next
+        ResponseMessage renders as plain text (preserving columnar
+        alignment) rather than Markdown (which collapses whitespace)."""
+        self._command_turn = True
 
     def flush(self) -> list[Committed]:
         """Commit the in-progress text, if any, without ending the turn."""
@@ -100,6 +107,7 @@ class TurnRenderer:
         commit the in-progress text and reset the dedup state."""
         out = self.flush()
         self._acc.reset()
+        self._command_turn = False
         return out
 
     def feed(self, msg: object) -> list[Committed]:
@@ -110,10 +118,14 @@ class TurnRenderer:
         out = self.flush()
         text = self._acc.feed(msg)
         if text:
-            kind = "markdown" if isinstance(msg, ResponseMessage) else "plain"
+            if isinstance(msg, ResponseMessage) and not self._command_turn:
+                kind = "markdown"
+            else:
+                kind = "plain"
             out.append(Committed(kind, text))
         if is_turn_end(msg):
             self._acc.reset()
+            self._command_turn = False
         return out
 
 

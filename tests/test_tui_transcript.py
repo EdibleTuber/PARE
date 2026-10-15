@@ -207,3 +207,48 @@ def test_renderer_flush_commits_the_live_text_without_ending_the_turn():
         StreamChunkMessage(token="two"), ResponseMessage(text="one two"),
     ])
     assert [c.text for c in committed] == ["two"]
+
+
+# --- Command turns: a /command's ResponseMessage renders as plain text, not
+# Markdown, so its columnar output keeps its alignment (Markdown collapses
+# runs of whitespace). The flag is per-turn and must not leak forward.
+# (The unmarked -> Markdown default is test_renderer_unstreamed_response_
+# commits_as_markdown_once.) ---
+
+
+def test_command_turn_response_renders_as_plain_not_markdown():
+    """mark_command_turn() makes the turn's ResponseMessage commit as 'plain'
+    (whitespace preserved) instead of 'markdown' (which would collapse the
+    columnar alignment of command output such as /help's table)."""
+    from pare.tui.widgets.transcript import TurnRenderer
+
+    r = TurnRenderer()
+    r.mark_command_turn()
+    committed = r.feed(ResponseMessage(text="  NAME      RISK\n  hardware  low"))
+    assert [(c.kind, c.text) for c in committed] == [
+        ("plain", "  NAME      RISK\n  hardware  low")
+    ]
+
+
+def test_command_turn_flag_resets_on_turn_end():
+    """The plain rendering is a single-turn flag: after the command's
+    ResponseMessage closes the turn, the next turn's reply is Markdown again."""
+    from pare.tui.widgets.transcript import TurnRenderer
+
+    r = TurnRenderer()
+    r.mark_command_turn()
+    _feed_all(r, [ResponseMessage(text="cmd out")])
+    committed = _feed_all(r, [ResponseMessage(text="- next turn")])
+    assert [(c.kind, c.text) for c in committed] == [("markdown", "- next turn")]
+
+
+def test_command_turn_flag_clears_on_end_turn():
+    """A command turn that ends via end_turn() (connection drop, no terminator)
+    must clear the flag too, not leave the following turn plain."""
+    from pare.tui.widgets.transcript import TurnRenderer
+
+    r = TurnRenderer()
+    r.mark_command_turn()
+    r.end_turn()
+    committed = r.feed(ResponseMessage(text="- next turn"))
+    assert [(c.kind, c.text) for c in committed] == [("markdown", "- next turn")]
