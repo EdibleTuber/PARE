@@ -66,3 +66,18 @@ def test_stdio_service_workers_autoload():
 def test_every_declared_worker_has_a_risk_floor():
     for spec in _reg().all():
         assert spec.risk_default, spec.name
+
+
+def test_hardware_declares_its_artifact_root_and_drive():
+    spec = _reg().get("hardware")
+    assert spec.artifact_root == "/mnt/bench-store"
+    # The sentinel content on the drive (bench/INSTALL.md:157-159, recorded
+    # after the 2026-09-27 swap). It is RE-READ FROM THE DRIVE at deploy
+    # time, never typed from memory: a drive swap must change the yaml and
+    # this pin together, and this test is what keeps them honest.
+    assert spec.artifact_drive_id == "b2657680-9f16-4918-9195-ef3ba17da924"
+    # Deliberately NOT declared in the yaml: with artifact_root set and the
+    # transport streamable_http, the loader applies the parent's A2 default
+    # (the endpoint's hostname) at load -- pin the defaulted value, not an
+    # explicit declaration, which would drift.
+    assert spec.artifact_host == "100.97.133.126"
