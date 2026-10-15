@@ -81,6 +81,7 @@ How it works, where the store lives and when a result is stubbed:
 | [`WORKERS.md`](WORKERS.md) | the worker registry, risk tiers and operator approval, `/worker`, adding one |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | daemon + client, a chat turn end to end, RAG, risk gating, where the code lives |
 | [`DEPLOY.md`](DEPLOY.md) | the daemon as a service, the bench Pi, ArcticBase |
+| [`docs/tui-quickstart.md`](docs/tui-quickstart.md) | the TUI operator surface: chat + live UART pane, layout, daemon auto-spawn |
 | [`docs/frida-quickstart.md`](docs/frida-quickstart.md) | the worker on the device's laptop, `frida-server`, attach, Java hooks, operator commands |
 | [`docs/mitm-quickstart.md`](docs/mitm-quickstart.md) | HTTPS interception end to end |
 | [`docs/superpowers/`](docs/superpowers/) | designs, implementation plans and build records |

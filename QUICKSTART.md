@@ -128,6 +128,9 @@ For the full Frida dynamic-analysis workflow (device + `frida-server` setup,
 attaching, Java hooks, the operator commands), see
 [`docs/frida-quickstart.md`](docs/frida-quickstart.md).
 
+For the TUI operator surface (chat + live UART pane, layout cycling, daemon
+auto-spawn), see [`docs/tui-quickstart.md`](docs/tui-quickstart.md).
+
 ## 6. Verify the install (no live stack needed)
 
 The suite checks the operator pins in `workers.yaml` against the real worker
