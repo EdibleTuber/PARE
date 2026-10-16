@@ -19,3 +19,9 @@ __pycache__/
 # Both are working state, not source; neither may reach a commit.
 .superpowers/
 .claude/worktrees/
+
+# Acceptance-rig probe venv (P4 T8): a venv, never source
+scripts/probe.venv/
+
+# Serena (per-project LSP config, memories, cache)
+.serena/
