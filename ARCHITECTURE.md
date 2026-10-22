@@ -136,7 +136,7 @@ flowchart LR
     Q -->|"yes"| M["model sees it whole"]
     Q -->|"no"| B{"over the<br/>inline budget?"}
     B -->|"no"| M
-    B -->|"yes"| S["≤512-byte stub:<br/>summary, rows, columns, ref"] --> OP
+    B -->|"yes"| S["≤512-byte stub:<br/>summary, rows, columns, ref"] --> M
     M -. "search_capture / read_capture" .-> ST
     OP["operator: /snapshot"] -. "reads directly, no model" .-> ST
 ```
