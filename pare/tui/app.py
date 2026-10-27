@@ -25,6 +25,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Input, Markdown, RichLog, Static
+import yaml
 
 import pare
 from pare.config import load_config
@@ -114,6 +115,46 @@ def resolve_spawn_cwd(
         cwd=None,
         error=f"workers.yaml not found in {root} — set PARE_WORKERS_YAML_PATH",
     )
+
+
+def hardware_endpoint(
+    env: Mapping[str, str], repo_root: Path | None = None
+) -> str | None:
+    """The UART pane's console endpoint, resolved in operator-first order:
+
+    1. `PARE_TUI_HARDWARE_ENDPOINT` -- an explicit launch-time choice always
+       wins, whatever the registry says. An empty value is unset.
+    2. The `hardware` entry's `endpoint` in `workers.yaml` -- the same file
+       the daemon loads: `PARE_WORKERS_YAML_PATH` if set, else
+       `<repo root>/workers.yaml` (mirrors `resolve_spawn_cwd`).
+    3. `None` -- the caller falls back to `FakeConsoleSource` and flags the
+       pane so the status bar says `fake`, not `ok`: a TUI launched without
+       a reachable endpoint must never read as live hardware (the silent
+       lane behind this task: no env var, pane polled the fake while the
+       worker captured real data, and nothing said so).
+
+    Lenient on purpose: a missing or unparseable file, a registry without a
+    `workers`/`hardware` entry, or a non-string `endpoint` all resolve to
+    `None`. The daemon is the process that validates the whole registry
+    (`WorkerRegistry.load` aborts on a bad entry); the pane needs one URL
+    and must not take the app down over anything else in the file.
+    """
+    endpoint = env.get("PARE_TUI_HARDWARE_ENDPOINT")
+    if endpoint:
+        return endpoint
+    root = repo_root if repo_root is not None else Path(pare.__file__).resolve().parents[1]
+    explicit = env.get("PARE_WORKERS_YAML_PATH")
+    path = Path(explicit) if explicit else root / "workers.yaml"
+    try:
+        data = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    workers = data.get("workers")
+    hardware = workers.get("hardware") if isinstance(workers, dict) else None
+    endpoint = hardware.get("endpoint") if isinstance(hardware, dict) else None
+    return endpoint if isinstance(endpoint, str) and endpoint else None
 
 
 @dataclass(frozen=True)
@@ -370,15 +411,23 @@ class PareTUI(App):
         yield Footer()
 
     def _build_uart_pane(self) -> UartPane:
-        """v1 default source: `FakeConsoleSource`, not `McpConsoleSource`.
+        """The pane's `ConsoleSource`: `McpConsoleSource(endpoint=...)` when
+        `hardware_endpoint` resolves one (the `PARE_TUI_HARDWARE_ENDPOINT`
+        env var, else the `hardware` entry's `endpoint` in `workers.yaml`),
+        `FakeConsoleSource` otherwise.
 
-        There is no deployed Pi in this plan's test bed (spec: "the whole
-        plan is developed against the fake because no Pi deployment
-        exists"), and `pare-tui` must still launch and show a working pane
-        without one. The source is injected via `source=`, never hardcoded
-        inside `UartPane` itself, so pointing this at a real board later
+        The fake exists because `pare-tui` must still launch and show a
+        working pane with no bench Pi reachable (spec: "the whole plan is
+        developed against the fake because no Pi deployment exists"). The
+        source is injected via `source=`, never hardcoded inside `UartPane`
+        itself, so pointing this at a real board later
         (`McpConsoleSource(endpoint, worker_prefix=...)`, `pare/tui/sources/
         mcp_console.py`) is a one-line change here, not a rewrite.
+
+        A fake-backed pane is flagged `fake=True` so the status bar says
+        `UartPane[fake cursor=N]` instead of the reassuring
+        `UartPane[ok cursor=N]` -- a pane with no real hardware behind it
+        must be distinguishable from a live one at a glance.
 
         `daemon_session` starts as `None` -- deliberately NOT `self.session`
         -- and is attached only once `on_mount` confirms the connection is
@@ -396,25 +445,30 @@ class PareTUI(App):
         flushes. Gating on an actually-established connection avoids it
         without touching Task 4's or Task 9's files.
 
-        Setting `PARE_TUI_HARDWARE_ENDPOINT` at launch swaps
-        `FakeConsoleSource` for `McpConsoleSource(endpoint=...)`; unset
-        leaves the fake as the default so existing tests keep passing
-        without modification. Spec:
+        The env var still takes precedence exactly as before: when
+        `PARE_TUI_HARDWARE_ENDPOINT` is set, this constructs
+        `McpConsoleSource(endpoint=<that value>)` without reading any
+        registry file. The `workers.yaml` fallback exists so the bench
+        case works without an extra env var, and the fake is now
+        labelled instead of silent. Spec:
         `docs/superpowers/specs/2026-09-20-bench-integration-design.md` §5.1.
         """
-        endpoint = os.environ.get("PARE_TUI_HARDWARE_ENDPOINT")
-        if endpoint:
+        endpoint = hardware_endpoint(os.environ)
+        if endpoint is not None:
             from pare.tui.sources.mcp_console import McpConsoleSource
 
             source = McpConsoleSource(endpoint=endpoint)
+            fake = False
         else:
             source = FakeConsoleSource()
+            fake = True
         return UartPane(
             source=source,
             channel_id=self.channel_id,
             cwd=self.cwd,
             daemon_session=None,
             id="uart-pane",
+            fake=fake,
         )
 
     def _set_pane_daemon_session(self, session: object | None) -> None:

@@ -297,6 +297,9 @@ async def test_hidden_dock_keeps_polling_and_the_status_summary(tmp_path, monkey
     from pare.tui.app import LAYOUT_KEY
 
     monkeypatch.delenv("PARE_TUI_HARDWARE_ENDPOINT", raising=False)
+    # Hermetic: without this, the checkout's workers.yaml (which HAS a
+    # hardware endpoint) would back the pane with a live McpConsoleSource.
+    monkeypatch.setenv("PARE_WORKERS_YAML_PATH", str(tmp_path / "absent.yaml"))
     app = _make_app(tmp_path)
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
@@ -312,7 +315,8 @@ async def test_hidden_dock_keeps_polling_and_the_status_summary(tmp_path, monkey
         assert pane.cursor > before, "hidden pane stopped polling"
         app._refresh_status_bar()  # what the app's 1s timer calls
         shown = str(bar.content)
-        assert f"UartPane[ok cursor={pane.cursor}]" in shown, shown
+        # The fallback pane is honestly labelled `fake`, not `ok`.
+        assert f"UartPane[fake cursor={pane.cursor}]" in shown, shown
 
 
 async def test_changing_the_layout_rewraps_the_existing_transcript(tmp_path):
