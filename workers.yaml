@@ -134,6 +134,10 @@ workers:
     autoload: false        # REQUIRED for networked workers
     capability_tags: [hardware, uart, jtag, glitch]
     artifact_root: /mnt/bench-store
+    # RE-READ FROM THE DRIVE at deploy time — `cat
+    # /mnt/bench-store/.bench-store-id` — never typed from memory: a drive
+    # swap must change this line and the drive's sentinel together
+    # (tests/test_workers_yaml.py pins the pair).
     artifact_drive_id: b2657680-9f16-4918-9195-ef3ba17da924
 
   # --- apk_re_agents (Streamable HTTP) — disabled until services run + discovery hardened ---
