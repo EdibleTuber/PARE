@@ -34,10 +34,15 @@ server, vault, daemon). Read that first; this guide adds the TUI layer.
 pare-tui
 ```
 
-With no extra configuration the TUI launches against a **fake console
-source** — a scriptable in-memory double of the hardware worker. The
-UART pane mounts and polls but shows no device output. This is useful
-for chat-only sessions or development without a bench Pi.
+When no hardware endpoint resolves — no `PARE_TUI_HARDWARE_ENDPOINT` in the
+environment and no `workers.hardware.endpoint` in the `workers.yaml` the TUI
+looks at — the TUI launches against a **fake console source**, a
+scriptable in-memory double of the hardware worker. The UART pane mounts
+and polls but shows no device output, and the status bar says
+`UartPane[fake cursor=N]` so the pane is never mistaken for live hardware.
+This is what a launch gets in a checkout with no `workers.yaml` (or one
+whose registry has no `hardware` entry), and it is useful for chat-only
+sessions and development without a bench Pi.
 
 ### With a live bench Pi
 
@@ -46,6 +51,12 @@ Set `PARE_TUI_HARDWARE_ENDPOINT` to the hardware worker's MCP endpoint:
 ```bash
 PARE_TUI_HARDWARE_ENDPOINT=http://<bench-pi-ip>:9102/mcp pare-tui
 ```
+
+Or, when the `workers.yaml` in reach already declares the endpoint (the
+PARE checkout's does, under `workers.hardware`), a plain `pare-tui` launch
+from that checkout connects to it — the fallback reads the registry's
+`hardware` entry when the env var is unset. The env var wins when both
+are present.
 
 The UART pane will connect to the worker over StreamableHTTP, attach to
 whatever console session is open, and begin polling at 50 ms (20 Hz).
@@ -57,9 +68,9 @@ kernel messages) streaming into the UART pane in real time.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `PARE_TUI_HARDWARE_ENDPOINT` | *(unset — uses fake source)* | MCP endpoint URL for `pare-hardware-mcp`. Set this to see real UART output. |
+| `PARE_TUI_HARDWARE_ENDPOINT` | *(unset — falls back to `workers.hardware.endpoint`)* | MCP endpoint URL for `pare-hardware-mcp`. Wins over `workers.yaml` when set. |
 | `PARE_TUI_NO_AUTO_SPAWN` | *(unset)* | Set to `1` to prevent the TUI from auto-spawning `pare-daemon` |
-| `PARE_WORKERS_YAML_PATH` | *(unset — looks for `workers.yaml` in the repo root)* | Explicit path to `workers.yaml` for a spawned daemon |
+| `PARE_WORKERS_YAML_PATH` | *(unset — looks for `workers.yaml` in the repo root)* | Explicit path to `workers.yaml`, for a spawned daemon and for the UART pane's endpoint fallback |
 | `PARE_SOCKET_PATH` | `$XDG_RUNTIME_DIR/pare.sock` | Unix socket path for `pare-daemon` |
 
 ## Keyboard shortcuts
@@ -146,9 +157,12 @@ keeps running.
 
 ### UART pane shows no output
 
-1. **Check the env var.** If `PARE_TUI_HARDWARE_ENDPOINT` is not set,
-   the pane runs against the fake source. Set it to
-   `http://<bench-pi-ip>:9102/mcp`.
+1. **Check the status bar first.** `UartPane[fake cursor=N]` means the
+   pane runs against the fake source: no `PARE_TUI_HARDWARE_ENDPOINT` in
+   the environment and no `workers.hardware.endpoint` in the `workers.yaml`
+   it resolves (the repo root's, or `PARE_WORKERS_YAML_PATH`'s). Set
+   `PARE_TUI_HARDWARE_ENDPOINT=http://<bench-pi-ip>:9102/mcp`, or fix the
+   registry, to go live.
 
 2. **Check the worker.** From your workstation:
    ```bash
@@ -165,7 +179,8 @@ keeps running.
    between the worker and the pane.
 
 4. **Check the pane's status bar.** The status bar shows
-   `UartPane[ok cursor=N]` or `UartPane[FAIL:...]`. A `FAIL` means
+   `UartPane[ok cursor=N]` or `UartPane[FAIL:...]` (or
+   `UartPane[fake cursor=N]` — see step 1). A `FAIL` means
    the source raised — the pane is backing off and retrying.
 
 ### Status bar shows `daemon:DOWN`
@@ -209,7 +224,9 @@ closing from a different task raises `RuntimeError`. The pane's poll
 timer calls `read()` from a different task, which is safe; only
 `start()`/`stop()` carry the affinity requirement.
 
-**Source injection:** `_build_uart_pane` in `app.py` picks the source
-from `PARE_TUI_HARDWARE_ENDPOINT`. Swapping from fake to real is a
-one-line change. Every pane and test is built against the
-`ConsoleSource` Protocol, never a concrete source.
+**Source injection:** `_build_uart_pane` in `app.py` picks the source via
+`hardware_endpoint`: `PARE_TUI_HARDWARE_ENDPOINT` if set, else the
+`hardware` entry's `endpoint` in `workers.yaml` (the repo root's, or
+`PARE_WORKERS_YAML_PATH`'s), else `FakeConsoleSource` — flagged on the
+pane so the status bar says `fake` rather than `ok`. Every pane and test
+is built against the `ConsoleSource` Protocol, never a concrete source.

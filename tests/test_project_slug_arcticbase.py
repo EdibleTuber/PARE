@@ -59,7 +59,12 @@ def test_arcticbase_accepts_every_slug_we_derive(tmp_path, dirname):
     root.mkdir()
     slug = derive_slug(root)
     status = _create_workbench(slug)
-    assert status == 201, f"ArcticBase rejected derived slug {slug!r} with {status}"
+    # 201: this run created it. 409: an earlier run of this test (or a concurrent
+    # one) already created the workbench for this slug — the slug was ACCEPTED,
+    # which is what the test pins. Same 409-as-success rule as ensure_workbench
+    # (pare/arcticbase.py:110-124). A per-run random suffix would silence the
+    # flake by defeating the purpose: a STABLE slug must round-trip.
+    assert status in (201, 409), f"ArcticBase rejected derived slug {slug!r} with {status}"
 
 
 def test_arcticbase_still_rejects_what_our_pattern_rejects(tmp_path):

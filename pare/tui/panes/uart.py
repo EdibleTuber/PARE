@@ -107,6 +107,7 @@ class UartPane(Pane):
         poll_interval: float = DEFAULT_UART_POLL_INTERVAL,
         daemon_session: DaemonSessionLike | None = None,
         observed_flush_polls: int = DEFAULT_OBSERVED_FLUSH_POLLS,
+        fake: bool = False,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -114,6 +115,7 @@ class UartPane(Pane):
         super().__init__(
             source,
             poll_interval=poll_interval,
+            fake=fake,
             name=name,
             id=id,
             classes=classes,

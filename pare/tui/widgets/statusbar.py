@@ -94,5 +94,12 @@ class StatusBar(Static):
 
 
 def _pane_summary(pane: Pane) -> str:
-    health = "ok" if pane.healthy else f"FAIL:{pane.last_error}"
+    # A fake-backed pane says `fake`, not its health: `ok` would read as
+    # live hardware, which is exactly the lie this flag exists to stop.
+    # Its failures (if a scripted fake read fails) are still visible as
+    # markers inside the pane itself.
+    if pane.fake:
+        health = "fake"
+    else:
+        health = "ok" if pane.healthy else f"FAIL:{pane.last_error}"
     return f"{type(pane).__name__}[{health} cursor={pane.cursor}]"

@@ -66,6 +66,7 @@ class Pane(Widget):
         *,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         max_backoff: float = DEFAULT_MAX_BACKOFF,
+        fake: bool = False,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -78,6 +79,12 @@ class Pane(Widget):
         self.cursor: int = 0
         self.healthy: bool = True
         self.last_error: str | None = None
+        # True when the source is a stand-in (FakeConsoleSource): the
+        # status bar must say so instead of rendering this pane's health
+        # as if it were live hardware. Set by the caller that picks the
+        # source (pare/tui/app.py::_build_uart_pane); not inferred from
+        # the source's type, which this module deliberately does not know.
+        self.fake = fake
         self._interval = poll_interval
         self._timer: Timer | None = None
         # Non-None while the pane is in connect-retry mode: the most recent

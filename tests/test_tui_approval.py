@@ -101,7 +101,7 @@ def _make_request(**overrides) -> ToolApprovalRequestMessage:
 
 
 @pytest.mark.asyncio
-async def test_pane_poller_keeps_making_progress_while_modal_is_open():
+async def test_pane_poller_keeps_making_progress_while_modal_is_open(monkeypatch):
     """The discriminating observation is PROGRESS, not mere responsiveness:
     a poller's own cursor must advance while the modal sits open and
     unanswered. This would fail against any implementation that resolves the
@@ -117,6 +117,11 @@ async def test_pane_poller_keeps_making_progress_while_modal_is_open():
     "some progress happened somewhere in this pause" check would not, since
     a single tick sneaking in after a block released would still satisfy it.
     """
+    # Hermetic: the mounted app's UART pane must not resolve the
+    # checkout's workers.yaml into a live bench connection while this
+    # test measures wall-clock progress on a nominal-rate poller.
+    monkeypatch.delenv("PARE_TUI_HARDWARE_ENDPOINT", raising=False)
+    monkeypatch.setenv("PARE_WORKERS_YAML_PATH", "/nonexistent/pare-workers.yaml")
     app = _make_app()
     async with app.run_test() as pilot:
         poller = app.query_one("#poller", _FakePoller)

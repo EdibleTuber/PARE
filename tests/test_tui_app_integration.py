@@ -176,20 +176,30 @@ async def test_send_approval_response_survives_a_dead_socket():
         assert app.is_running
 
 
-def test_build_uart_pane_defaults_to_fake_when_env_var_unset(monkeypatch):
-    """Unset env var is the default: FakeConsoleSource, unchanged from Task 9.
-    Regression guard against a future change that silently makes the pane
-    require a live Pi endpoint."""
+def test_build_uart_pane_falls_back_to_fake_when_no_endpoint_resolves(
+    monkeypatch, tmp_path
+):
+    """No env var and no resolvable workers.yaml entry: FakeConsoleSource,
+    and the status bar says `fake` -- the pane must not read as live
+    hardware. Regression guard against a future change that silently makes
+    the pane require a reachable Pi endpoint.
+
+    Hermetic via PARE_WORKERS_YAML_PATH: the checkout's own workers.yaml
+    HAS a hardware endpoint, so an unpointed resolver would pick it up and
+    this test could never reach the fake branch."""
     from pathlib import Path
 
     from pare.tui.app import PareTUI
     from pare.tui.sources.fake_console import FakeConsoleSource
+    from pare.tui.widgets.statusbar import StatusBar
 
     monkeypatch.delenv("PARE_TUI_HARDWARE_ENDPOINT", raising=False)
+    monkeypatch.setenv("PARE_WORKERS_YAML_PATH", str(tmp_path / "absent.yaml"))
 
     app = PareTUI(Path("/nonexistent/pare.sock"), "chan-1", "/tmp")
     pane = app._build_uart_pane()
     assert isinstance(pane.source, FakeConsoleSource)
+    assert "fake" in StatusBar().render_for([pane]).lower()
 
 
 def test_build_uart_pane_uses_mcp_source_when_env_var_set(monkeypatch):
@@ -206,6 +216,159 @@ def test_build_uart_pane_uses_mcp_source_when_env_var_set(monkeypatch):
     pane = app._build_uart_pane()
     assert isinstance(pane.source, McpConsoleSource)
     assert pane.source.endpoint == "http://100.97.133.126:9102/mcp"
+
+
+def test_build_uart_pane_env_var_wins_over_workers_yaml(monkeypatch, tmp_path):
+    """Both set: the explicit env var wins -- the fallback reads the
+    registry only when the env var is not there."""
+    from pathlib import Path
+
+    from pare.tui.app import PareTUI
+    from pare.tui.sources.mcp_console import McpConsoleSource
+
+    monkeypatch.setenv("PARE_TUI_HARDWARE_ENDPOINT", "http://from-env:9102/mcp")
+    (tmp_path / "workers.yaml").write_text(
+        "workers:\n  hardware:\n    endpoint: http://from-yaml:9102/mcp\n"
+    )
+    monkeypatch.setenv("PARE_WORKERS_YAML_PATH", str(tmp_path / "workers.yaml"))
+
+    app = PareTUI(Path("/nonexistent/pare.sock"), "chan-1", "/tmp")
+    pane = app._build_uart_pane()
+    assert isinstance(pane.source, McpConsoleSource)
+    assert pane.source.endpoint == "http://from-env:9102/mcp"
+
+
+def test_build_uart_pane_uses_workers_yaml_endpoint_when_env_var_unset(
+    monkeypatch, tmp_path
+):
+    """No env var: the workers.yaml `hardware` endpoint drives the source,
+    and the status bar does not say `fake`. Constructs the source; does
+    NOT attach (no live transport in tests)."""
+    from pathlib import Path
+
+    from pare.tui.app import PareTUI
+    from pare.tui.sources.mcp_console import McpConsoleSource
+    from pare.tui.widgets.statusbar import StatusBar
+
+    monkeypatch.delenv("PARE_TUI_HARDWARE_ENDPOINT", raising=False)
+    (tmp_path / "workers.yaml").write_text(
+        "workers:\n  hardware:\n    endpoint: http://100.97.133.126:9102/mcp\n"
+    )
+    monkeypatch.setenv("PARE_WORKERS_YAML_PATH", str(tmp_path / "workers.yaml"))
+
+    app = PareTUI(Path("/nonexistent/pare.sock"), "chan-1", "/tmp")
+    pane = app._build_uart_pane()
+    assert isinstance(pane.source, McpConsoleSource)
+    assert pane.source.endpoint == "http://100.97.133.126:9102/mcp"
+    assert "fake" not in StatusBar().render_for([pane]).lower()
+
+
+def test_status_bar_labels_a_fake_source_pane_as_fake():
+    """Honest status bar: a fake-backed pane says `fake`, not `ok` -- a
+    TUI with no reachable hardware must be distinguishable from a live
+    one at a glance. A pane built without the flag renders exactly as
+    before (the existing difference-only tests pin that)."""
+    from pare.tui.panes.uart import UartPane
+    from pare.tui.sources.fake_console import FakeConsoleSource
+    from pare.tui.widgets.statusbar import StatusBar
+
+    live = UartPane(source=FakeConsoleSource())
+    fake = UartPane(source=FakeConsoleSource(), fake=True)
+
+    live_text = StatusBar().render_for([live])
+    fake_text = StatusBar().render_for([fake])
+
+    assert fake_text != live_text
+    assert "fake" in fake_text.lower()
+
+
+# --- hardware_endpoint resolution (env var -> workers.yaml -> None) ---
+
+
+def test_hardware_endpoint_env_var_wins_over_workers_yaml(tmp_path):
+    """The operator's explicit env var beats whatever the registry says."""
+    from pare.tui.app import hardware_endpoint
+
+    (tmp_path / "workers.yaml").write_text(
+        "workers:\n  hardware:\n    endpoint: http://from-yaml:9102/mcp\n"
+    )
+    env = {"PARE_TUI_HARDWARE_ENDPOINT": "http://from-env:9102/mcp"}
+    assert hardware_endpoint(env, repo_root=tmp_path) == "http://from-env:9102/mcp"
+
+
+def test_hardware_endpoint_empty_env_var_falls_through_to_yaml(tmp_path):
+    """An empty env var is unset, as it was before the fallback existed."""
+    from pare.tui.app import hardware_endpoint
+
+    (tmp_path / "workers.yaml").write_text(
+        "workers:\n  hardware:\n    endpoint: http://from-yaml:9102/mcp\n"
+    )
+    env = {"PARE_TUI_HARDWARE_ENDPOINT": ""}
+    assert hardware_endpoint(env, repo_root=tmp_path) == "http://from-yaml:9102/mcp"
+
+
+def test_hardware_endpoint_reads_the_workers_yaml_hardware_entry(tmp_path):
+    """No env var: the `hardware` entry's `endpoint` in workers.yaml is the
+    pane's console source -- the bench Pi case without an extra env var."""
+    from pare.tui.app import hardware_endpoint
+
+    (tmp_path / "workers.yaml").write_text(
+        "workers:\n  hardware:\n    endpoint: http://from-yaml:9102/mcp\n"
+    )
+    assert hardware_endpoint({}, repo_root=tmp_path) == "http://from-yaml:9102/mcp"
+
+
+def test_hardware_endpoint_explicit_workers_yaml_path_overrides_the_root(tmp_path):
+    """PARE_WORKERS_YAML_PATH, like resolve_spawn_cwd, points at the
+    operator's chosen registry file instead of <root>/workers.yaml."""
+    from pare.tui.app import hardware_endpoint
+
+    (tmp_path / "workers.yaml").write_text(
+        "workers:\n  hardware:\n    endpoint: http://from-root:9102/mcp\n"
+    )
+    alt = tmp_path / "alt.yaml"
+    alt.write_text("workers:\n  hardware:\n    endpoint: http://from-alt:9102/mcp\n")
+    env = {"PARE_WORKERS_YAML_PATH": str(alt)}
+    assert hardware_endpoint(env, repo_root=tmp_path) == "http://from-alt:9102/mcp"
+
+
+def test_hardware_endpoint_without_any_yaml_is_none(tmp_path):
+    """No env var, no workers.yaml: None -- the caller goes to the fake."""
+    from pare.tui.app import hardware_endpoint
+
+    assert hardware_endpoint({}, repo_root=tmp_path) is None
+
+
+def test_hardware_endpoint_unparseable_yaml_is_none(tmp_path):
+    """A broken registry file must not crash the pane build -- the pane
+    falls back to the fake; the daemon is the process that validates the
+    registry for real."""
+    from pare.tui.app import hardware_endpoint
+
+    (tmp_path / "workers.yaml").write_text("workers:\n  hardware:\n    endpoint: [1,\n")
+    assert hardware_endpoint({}, repo_root=tmp_path) is None
+
+
+def test_hardware_endpoint_without_a_hardware_entry_is_none(tmp_path):
+    """A registry without the `hardware` entry resolves to None, not an
+    error."""
+    from pare.tui.app import hardware_endpoint
+
+    (tmp_path / "workers.yaml").write_text(
+        "workers:\n  other:\n    endpoint: http://not-hardware:9102/mcp\n"
+    )
+    assert hardware_endpoint({}, repo_root=tmp_path) is None
+
+
+def test_hardware_endpoint_non_string_endpoint_is_none(tmp_path):
+    """A `hardware` entry whose `endpoint` is not a string is not a usable
+    endpoint: None, not an error."""
+    from pare.tui.app import hardware_endpoint
+
+    (tmp_path / "workers.yaml").write_text(
+        "workers:\n  hardware:\n    endpoint: 9102\n"
+    )
+    assert hardware_endpoint({}, repo_root=tmp_path) is None
 
 
 # --- Daemon auto-spawn wiring (plan 2026-09-20-daemon-auto-spawn, Task 3) ---
